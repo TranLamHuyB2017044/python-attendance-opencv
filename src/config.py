@@ -19,12 +19,14 @@ LOGS_DIR = PROJECT_ROOT / "logs"
 DATA_DIR = PROJECT_ROOT / "data"
 EMBEDDINGS_DIR = PROJECT_ROOT / "embeddings"
 MODELS_DIR = PROJECT_ROOT / "models"
+CAPTURES_DIR = PROJECT_ROOT / "data" / "captures"
 
 # Create directories if they don't exist
 LOGS_DIR.mkdir(exist_ok=True)
 DATA_DIR.mkdir(exist_ok=True)
 EMBEDDINGS_DIR.mkdir(exist_ok=True)
 MODELS_DIR.mkdir(exist_ok=True)
+CAPTURES_DIR.mkdir(parents=True, exist_ok=True)
 
 
 class CameraConfig:
@@ -59,6 +61,8 @@ class RecognitionConfig:
     
     THRESHOLD: float = float(os.getenv("RECOGNITION_THRESHOLD", "0.4"))
     EMBEDDING_DIM: int = int(os.getenv("EMBEDDING_DIM", "512"))
+    TEST_MODE: bool = os.getenv("TEST_MODE", "false").lower() == "true"
+    COOLDOWN_SECONDS: int = int(os.getenv("DETECTION_COOLDOWN", "3600")) # 1 hour default
 
 
 class QdrantConfig:
@@ -73,8 +77,9 @@ class QdrantConfig:
 class ApiConfig:
     """FastAPI configuration."""
     
-    HOST: str = os.getenv("API_HOST", "0.0.0.0")
+    HOST: str = os.getenv("API_HOST", "127.0.0.1")
     PORT: int = int(os.getenv("API_PORT", "8000"))
+    BASE_URL: str = os.getenv("BASE_URL", f"http://{HOST}:{PORT}")
 
 
 class LogConfig:
@@ -90,6 +95,7 @@ __all__ = [
     "PROJECT_ROOT",
     "LOGS_DIR",
     "DATA_DIR",
+    "CAPTURES_DIR",
     "EMBEDDINGS_DIR",
     "MODELS_DIR",
     "CameraConfig",

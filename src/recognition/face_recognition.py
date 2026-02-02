@@ -75,28 +75,41 @@ class FaceRecognition:
 
     def draw_faces(self, frame: np.ndarray, faces: List[Any]) -> np.ndarray:
         """
-        Draw bounding boxes and landmarks on the frame.
-        
-        Args:
-            frame: Input image
-            faces: List of Face objects from detect_and_extract
-            
-        Returns:
-            Image with drawing
+        Draw bounding boxes and detailed metadata on the frame.
         """
         res_frame = frame.copy()
         for face in faces:
             bbox = face.bbox.astype(int)
-            # Draw rectangle
-            cv2.rectangle(res_frame, (bbox[0], bbox[1]), (bbox[2], bbox[3]), (0, 255, 0), 2)
+            # Draw green rectangle for recognized faces, yellow for unknown
+            is_known = getattr(face, 'name', 'Unknown') != "Unknown"
+            color = (0, 255, 0) if is_known else (0, 255, 255)
             
-            # Draw identification info if available (e.g., name after matching)
+            cv2.rectangle(res_frame, (bbox[0], bbox[1]), (bbox[2], bbox[3]), color, 2)
+            
+            # Display information
             if hasattr(face, 'name'):
-                name = face.name
+                y_offset = bbox[1] - 10
+                
+                # Main Label: Name (Score)
                 score = getattr(face, 'score', 0.0)
-                label = f"{name} ({score:.2f})"
-                cv2.putText(res_frame, label, (bbox[0], bbox[1] - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                if score is None: score = 0.0
+                label = f"{face.name} ({score:.2f})"
+                cv2.putText(res_frame, label, (bbox[0], y_offset),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                
+                if is_known:
+                    # Metadata lines
+                    meta_info = [
+                        f"ID: {face.user_id}",
+                        f"N-sinh: {getattr(face, 'birthday', 'N/A')}",
+                        f"Gio: {getattr(face, 'detect_time', '')}",
+                        f"Mau: {getattr(face, 'vector_count', 0)}"
+                    ]
+                    
+                    for i, text in enumerate(meta_info):
+                        # Draw below the box
+                        cv2.putText(res_frame, text, (bbox[0], bbox[3] + 20 + (i * 20)),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
                 
         return res_frame
 

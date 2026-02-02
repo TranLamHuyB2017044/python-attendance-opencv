@@ -8,7 +8,8 @@ import io
 
 from src.recognition.face_recognition import FaceRecognition
 from src.attendance.qdrant_db import QdrantAttendanceManager
-from src.config import ApiConfig
+from src.config import ApiConfig, CAPTURES_DIR
+from flask import send_from_directory
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
@@ -22,6 +23,11 @@ qdrant_mgr = QdrantAttendanceManager()
 def health_check():
     """Health check endpoint."""
     return jsonify({"status": "ok", "message": "Face Attendance API is running"}), 200
+
+@app.route("/captures/<path:filename>")
+def get_capture(filename):
+    """Serve captured detection images."""
+    return send_from_directory(CAPTURES_DIR, filename)
 
 @app.route("/enroll", methods=["POST"])
 def enroll_user():
