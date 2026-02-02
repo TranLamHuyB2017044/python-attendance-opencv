@@ -1,0 +1,17 @@
+# Core dependencies
+opencv-python==4.10.0.84
+numpy==1.26.4
+
+# CPU Inference engine (Install this first)
+onnxruntime==1.19.2
+
+# Face recognition (Requires C++ Builtools if wheel not found)
+insightface==0.7.3
+
+# Utilities
+loguru==0.7.2
+python-dotenv==1.0.1
+tqdm==4.66.5
+scikit-learn==1.5.2
+Pillow==10.4.0
+qdrant-client>=1.10.1
