@@ -83,8 +83,6 @@ class FaceTracker:
                                 f_data['status'] = 'RECOGNIZED'
                                 f_data['user_data'] = user_data
                                 self.user_cooldowns[user_id] = current_time
-                                voice_mgr.speak(f"Xin cảm ơn {user_name}")
-                                
                                 # Capture and log
                                 img_url = None
                                 if frame is not None:
@@ -92,13 +90,18 @@ class FaceTracker:
                                     img_path = str(CAPTURES_DIR / img_name)
                                     cv2.imwrite(img_path, frame)
                                     img_url = f"{ApiConfig.BASE_URL}/captures/{img_name}"
-                                sqlite_db.log_attendance(user_id, user_name, img_url)
+
+                                status = sqlite_db.log_attendance(user_id, user_name, img_url, frame=frame)
+                                if status == 'IN':
+                                    voice_mgr.speak(f"{user_name} đã vào")
+                                elif status == 'OUT':
+                                    voice_mgr.speak(f"{user_name} đã ra")
+                                else:
+                                    voice_mgr.speak(f"Xin cảm ơn {user_name}")
                         else:
                             f_data['status'] = 'RECOGNIZED'
                             f_data['user_data'] = user_data
                             self.user_cooldowns[user_id] = current_time
-                            voice_mgr.speak(f"Xin cảm ơn {user_name}")
-                            
                             # Capture and log
                             img_url = None
                             if frame is not None:
@@ -106,7 +109,14 @@ class FaceTracker:
                                 img_path = str(CAPTURES_DIR / img_name)
                                 cv2.imwrite(img_path, frame)
                                 img_url = f"{ApiConfig.BASE_URL}/captures/{img_name}"
-                            sqlite_db.log_attendance(user_id, user_name, img_url)
+                                
+                            status = sqlite_db.log_attendance(user_id, user_name, img_url, frame=frame)
+                            if status == 'IN':
+                                voice_mgr.speak(f"{user_name} đã vào")
+                            elif status == 'OUT':
+                                voice_mgr.speak(f"{user_name} đã ra")
+                            else:
+                                voice_mgr.speak(f"Xin cảm ơn {user_name}")
                         
                         f_data['unknown_attempts'] = 0 # Reset on success
                     
@@ -116,6 +126,16 @@ class FaceTracker:
                         f_data['last_attempt_time'] = current_time
                         f_data['user_data'] = user_data
                         
+                        # Capture and log failure
+                        img_url = None
+                        if frame is not None:
+                            img_name = f"unknown_{int(current_time)}.jpg"
+                            img_path = str(CAPTURES_DIR / img_name)
+                            cv2.imwrite(img_path, frame)
+                            img_url = f"{ApiConfig.BASE_URL}/captures/{img_name}"
+                        
+                        sqlite_db.log_attendance("Unknown", "Người lạ", img_url, status="FAILED", frame=frame)
+
                         if f_data['unknown_attempts'] < 3:
                             f_data['status'] = 'RETRY_WAIT'
                             voice_mgr.speak("Xin vui lòng thử lại")

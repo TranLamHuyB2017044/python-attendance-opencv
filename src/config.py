@@ -74,6 +74,15 @@ class QdrantConfig:
     COLLECTION_NAME: str = os.getenv("QDRANT_COLLECTION", "face_attendance")
 
 
+class AuthServiceConfig:
+    """Authentication Service configuration."""
+    
+    BASE_URL: str = os.getenv("AUTH_SERVICE_URL", "https://auth.bittechx.cloud")
+    API_KEY: str = os.getenv("GROUP_AUTH_KEY", "dwX1S5cHAPDYo6Gom2fv8F3D7rNZqPu")
+    SYSTEM_ID: str = os.getenv("SYSTEM_ID", "attendance_system")
+    SYSTEM_REGISTER: str = os.getenv("SYSTEM_REGISTER", "")
+
+
 class ApiConfig:
     """FastAPI configuration."""
     
@@ -104,4 +113,5 @@ __all__ = [
     "QdrantConfig",
     "ApiConfig",
     "LogConfig",
+    "AuthServiceConfig",
 ]

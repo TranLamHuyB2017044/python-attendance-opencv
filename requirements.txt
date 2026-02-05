@@ -19,3 +19,5 @@ pyttsx3==2.90
 pypiwin32==223; sys_platform == 'win32'
 ntplib==0.4.0
 pytz==2024.1
+# git+https://github.com/TranLamHuyB2017044/bittech-auth-sdk.git@develop
+-e D:/WorkSpace/Bittech_Project/bittech-auth-sdk

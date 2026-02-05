@@ -9,7 +9,8 @@ import io
 from src.recognition.face_recognition import FaceRecognition
 from src.attendance.qdrant_db import QdrantAttendanceManager
 from src.config import ApiConfig, CAPTURES_DIR
-from flask import send_from_directory
+from flask import send_from_directory, Response
+from src.attendance.attendance_db import db as sqlite_db
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
@@ -142,7 +143,39 @@ def recognize_face():
         }), 200
 
     except Exception as e:
-        logger.error(f"Error in recognize_face: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route("/logs", methods=["GET"])
+def get_logs():
+    """Get list of attendance logs."""
+    try:
+        limit = request.args.get("limit", default=100, type=int)
+        logs = sqlite_db.get_all_logs(limit=limit)
+        
+        # Add a field for the image API URL to each log
+        for log in logs:
+            log["image_api_url"] = f"{request.host_url.rstrip('/')}/logs/{log['id']}/image"
+            
+        return jsonify({
+            "status": "success",
+            "count": len(logs),
+            "logs": logs
+        }), 200
+    except Exception as e:
+        logger.error(f"Error in get_logs: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route("/logs/<int:log_id>/image", methods=["GET"])
+def get_log_image_api(log_id):
+    """Serve the compressed image from the database for a specific log."""
+    try:
+        image_bytes = sqlite_db.get_log_image(log_id)
+        if not image_bytes:
+            return jsonify({"status": "error", "message": "Image not found"}), 404
+        
+        return Response(image_bytes, mimetype='image/webp')
+    except Exception as e:
+        logger.error(f"Error in get_log_image_api: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == "__main__":

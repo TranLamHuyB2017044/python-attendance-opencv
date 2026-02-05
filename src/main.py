@@ -13,8 +13,9 @@ from src.utils.logger import setup_logger
 from src.camera.rtsp_camera import RTSPCamera
 from src.recognition.face_recognition import FaceRecognition
 from src.attendance.qdrant_db import QdrantAttendanceManager
+from src.attendance.attendance_db import db as sqlite_db
 from src.recognition.tracker import FaceTracker
-from src.ui.app_ui import AttendanceUI, STATE_MENU, STATE_DETECT, STATE_ENROLL_CAM, STATE_ENROLL_UPLOAD, STATE_EDIT, STATE_LIST
+from src.ui.app_ui import AttendanceUI, STATE_MENU, STATE_DETECT, STATE_ENROLL_CAM, STATE_ENROLL_UPLOAD, STATE_EDIT, STATE_LIST, STATE_HISTORY, STATE_HKB_LIST
 
 
 def enroll_from_camera(camera, face_rec, attendance):
@@ -68,14 +69,22 @@ def enroll_from_camera(camera, face_rec, attendance):
                 
         elif key == ord('c'):
             logger.warning("Enrollment aborted.")
-            cv2.destroyWindow("Enrollment Mode")
+            cv2.destroyWindow("Che do Dang ky")
             return
 
-    cv2.destroyWindow("Enrollment Mode")
-    
     if len(samples) >= 3:
         attendance.upsert_user(user_name, user_id, birthday, samples)
         logger.success(f"Da dang ky: {user_name} (ID: {user_id})")
+        
+        # Show success message
+        from tkinter import messagebox
+        import tkinter as tk
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showinfo("Thành công", f"Đã đăng ký thành công nhân viên: {user_name} (ID: {user_id})")
+        root.destroy()
+    
+    cv2.destroyWindow("Che do Dang ky")
 
 
 def enroll_by_upload(face_rec, attendance):
@@ -103,6 +112,14 @@ def enroll_by_upload(face_rec, attendance):
     if samples:
         attendance.upsert_user(u_name, u_id, u_bday, samples)
         logger.success(f"Enrolled {u_name} via upload.")
+        
+        # Show success message
+        from tkinter import messagebox
+        import tkinter as tk
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showinfo("Thành công", f"Đã đăng ký (Upload) thành công nhân viên: {u_name} (ID: {u_id})")
+        root.destroy()
 
 
 def main():
@@ -124,6 +141,12 @@ def main():
     
     fps_start_time = time.time()
     fps_counter, fps = 0, 0
+
+    display_frame = ui.draw_main_menu()
+    cv2.imshow(win_name, display_frame)
+    if not ui.show_login_dialog():
+        logger.warning("Truy cap bi tu choi hoặc ứng dụng bị đóng.")
+        return
 
     try:
         while True:
@@ -154,10 +177,11 @@ def main():
 
             elif ui.current_state == STATE_ENROLL_CAM:
                 if not camera.is_connected: camera.connect()
-                cv2.destroyWindow(win_name)
+                
+                # Biến cờ để báo hiệu quay lại menu
                 enroll_from_camera(camera, face_rec, attendance)
+                
                 ui.current_state = STATE_MENU
-                cv2.namedWindow(win_name)
                 continue
 
             elif ui.current_state == STATE_ENROLL_UPLOAD:
@@ -196,6 +220,17 @@ def main():
             elif ui.current_state == STATE_LIST:
                 users = attendance.get_all_users()
                 ui.show_user_list_ui(users)
+                ui.current_state = STATE_MENU
+                continue
+
+            elif ui.current_state == STATE_HISTORY:
+                logs = sqlite_db.get_todays_logs()
+                ui.show_attendance_logs_ui(logs)
+                ui.current_state = STATE_MENU
+                continue
+
+            elif ui.current_state == STATE_HKB_LIST:
+                ui.show_hkb_connections_ui()
                 ui.current_state = STATE_MENU
                 continue
 
