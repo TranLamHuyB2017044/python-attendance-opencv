@@ -13,24 +13,25 @@ from src.utils.logger import setup_logger
 from src.camera.rtsp_camera import RTSPCamera
 from src.recognition.face_recognition import FaceRecognition
 from src.attendance.qdrant_db import QdrantAttendanceManager
-from src.attendance.attendance_db import db as sqlite_db
+from src.attendance.mongodb_mgr import mongo_db
 from src.recognition.tracker import FaceTracker
-from src.ui.app_ui import AttendanceUI, STATE_MENU, STATE_DETECT, STATE_ENROLL_CAM, STATE_ENROLL_UPLOAD, STATE_EDIT, STATE_LIST, STATE_HISTORY, STATE_HKB_LIST
+from src.config import MongoDbConfig
+from src.ui.app_ui import AttendanceUI, STATE_MENU, STATE_DETECT, STATE_ENROLL_CAM, STATE_ENROLL_UPLOAD, STATE_EDIT, STATE_LIST, STATE_HISTORY, STATE_HKB_LIST, STATE_COMPANY, STATE_CLOUD_USER, STATE_LOGOUT
 
 
-def enroll_from_camera(camera, face_rec, attendance):
+def enroll_from_camera(camera, face_rec, attendance, ui):
     """
     Experimental function to capture 3-5 samples from camera for enrollment.
     """
     logger.info("Bat dau dang ky qua Camera. Vui long nhin vao camera.")
     
     # Mở form nhập liệu UI (không cần nút upload)
-    user_info = AttendanceUI.get_user_form(include_upload=False)
+    user_info = AttendanceUI.get_user_form(include_upload=False, session_role=ui.session_role, mongo_db=mongo_db)
     if not user_info:
         logger.warning("Enrollment cancelled: No user information provided.")
         return
     
-    user_id, user_name, birthday, _ = user_info
+    user_id, user_name, birthday, _, selected_cid = user_info
 
     samples = []
     logger.info(f"Collecting 3-5 samples for '{user_name}' (ID: {user_id}). Press 's' to capture a sample, 'c' to cancel.")
@@ -72,9 +73,16 @@ def enroll_from_camera(camera, face_rec, attendance):
             cv2.destroyWindow("Che do Dang ky")
             return
 
+    target_company = MongoDbConfig.COMPANY_ID
+    # Use selected company if admin, otherwise session company
+    if ui.session_role == 'admin' and selected_cid:
+        target_company = selected_cid
+    elif ui.session_company_id:
+        target_company = ui.session_company_id
+
     if len(samples) >= 3:
-        attendance.upsert_user(user_name, user_id, birthday, samples)
-        logger.success(f"Da dang ky: {user_name} (ID: {user_id})")
+        attendance.upsert_user(user_name, user_id, birthday, samples, company_id=target_company)
+        logger.success(f"Da dang ky: {user_name} (ID: {user_id}) cho cong ty: {target_company}")
         
         # Show success message
         from tkinter import messagebox
@@ -87,17 +95,17 @@ def enroll_from_camera(camera, face_rec, attendance):
     cv2.destroyWindow("Che do Dang ky")
 
 
-def enroll_by_upload(face_rec, attendance):
+def enroll_by_upload(face_rec, attendance, ui):
     """
     Enroll users by uploading images from disk.
     """
     # 1. Mở form nhập liệu UI TRƯỚC (có nút chọn ảnh bên trong)
-    user_info = AttendanceUI.get_user_form(include_upload=True)
+    user_info = AttendanceUI.get_user_form(include_upload=True, session_role=ui.session_role, mongo_db=mongo_db)
     if not user_info:
         logger.warning("Enrollment cancelled: No user information provided.")
         return
         
-    u_id, u_name, u_bday, file_paths = user_info
+    u_id, u_name, u_bday, file_paths, selected_cid = user_info
     
     samples = []
     for path in file_paths:
@@ -110,8 +118,14 @@ def enroll_by_upload(face_rec, attendance):
             logger.info(f"Extracted from: {path}")
 
     if samples:
-        attendance.upsert_user(u_name, u_id, u_bday, samples)
-        logger.success(f"Enrolled {u_name} via upload.")
+        target_company = MongoDbConfig.COMPANY_ID
+        if ui.session_role == 'admin' and selected_cid:
+            target_company = selected_cid
+        elif ui.session_company_id:
+            target_company = ui.session_company_id
+            
+        attendance.upsert_user(u_name, u_id, u_bday, samples, company_id=target_company)
+        logger.success(f"Enrolled {u_name} via upload for company: {target_company}")
         
         # Show success message
         from tkinter import messagebox
@@ -137,7 +151,10 @@ def main():
         return
 
     win_name = "He thong Diem danh Khuon mat"
-    cv2.namedWindow(win_name)
+    cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(win_name, 1280, 720) # Default larger size
+    
+    is_fullscreen = False
     
     fps_start_time = time.time()
     fps_counter, fps = 0, 0
@@ -150,9 +167,12 @@ def main():
 
     try:
         while True:
+            # Get actual window size for responsive drawing
+            _, _, cur_w, cur_h = cv2.getWindowImageRect(win_name)
+            
             if ui.current_state == STATE_MENU:
-                display_frame = ui.draw_main_menu()
-                cv2.setMouseCallback(win_name, ui.handle_menu_click, param=(800, 600))
+                display_frame = ui.draw_main_menu(w=cur_w, h=cur_h)
+                cv2.setMouseCallback(win_name, ui.handle_menu_click, param=(cur_w, cur_h))
                 
             elif ui.current_state == STATE_DETECT:
                 cv2.setMouseCallback(win_name, lambda *args: None)
@@ -179,24 +199,38 @@ def main():
                 if not camera.is_connected: camera.connect()
                 
                 # Biến cờ để báo hiệu quay lại menu
-                enroll_from_camera(camera, face_rec, attendance)
+                enroll_from_camera(camera, face_rec, attendance, ui)
                 
                 ui.current_state = STATE_MENU
                 continue
 
             elif ui.current_state == STATE_ENROLL_UPLOAD:
-                enroll_by_upload(face_rec, attendance)
+                enroll_by_upload(face_rec, attendance, ui)
                 ui.current_state = STATE_MENU
                 continue
 
             elif ui.current_state == STATE_EDIT:
-                # 1. Nhập ID cần sửa
-                u_id = AttendanceUI.get_id_form()
+                # 1. Determine target company
+                target_company = ui.session_company_id
+                
+                # If admin, pick company first
+                if ui.session_role == "admin":
+                    companies = mongo_db.get_all_companies()
+                    picked = ui.pick_company_ui(companies)
+                    if picked:
+                        target_company = picked
+                    else:
+                        ui.current_state = STATE_MENU
+                        continue
+                
+                # 2. Pick User from that company
+                users = attendance.get_all_users(company_id=target_company)
+                u_id = ui.pick_user_ui(users)
+                
                 if u_id:
-                    # 2. Tìm thông tin trong DB
+                    # 3. Get user info and show edit form
                     user_info = attendance.get_user_info(u_id)
                     if user_info:
-                        # 3. Hiện Form chỉnh sửa
                         edit_res = AttendanceUI.get_edit_user_form(
                             user_info["user_id"], 
                             user_info["user_name"], 
@@ -205,32 +239,70 @@ def main():
                         if edit_res:
                             if edit_res["delete"]:
                                 attendance.delete_user(u_id)
+                                logger.success(f"Da xoa nhan vien ID: {u_id}")
                             else:
                                 attendance.update_user_info(u_id, edit_res["name"], edit_res["bday"])
-                    else:
-                        from tkinter import messagebox
-                        tk_root = tk.Tk()
-                        tk_root.withdraw()
-                        messagebox.showerror("Lỗi", f"Không tìm thấy nhân viên có ID: {u_id}")
-                        tk_root.destroy()
+                                logger.success(f"Da cap nhat thong tin nhan vien ID: {u_id}")
                 
                 ui.current_state = STATE_MENU
                 continue
 
             elif ui.current_state == STATE_LIST:
-                users = attendance.get_all_users()
+                # Logic phân quyền xem danh sách
+                target_company = ui.session_company_id
+                
+                # Nếu là admin, cho phép chọn công ty
+                if ui.session_role == "admin":
+                    companies = mongo_db.get_all_companies()
+                    picked = ui.pick_company_ui(companies)
+                    if picked:
+                        target_company = picked
+                    else:
+                        ui.current_state = STATE_MENU
+                        continue
+                
+                users = attendance.get_all_users(company_id=target_company)
                 ui.show_user_list_ui(users)
                 ui.current_state = STATE_MENU
                 continue
 
             elif ui.current_state == STATE_HISTORY:
-                logs = sqlite_db.get_todays_logs()
-                ui.show_attendance_logs_ui(logs)
+                # Filter history by company
+                logs = mongo_db.get_todays_logs(company_id=ui.session_company_id)
+                
+                # Format for display (The UI expects a list of tuples/lists or similar for sqlite legacy)
+                # But since we switched to Cloud, let's pass dicts if adapted or use tuples
+                display_logs = []
+                for l in logs:
+                    display_logs.append((
+                        str(l["_id"]), l["user_id"], l["user_name"], 
+                        l["timestamp"], l["date"], l["status"], None
+                    ))
+                
+                ui.show_attendance_logs_ui(display_logs)
                 ui.current_state = STATE_MENU
                 continue
 
             elif ui.current_state == STATE_HKB_LIST:
                 ui.show_hkb_connections_ui()
+                ui.current_state = STATE_MENU
+                continue
+
+            elif ui.current_state == STATE_COMPANY:
+                ui.show_company_management_ui(mongo_db)
+                ui.current_state = STATE_MENU
+                continue
+
+            elif ui.current_state == STATE_CLOUD_USER:
+                ui.show_user_management_ui(mongo_db)
+                ui.current_state = STATE_MENU
+                continue
+
+            elif ui.current_state == STATE_LOGOUT:
+                logger.info("Logging out...")
+                if not ui.show_login_dialog():
+                    logger.warning("Logout/Login cancelled. Exiting.")
+                    break
                 ui.current_state = STATE_MENU
                 continue
 
@@ -241,6 +313,12 @@ def main():
             elif key == ord('m'):
                 ui.current_state = STATE_MENU
                 camera.disconnect()
+            elif key == ord('f'): # F key to toggle full screen
+                is_fullscreen = not is_fullscreen
+                if is_fullscreen:
+                    cv2.setWindowProperty(win_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+                else:
+                    cv2.setWindowProperty(win_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_NORMAL)
 
     except Exception as e:
         logger.error(f"Error: {e}")

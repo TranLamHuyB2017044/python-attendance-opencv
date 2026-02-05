@@ -99,6 +99,13 @@ class LogConfig:
     ENABLE_CONSOLE: bool = os.getenv("ENABLE_CONSOLE_LOG", "true").lower() == "true"
 
 
+class MongoDbConfig:
+    """MongoDB configuration."""
+    CONNECTION_STRING: str = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
+    DATABASE_NAME: str = os.getenv("MONGODB_DB", "face_attendance_db")
+    COMPANY_ID: str = os.getenv("COMPANY_ID", "default_company")
+
+
 # Export all configs
 __all__ = [
     "PROJECT_ROOT",
@@ -114,4 +121,5 @@ __all__ = [
     "ApiConfig",
     "LogConfig",
     "AuthServiceConfig",
+    "MongoDbConfig",
 ]

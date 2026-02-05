@@ -10,7 +10,7 @@ from src.recognition.face_recognition import FaceRecognition
 from src.attendance.qdrant_db import QdrantAttendanceManager
 from src.config import ApiConfig, CAPTURES_DIR
 from flask import send_from_directory, Response
-from src.attendance.attendance_db import db as sqlite_db
+from src.attendance.mongodb_mgr import mongo_db
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
@@ -147,29 +147,42 @@ def recognize_face():
 
 @app.route("/logs", methods=["GET"])
 def get_logs():
-    """Get list of attendance logs."""
+    """Get list of attendance logs from MongoDB Cloud."""
     try:
+        company_id = request.args.get("company_id") # Filter by company if provided
         limit = request.args.get("limit", default=100, type=int)
-        logs = sqlite_db.get_all_logs(limit=limit)
         
-        # Add a field for the image API URL to each log
+        # Fetch from MongoDB
+        logs = mongo_db.get_todays_logs(company_id=company_id)
+        
+        # Convert MongoDB objects to Serializable dicts
+        formatted_logs = []
         for log in logs:
-            log["image_api_url"] = f"{request.host_url.rstrip('/')}/logs/{log['id']}/image"
+            formatted_logs.append({
+                "id": str(log["_id"]),
+                "user_id": log["user_id"],
+                "user_name": log["user_name"],
+                "timestamp": log["timestamp"],
+                "date": log["date"],
+                "status": log["status"],
+                "company_id": log.get("company_id"),
+                "image_api_url": f"{request.host_url.rstrip('/')}/logs/{str(log['_id'])}/image"
+            })
             
         return jsonify({
             "status": "success",
-            "count": len(logs),
-            "logs": logs
+            "count": len(formatted_logs),
+            "logs": formatted_logs[:limit]
         }), 200
     except Exception as e:
         logger.error(f"Error in get_logs: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
-@app.route("/logs/<int:log_id>/image", methods=["GET"])
+@app.route("/logs/<log_id>/image", methods=["GET"])
 def get_log_image_api(log_id):
-    """Serve the compressed image from the database for a specific log."""
+    """Serve the WebP image from MongoDB for a specific log."""
     try:
-        image_bytes = sqlite_db.get_log_image(log_id)
+        image_bytes = mongo_db.get_log_image(log_id)
         if not image_bytes:
             return jsonify({"status": "error", "message": "Image not found"}), 404
         

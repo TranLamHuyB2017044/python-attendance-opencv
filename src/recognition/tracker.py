@@ -5,7 +5,7 @@ from typing import List, Dict, Any
 import cv2
 from src.config import RecognitionConfig, CAPTURES_DIR, ApiConfig
 from src.utils.voice_manager import voice_mgr
-from src.attendance.attendance_db import db as sqlite_db
+from src.attendance.mongodb_mgr import mongo_db
 
 class FaceTracker:
     """
@@ -91,7 +91,8 @@ class FaceTracker:
                                     cv2.imwrite(img_path, frame)
                                     img_url = f"{ApiConfig.BASE_URL}/captures/{img_name}"
 
-                                status = sqlite_db.log_attendance(user_id, user_name, img_url, frame=frame)
+                                # Log to Cloud (Main)
+                                status = mongo_db.log_attendance(user_id, user_name, frame=frame)
                                 if status == 'IN':
                                     voice_mgr.speak(f"{user_name} đã vào")
                                 elif status == 'OUT':
@@ -110,7 +111,7 @@ class FaceTracker:
                                 cv2.imwrite(img_path, frame)
                                 img_url = f"{ApiConfig.BASE_URL}/captures/{img_name}"
                                 
-                            status = sqlite_db.log_attendance(user_id, user_name, img_url, frame=frame)
+                            status = mongo_db.log_attendance(user_id, user_name, frame=frame)
                             if status == 'IN':
                                 voice_mgr.speak(f"{user_name} đã vào")
                             elif status == 'OUT':
@@ -134,7 +135,7 @@ class FaceTracker:
                             cv2.imwrite(img_path, frame)
                             img_url = f"{ApiConfig.BASE_URL}/captures/{img_name}"
                         
-                        sqlite_db.log_attendance("Unknown", "Người lạ", img_url, status="FAILED", frame=frame)
+                        mongo_db.log_attendance("Unknown", "Người lạ", status="FAILED", frame=frame)
 
                         if f_data['unknown_attempts'] < 3:
                             f_data['status'] = 'RETRY_WAIT'

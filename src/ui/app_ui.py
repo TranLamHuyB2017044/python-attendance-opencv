@@ -11,6 +11,9 @@ STATE_EDIT = 4
 STATE_LIST = 5
 STATE_HISTORY = 6
 STATE_HKB_LIST = 7
+STATE_COMPANY = 8
+STATE_CLOUD_USER = 9
+STATE_LOGOUT = 10
 
 class AttendanceUI:
     """
@@ -19,6 +22,10 @@ class AttendanceUI:
     def __init__(self):
         self.current_state = STATE_MENU
         self.is_admin_logged_in = False
+        self.session_role = None # 'admin' or 'company'
+        self.session_company_id = None
+        self.session_username = None
+        self.last_w, self.last_h = 1280, 720 # Default
 
     def handle_menu_click(self, event, x, y, flags, param):
         """Handle mouse clicks for the menu."""
@@ -26,49 +33,64 @@ class AttendanceUI:
             w, h = param
             cX, cY = w // 2, h // 2
             
-            # Column 1 (Left)
-            col1_L, col1_R = cX - 310, cX - 10
-            # Column 2 (Right)
-            col2_L, col2_R = cX + 10, cX + 310
+            # Use ratios if window was resized
+            rW, rH = w / 800, h / 600 # Legacy base logic or dynamic
+            
+            # To simplify, we'll use the same dynamic logic as drawing
+            btn_w, btn_h = int(300 * (w/800)), int(60 * (h/600))
+            gap_x = int(10 * (w/800))
+            gap_y = int(20 * (h/600))
+            col1_L, col1_R = cX - btn_w - gap_x, cX - gap_x
+            col2_L, col2_R = cX + gap_x, cX + gap_x + btn_w
 
-            # BAT DAU (Col 1, Row 1)
-            if col1_L < x < col1_R and cY-80 < y < cY-20: 
+            # 0. DANG XUAT (Top Right)
+            if w - 160 < x < w - 20 and 15 < y < 65:
+                from tkinter import messagebox
+                if messagebox.askyesno("Đăng xuất", "Bạn có chắc chắn muốn đăng xuất?"):
+                    self.current_state = STATE_LOGOUT
+                    return
+
+            # 1. BAT DAU detection (Available to all)
+            if col1_L < x < col1_R and cY-btn_h-gap_y < y < cY-gap_y: 
                 self.current_state = STATE_DETECT
-                logger.info("UI: Switched to Detection Mode")
                 
-            # DANG KY CAM (Col 1, Row 2)
-            elif col1_L < x < col1_R and cY+20 < y < cY+80: 
-                self.current_state = STATE_ENROLL_CAM
-                logger.info("UI: Switched to Enrollment (Camera) Mode")
-                
-            # DANG KY FILE (Col 1, Row 3)
-            elif col1_L < x < col1_R and cY+120 < y < cY+180: 
-                self.current_state = STATE_ENROLL_UPLOAD
-                logger.info("UI: Switched to Enrollment (Upload) Mode")
-
-            # CHINH SUA (Col 2, Row 1)
-            elif col2_L < x < col2_R and cY-80 < y < cY-20: 
-                self.current_state = STATE_EDIT
-                logger.info("UI: Switched to Edit Mode")
-
-            # DANH SACH (Col 2, Row 2)
-            elif col2_L < x < col2_R and cY+20 < y < cY+80: 
+            # 2. DANH SACH (Available to all)
+            elif col2_L < x < col2_R and cY+gap_y < y < cY+gap_y+btn_h: 
                 self.current_state = STATE_LIST
-                logger.info("UI: Switched to List Mode")
 
-            # LICH SU (Col 2, Row 3)
-            elif col2_L < x < col2_R and cY+120 < y < cY+180: 
-                self.current_state = STATE_HISTORY
-                logger.info("UI: Switched to History Mode")
+            # 3. CHINH SUA (Available to all)
+            elif col2_L < x < col2_R and cY-btn_h-gap_y < y < cY-gap_y: 
+                self.current_state = STATE_EDIT
 
-            # KET NOI HKB (Bottom Center)
-            elif cX - 150 < x < cX + 150 and h - 80 < y < h - 20:
-                self.current_state = STATE_HKB_LIST
-                logger.info("UI: Switched to HKB Connection List")
+            # --- ADMIN & COMPANY RECOGNITION ACTIONS ---
+            if self.session_role in ['admin', 'company']:
+                # DANG KY CAM (Col 1, Row 2)
+                if col1_L < x < col1_R and cY+gap_y < y < cY+gap_y+btn_h: 
+                    self.current_state = STATE_ENROLL_CAM
+                # DANG KY FILE (Col 1, Row 3)
+                elif col1_L < x < col1_R and cY+gap_y*2+btn_h < y < cY+gap_y*2+btn_h*2: 
+                    self.current_state = STATE_ENROLL_UPLOAD
+                # LICH SU (Col 2, Row 3)
+                elif col2_L < x < col2_R and cY+gap_y*2+btn_h < y < cY+gap_y*2+btn_h*2: 
+                    self.current_state = STATE_HISTORY
 
-    def draw_main_menu(self):
-        """Draw a professional menu on a clean centered background."""
-        w, h = 800, 600
+            # --- ADMIN ONLY SYSTEM MANAGEMENT ---
+            if self.session_role == 'admin':
+                # --- ADMIN ONLY BOTTOM BAR ---
+                if h - int(84*(h/600)) < y < h - int(20*(h/600)):
+                    # 1. KET NOI HKB (Bottom Left)
+                    if cX - int(380*(w/800)) < x < cX - int(140*(w/800)):
+                        self.current_state = STATE_HKB_LIST
+                    # 2. QUAN LY USER (Bottom Center)
+                    elif cX - int(120*(w/800)) < x < cX + int(120*(w/800)):
+                        self.current_state = STATE_CLOUD_USER
+                    # 3. QUAN LY CONG TY (Bottom Right)
+                    elif cX + int(140*(w/800)) < x < cX + int(380*(w/800)): 
+                        self.current_state = STATE_COMPANY
+
+    def draw_main_menu(self, w=1280, h=720):
+        """Draw a professional menu responsive to window size."""
+        self.last_w, self.last_h = w, h
         frame = np.zeros((h, w, 3), dtype=np.uint8)
         
         # Background
@@ -77,73 +99,106 @@ class AttendanceUI:
         cX, cY = w // 2, h // 2
         
         # Title
-        cv2.putText(frame, "HE THONG DIEM DANH AI", (cX - 240, cY - 150),
-                    cv2.FONT_HERSHEY_DUPLEX, 1.2, (255, 255, 255), 2)
+        title_font_scale = w / 800 * 1.2
+        cv2.putText(frame, "HE THONG DIEM DANH AI", (cX - int(240 * (w/800)), cY - int(150 * (h/600))),
+                    cv2.FONT_HERSHEY_DUPLEX, title_font_scale, (255, 255, 255), 2)
 
         # Draw Columns Layout
-        col1_x = cX - 310
-        col2_x = cX + 10
+        btn_w, btn_h = int(300 * (w/800)), int(60 * (h/600))
+        gap_x = int(10 * (w/800))
+        gap_y = int(20 * (h/600))
+        
+        col1_x = cX - btn_w - gap_x
+        col2_x = cX + gap_x
 
         # --- Column 1 ---
-        # Button 1: Start System
-        cv2.rectangle(frame, (col1_x, cY - 80), (col1_x + 300, cY - 20), (40, 180, 40), -1)
-        cv2.putText(frame, "BAT DAU", (col1_x + 90, cY - 38),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        # Button 1: Start System (All)
+        cv2.rectangle(frame, (col1_x, cY - btn_h - gap_y), (col1_x + btn_w, cY - gap_y), (40, 180, 40), -1)
+        cv2.putText(frame, "BAT DAU", (col1_x + int(90 * (w/800)), cY - gap_y - int(18 * (h/600))),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8 * (w/800), (255, 255, 255), 2)
         
-        # Button 2: Enroll Camera
-        cv2.rectangle(frame, (col1_x, cY + 20), (col1_x + 300, cY + 80), (200, 120, 0), -1)
-        cv2.putText(frame, "DANG KY (CAM)", (col1_x + 50, cY + 62),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        # Enrollment Buttons (Available to Admin and Company Managers)
+        if self.session_role in ['admin', 'company']:
+            # Button 2: Enroll Camera
+            cv2.rectangle(frame, (col1_x, cY + gap_y), (col1_x + btn_w, cY + gap_y + btn_h), (200, 120, 0), -1)
+            cv2.putText(frame, "DANG KY (CAM)", (col1_x + int(50 * (w/800)), cY + gap_y + int(42 * (h/600))),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8 * (w/800), (255, 255, 255), 2)
+            
+            # Button 3: Enroll Upload
+            cv2.rectangle(frame, (col1_x, cY + gap_y*2 + btn_h), (col1_x + btn_w, cY + gap_y*2 + btn_h*2), (0, 100, 200), -1)
+            cv2.putText(frame, "DANG KY (FILE)", (col1_x + int(50 * (w/800)), cY + gap_y*2 + btn_h + int(42 * (h/600))),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8 * (w/800), (255, 255, 255), 2)
         
-        # Button 3: Enroll Upload
-        cv2.rectangle(frame, (col1_x, cY + 120), (col1_x + 300, cY + 180), (0, 100, 200), -1)
-        cv2.putText(frame, "DANG KY (FILE)", (col1_x + 50, cY + 162),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-        
-        # --- Column 2 ---
-        # Button 4: Edit
-        cv2.rectangle(frame, (col2_x, cY - 80), (col2_x + 300, cY - 20), (100, 100, 100), -1)
-        cv2.putText(frame, "CHINH SUA", (col2_x + 75, cY - 38),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        # Column 2
+        # Button 4: Edit (All)
+        cv2.rectangle(frame, (col2_x, cY - btn_h - gap_y), (col2_x + btn_w, cY - gap_y), (100, 100, 100), -1)
+        cv2.putText(frame, "CHINH SUA", (col2_x + int(75 * (w/800)), cY - gap_y - int(18 * (h/600))),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8 * (w/800), (255, 255, 255), 2)
 
-        # Button 5: List
-        cv2.rectangle(frame, (col2_x, cY + 20), (col2_x + 300, cY + 80), (150, 50, 150), -1)
-        cv2.putText(frame, "DANH SACH", (col2_x + 75, cY + 62),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        # Button 5: List (All)
+        cv2.rectangle(frame, (col2_x, cY + gap_y), (col2_x + btn_w, cY + gap_y + btn_h), (150, 50, 150), -1)
+        cv2.putText(frame, "DANH SACH", (col2_x + int(75 * (w/800)), cY + gap_y + int(42 * (h/600))),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8 * (w/800), (255, 255, 255), 2)
 
         # Button 6: History
-        cv2.rectangle(frame, (col2_x, cY + 120), (col2_x + 300, cY + 180), (100, 50, 0), -1)
-        cv2.putText(frame, "LICH SU", (col2_x + 90, cY + 162),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        cv2.rectangle(frame, (col2_x, cY + gap_y*2 + btn_h), (col2_x + btn_w, cY + gap_y*2 + btn_h*2), (100, 50, 0), -1)
+        cv2.putText(frame, "LICH SU", (col2_x + int(90 * (w/800)), cY + gap_y*2 + btn_h + int(42 * (h/600))),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8 * (w/800), (255, 255, 255), 2)
         
         # --- Instruction Table (Compact) ---
-        table_x, table_y = 30, 480
-        cv2.rectangle(frame, (table_x, table_y), (table_x + 200, table_y + 90), (60, 60, 60), -1)
-        cv2.rectangle(frame, (table_x, table_y), (table_x + 200, table_y + 90), (100, 100, 100), 1)
+        table_x, table_y = int(30 * (w/800)), int(480 * (h/600))
+        table_width, table_height = int(200 * (w/800)), int(90 * (h/600))
+        cv2.rectangle(frame, (table_x, table_y), (table_x + table_width, table_y + table_height), (60, 60, 60), -1)
+        cv2.rectangle(frame, (table_x, table_y), (table_x + table_width, table_y + table_height), (100, 100, 100), 1)
         
-        cv2.putText(frame, "PHIM TAT:", (table_x + 10, table_y + 20),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+        instruction_font_scale = 0.5 * (w/800)
+        instruction_line_height = int(15 * (h/600))
+        cv2.putText(frame, "PHIM TAT:", (table_x + int(10 * (w/800)), table_y + int(20 * (h/600))),
+                    cv2.FONT_HERSHEY_SIMPLEX, instruction_font_scale, (255, 255, 0), 1)
         
         instructions = ["Q: Thoat", "M: Menu", "S: Chup anh", "C: Huy bỏ"]
         for i, text in enumerate(instructions):
-            cv2.putText(frame, text, (table_x + 10, table_y + 40 + (i * 15)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+            cv2.putText(frame, text, (table_x + int(10 * (w/800)), table_y + int(40 * (h/600)) + (i * instruction_line_height)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4 * (w/800), (200, 200, 200), 1)
         
-        cv2.putText(frame, "Phat trien boi Biitech", (w - 180, h - 20),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (100, 100, 100), 1)
+        cv2.putText(frame, "Phat trien boi Biitech", (w - int(180 * (w/800)), h - int(20 * (h/600))),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4 * (w/800), (100, 100, 100), 1)
         
-        # New Button: Connect HKB
-        cv2.rectangle(frame, (cX - 150, h - 80), (cX + 150, h - 20), (0, 165, 255), -1)
-        cv2.putText(frame, "KET NOI HKB", (cX - 65, h - 38),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        # Bottom Management Buttons (Admin Only)
+        if self.session_role == 'admin':
+            # 1. Connect HKB (Left)
+            cv2.putText(frame, "KET NOI HKB", (cX - 355, h - 40),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+            # 2. Manage Users (Center)
+            cv2.rectangle(frame, (cX - 120, h - 84), (cX + 120, h - 20), (60, 60, 180), -1)
+            cv2.putText(frame, "QUAN LY USER", (cX - 95, h - 40),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+            # 3. Manage Company (Right)
+            cv2.rectangle(frame, (cX + 140, h - 84), (cX + 380, h - 20), (100, 50, 150), -1)
+            cv2.putText(frame, "QUAN LY CONG TY", (cX + 160, h - 40),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        
+        # User Info Display
+        user_label = f"User: {self.session_username} ({self.session_role})"
+        cv2.putText(frame, user_label, (20, h - 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4 * (w/800), (200, 200, 200), 1)
+
+        # Logout Button (Top Right)
+        logout_bg = (50, 50, 200) # Reddish-blue
+        cv2.rectangle(frame, (w - 160, 15), (w - 20, 65), logout_bg, -1)
+        cv2.rectangle(frame, (w - 160, 15), (w - 20, 65), (255, 255, 255), 1)
+        cv2.putText(frame, "DANG XUAT", (w - 150, 48),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6 * (w/800), (255, 255, 255), 2)
         
         return frame
 
     @staticmethod
-    def get_user_form(include_upload=False):
+    def get_user_form(include_upload=False, session_role=None, mongo_db=None):
         """
-        Opens a centered tkinter dialog to collect User ID, Name, Birthday, and optionally Photos.
-        Returns: (ID, Name, Birthday, file_paths) or None if cancelled.
+        Opens a centered tkinter dialog to collect User ID, Name, Birthday, Company, and optionally Photos.
+        Returns: (ID, Name, Birthday, file_paths, company_id) or None if cancelled.
         """
         import tkinter as tk
         from tkinter import messagebox, filedialog
@@ -152,7 +207,12 @@ class AttendanceUI:
         root.title("Form Đăng Ký Người Dùng")
         
         # Center the window
-        window_width, window_height = 350, 350 if include_upload else 250
+        # Dynamic height based on fields
+        base_h = 300
+        if include_upload: base_h += 100
+        if session_role == 'admin': base_h += 60
+        
+        window_width, window_height = 380, base_h
         screen_width = root.winfo_screenwidth()
         screen_height = root.winfo_screenheight()
         pos_x = (screen_width // 2) - (window_width // 2)
@@ -162,7 +222,7 @@ class AttendanceUI:
         root.attributes('-topmost', True)
         root.focus_force()
 
-        form_data = {"id": None, "name": None, "bday": None, "files": []}
+        form_data = {"id": None, "name": None, "bday": None, "files": [], "company_id": None}
         
         def on_select_files():
             paths = filedialog.askopenfilenames(
@@ -178,6 +238,17 @@ class AttendanceUI:
             u_name = entry_name.get().strip()
             u_bday = entry_bday.get().strip()
             
+            # Get company_id based on role or selection
+            if session_role == 'admin':
+                selected_cid = combo_cid.get()
+                if not selected_cid:
+                    messagebox.showwarning("!", "Vui lòng chọn Công ty")
+                    return
+                form_data["company_id"] = selected_cid
+            else:
+                # Default for non-admin will be handled in main or passed in session
+                form_data["company_id"] = None 
+
             if not u_id or not u_name:
                 messagebox.showwarning("Cảnh báo", "Vui lòng nhập ID và Họ tên!")
                 return
@@ -207,6 +278,17 @@ class AttendanceUI:
         entry_bday = tk.Entry(root, width=30)
         entry_bday.pack(pady=2)
 
+        if session_role == 'admin' and mongo_db:
+            from tkinter import ttk
+            tk.Label(root, text="Phân quyền Công ty *:").pack(pady=(5, 0))
+            companies = mongo_db.get_all_companies()
+            company_list = [c.get("company_id") for c in companies]
+            if "admin" not in company_list: company_list = ["admin"] + company_list
+            
+            combo_cid = ttk.Combobox(root, values=company_list, width=27)
+            combo_cid.set("admin")
+            combo_cid.pack(pady=2)
+
         if include_upload:
             tk.Label(root, text="Ảnh khuôn mặt *:").pack(pady=(10, 0))
             tk.Button(root, text="Chọn ảnh", command=on_select_files).pack(pady=2)
@@ -221,7 +303,7 @@ class AttendanceUI:
         if form_data["id"] is None:
             return None
             
-        return form_data["id"], form_data["name"], form_data["bday"], form_data["files"]
+        return form_data["id"], form_data["name"], form_data["bday"], form_data["files"], form_data["company_id"]
 
     @staticmethod
     def get_id_form():
@@ -334,6 +416,90 @@ class AttendanceUI:
         btn_close.pack(pady=10)
 
         root.mainloop()
+
+    @staticmethod
+    def pick_company_ui(companies):
+        """
+        Dialog to select a company from a list.
+        Returns company_id or None.
+        """
+        import tkinter as tk
+        from tkinter import ttk
+
+        root = tk.Tk()
+        root.title("Chọn Công ty")
+        root.geometry("400x350")
+        root.attributes('-topmost', True)
+
+        tk.Label(root, text="CHỌN CÔNG TY ĐỂ XEM NHÂN VIÊN", font=("Arial", 11, "bold")).pack(pady=10)
+
+        selected = {"id": None}
+        
+        tree = ttk.Treeview(root, columns=("id", "name"), show="headings")
+        tree.heading("id", text="ID")
+        tree.heading("name", text="Tên công ty")
+        tree.column("id", width=100)
+        tree.column("name", width=250)
+
+        for c in companies:
+            tree.insert("", tk.END, values=(c.get('company_id'), c.get('name')))
+
+        def on_select():
+            sel = tree.selection()
+            if sel:
+                selected["id"] = tree.item(sel[0])['values'][0]
+                root.destroy()
+
+        tree.pack(padx=10, pady=10, fill="both", expand=True)
+        tk.Button(root, text="XÁC NHẬN", command=on_select, bg="#28a745", fg="white", width=15).pack(pady=10)
+
+        root.mainloop()
+        return selected["id"]
+
+    @staticmethod
+    def pick_user_ui(user_list):
+        """
+        Dialog to select a user from a list.
+        Returns user_id or None.
+        """
+        import tkinter as tk
+        from tkinter import ttk
+
+        root = tk.Tk()
+        root.title("Chọn Nhân viên")
+        root.geometry("500x400")
+        root.attributes('-topmost', True)
+
+        tk.Label(root, text="CHỌN NHÂN VIÊN CẦN CHỈNH SỬA", font=("Arial", 11, "bold")).pack(pady=10)
+
+        selected = {"id": None}
+        
+        tree = ttk.Treeview(root, columns=("id", "name", "bday"), show="headings")
+        tree.heading("id", text="Mã NV")
+        tree.heading("name", text="Họ tên")
+        tree.heading("bday", text="Ngày sinh")
+        
+        tree.column("id", width=100)
+        tree.column("name", width=200)
+        tree.column("bday", width=120)
+
+        for u in user_list:
+            tree.insert("", tk.END, values=(u.get('user_id'), u.get('user_name'), u.get('birthday')))
+
+        def on_select():
+            sel = tree.selection()
+            if sel:
+                selected["id"] = tree.item(sel[0])['values'][0]
+                root.destroy()
+
+        tree.pack(expand=True, fill="both", padx=10)
+        
+        btn_frame = tk.Frame(root); btn_frame.pack(pady=10)
+        tk.Button(btn_frame, text="XÁC NHẬN", command=on_select, bg="green", fg="white", width=15).pack(side=tk.LEFT, padx=5)
+        tk.Button(btn_frame, text="HỦY", command=root.destroy, width=15).pack(side=tk.LEFT, padx=5)
+
+        root.mainloop()
+        return selected["id"]
 
     @staticmethod
     def show_attendance_logs_ui(logs):
@@ -503,16 +669,167 @@ class AttendanceUI:
         refresh_list()
         root.mainloop()
 
+    @staticmethod
+    def show_company_management_ui(mongo_db):
+        """Management UI for Companies."""
+        import tkinter as tk
+        from tkinter import ttk, messagebox, simpledialog
+
+        root = tk.Tk()
+        root.title("Quản lý Công ty")
+        root.geometry("600x500")
+        root.attributes('-topmost', True)
+
+        tk.Label(root, text="DANH SÁCH CÔNG TY", font=("Arial", 12, "bold")).pack(pady=10)
+
+        tree = ttk.Treeview(root, columns=("id", "name", "desc"), show="headings")
+        tree.heading("id", text="Company ID")
+        tree.heading("name", text="Tên công ty")
+        tree.heading("desc", text="Mô tả")
+        
+        tree.column("id", width=120)
+        tree.column("name", width=200)
+        tree.column("desc", width=200)
+
+        def refresh():
+            for i in tree.get_children(): tree.delete(i)
+            for c in mongo_db.get_all_companies():
+                tree.insert("", tk.END, values=(c.get('company_id'), c.get('name'), c.get('description')))
+
+        def on_add():
+            add_win = tk.Toplevel(root)
+            add_win.title("Thêm Công ty")
+            add_win.geometry("300x250")
+            
+            tk.Label(add_win, text="Company ID:").pack()
+            e_id = tk.Entry(add_win); e_id.pack()
+            tk.Label(add_win, text="Tên công ty:").pack()
+            e_name = tk.Entry(add_win); e_name.pack()
+            tk.Label(add_win, text="Mô tả:").pack()
+            e_desc = tk.Entry(add_win); e_desc.pack()
+            
+            def submit():
+                cid, name, desc = e_id.get(), e_name.get(), e_desc.get()
+                if not cid or not name: return messagebox.showwarning("!", "Nhập ID & Tên")
+                success, msg = mongo_db.create_company(cid, name, desc)
+                if success:
+                    messagebox.showinfo("OK", "Đã thêm công ty")
+                    add_win.destroy()
+                    refresh()
+                else: messagebox.showerror("Lỗi", msg)
+            
+            tk.Button(add_win, text="LƯU", command=submit, bg="green", fg="white").pack(pady=10)
+
+        def on_delete():
+            sel = tree.selection()
+            if not sel: return
+            cid = tree.item(sel[0])['values'][0]
+            if messagebox.askyesno("Xác nhận", f"Xóa công ty {cid}?"):
+                if mongo_db.delete_company(cid):
+                    messagebox.showinfo("OK", "Đã xóa")
+                    refresh()
+                else: messagebox.showerror("Lỗi", "Không thể xóa")
+
+        tree.pack(fill="both", expand=True, padx=10)
+        btn_frame = tk.Frame(root); btn_frame.pack(pady=10)
+        tk.Button(btn_frame, text="LÀM MỚI", command=refresh).pack(side=tk.LEFT, padx=5)
+        tk.Button(btn_frame, text="THÊM MỚI", command=on_add, bg="green", fg="white").pack(side=tk.LEFT, padx=5)
+        tk.Button(btn_frame, text="XÓA", command=on_delete, bg="red", fg="white").pack(side=tk.LEFT, padx=5)
+        tk.Button(btn_frame, text="ĐÓNG", command=root.destroy).pack(side=tk.LEFT, padx=5)
+
+        refresh()
+        root.mainloop()
+
+    @staticmethod
+    def show_user_management_ui(mongo_db):
+        """Management UI for Cloud Users (Logins)."""
+        import tkinter as tk
+        from tkinter import ttk, messagebox
+
+        root = tk.Tk()
+        root.title("Quản lý User Hệ thống")
+        root.geometry("600x500")
+        root.attributes('-topmost', True)
+
+        tk.Label(root, text="DANH SÁCH USER (ADMIN/COMPANY)", font=("Arial", 12, "bold")).pack(pady=10)
+
+        tree = ttk.Treeview(root, columns=("user", "role", "company"), show="headings")
+        tree.heading("user", text="Username")
+        tree.heading("role", text="Quyền")
+        tree.heading("company", text="Phân quyền Công ty")
+        
+        def refresh():
+            for i in tree.get_children(): tree.delete(i)
+            for u in mongo_db.get_all_cloud_users():
+                tree.insert("", tk.END, values=(u.get('username'), u.get('role'), u.get('company_id')))
+
+        def on_add():
+            from tkinter import ttk
+            add_win = tk.Toplevel(root); add_win.title("Thêm User Mới"); add_win.geometry("300x400")
+            
+            tk.Label(add_win, text="Username:").pack(pady=5)
+            e_user = tk.Entry(add_win); e_user.pack()
+            
+            tk.Label(add_win, text="Password:").pack(pady=5)
+            e_pwd = tk.Entry(add_win, show="*"); e_pwd.pack()
+            
+            tk.Label(add_win, text="Quyền hạn:").pack(pady=5)
+            e_role = ttk.Combobox(add_win, values=["admin", "company", "user"])
+            e_role.set("company"); e_role.pack()
+            
+            tk.Label(add_win, text="Phân quyền Công ty:").pack(pady=5)
+            # Fetch all companies to show in dropdown
+            companies = mongo_db.get_all_companies()
+            company_list = ["admin"] + [c.get("company_id") for c in companies]
+            
+            e_cid = ttk.Combobox(add_win, values=company_list)
+            e_cid.set("admin"); e_cid.pack()
+            
+            def submit():
+                u, p, r, cid = e_user.get(), e_pwd.get(), e_role.get(), e_cid.get()
+                if not u or not p or not cid: return messagebox.showwarning("!", "Vui lòng nhập đầy đủ thông tin")
+                
+                success, msg = mongo_db.create_user(u, p, r, cid)
+                if success:
+                    messagebox.showinfo("Thành công", f"Đã tạo tài khoản {u} thành công!")
+                    add_win.destroy()
+                    refresh()
+                else:
+                    messagebox.showerror("Lỗi", msg)
+
+            tk.Button(add_win, text="LƯU TÀI KHOẢN", command=submit, bg="#28a745", fg="white", font=("Arial", 10, "bold")).pack(pady=20)
+
+        def on_delete():
+            sel = tree.selection()
+            if not sel: return
+            user = tree.item(sel[0])['values'][0]
+            if user == "admin": return messagebox.showwarning("!", "Không thể xóa Super Admin")
+            if messagebox.askyesno("Xác nhận", f"Xóa tài khoản {user}?"):
+                if mongo_db.delete_user(user):
+                    messagebox.showinfo("OK", "Đã xóa tài khoản")
+                    refresh()
+                else: messagebox.showerror("Lỗi", "Không thể xóa")
+
+        tree.pack(fill="both", expand=True, padx=10)
+        btn_frame = tk.Frame(root); btn_frame.pack(pady=10)
+        tk.Button(btn_frame, text="LÀM MỚI", command=refresh).pack(side=tk.LEFT, padx=5)
+        tk.Button(btn_frame, text="THÊM MỚI", command=on_add, bg="green", fg="white").pack(side=tk.LEFT, padx=5)
+        tk.Button(btn_frame, text="XÓA USER", command=on_delete, bg="red", fg="white").pack(side=tk.LEFT, padx=5)
+        tk.Button(btn_frame, text="ĐÓNG", command=root.destroy).pack(side=tk.LEFT, padx=5)
+        
+        refresh()
+        root.mainloop()
+
     def show_login_dialog(self):
         """
         Shows a login dialog for admin authentication.
         """
         import tkinter as tk
         from tkinter import messagebox
-        from src.attendance.attendance_db import db as sqlite_db
+        from src.attendance.mongodb_mgr import mongo_db
 
         login_root = tk.Tk()
-        login_root.title("Admin Login")
+        login_root.title("System Login")
         window_width, window_height = 300, 200
         screen_width = login_root.winfo_screenwidth()
         screen_height = login_root.winfo_screenheight()
@@ -526,14 +843,21 @@ class AttendanceUI:
         def attempt_login():
             user = entry_user.get()
             pwd = entry_pwd.get()
-            if sqlite_db.verify_admin(user, pwd):
+            
+            # Authenticate using Cloud MongoDB
+            auth_info = mongo_db.verify_login(user, pwd)
+            
+            if auth_info:
                 login_status["authenticated"] = True
-                self.is_admin_logged_in = True
+                self.is_admin_logged_in = True # Keeping the flag name but role based now
+                self.session_role = auth_info["role"]
+                self.session_company_id = auth_info["company_id"]
+                self.session_username = auth_info["username"]
                 login_root.destroy()
             else:
-                messagebox.showerror("Lỗi", "Sai tài khoản hoặc mật khẩu!")
+                messagebox.showerror("Lỗi", "Sai tài khoản hoặc mật khẩu Cloud!")
 
-        tk.Label(login_root, text="YÊU CẦU ĐĂNG NHẬP", font=("Arial", 10, "bold")).pack(pady=10)
+        tk.Label(login_root, text="ĐĂNG NHẬP HỆ THỐNG", font=("Arial", 10, "bold")).pack(pady=10)
         tk.Label(login_root, text="Tên đăng nhập:").pack()
         entry_user = tk.Entry(login_root)
         entry_user.pack()

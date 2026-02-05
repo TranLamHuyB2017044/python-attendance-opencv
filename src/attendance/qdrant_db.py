@@ -54,7 +54,7 @@ class QdrantAttendanceManager:
             logger.error(f"Failed to ensure Qdrant collection/indexes: {e}")
             raise e
 
-    def upsert_user(self, user_name: str, user_id: str, birthday: str, embeddings: List[np.ndarray]) -> bool:
+    def upsert_user(self, user_name: str, user_id: str, birthday: str, embeddings: List[np.ndarray], **kwargs) -> bool:
         """
         Save/Update user embeddings in Qdrant with metadata.
         """
@@ -69,6 +69,7 @@ class QdrantAttendanceManager:
                         "user_id": user_id,
                         "user_name": user_name,
                         "birthday": birthday,
+                        "company_id": kwargs.get("company_id", "default"),
                         "created_at": datetime.now().isoformat()
                     }
                 ))
@@ -140,19 +141,25 @@ class QdrantAttendanceManager:
             logger.error(f"Error during recognition: {e}")
             return default_res
 
-    def get_all_users(self) -> List[Dict[str, Any]]:
+    def get_all_users(self, company_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """
-        Retrieves all unique users from the collection.
-        Returns a list of dicts with unique user_id, user_name, and birthday.
+        Retrieves unique users. Optional filtering by company_id.
         """
         try:
             all_users = {}
             offset = None
             
+            scroll_filter = None
+            if company_id:
+                scroll_filter = models.Filter(
+                    must=[models.FieldCondition(key="company_id", match=models.MatchValue(value=company_id))]
+                )
+            
             while True:
                 results, offset = self.client.scroll(
                     collection_name=self.collection_name,
                     limit=100,
+                    scroll_filter=scroll_filter,
                     with_payload=True,
                     offset=offset
                 )
