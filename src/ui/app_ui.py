@@ -14,6 +14,7 @@ STATE_HKB_LIST = 7
 STATE_COMPANY = 8
 STATE_CLOUD_USER = 9
 STATE_LOGOUT = 10
+STATE_SETTINGS = 11
 
 class AttendanceUI:
     """
@@ -25,6 +26,7 @@ class AttendanceUI:
         self.session_role = None # 'admin' or 'company'
         self.session_company_id = None
         self.session_username = None
+        self.session_user_id = 1 # ID mặc định cho system user
         self.last_w, self.last_h = 1280, 720 # Default
 
     def handle_menu_click(self, event, x, y, flags, param):
@@ -87,6 +89,10 @@ class AttendanceUI:
                     # 3. QUAN LY CONG TY (Bottom Right)
                     elif cX + int(140*(w/800)) < x < cX + int(380*(w/800)): 
                         self.current_state = STATE_COMPANY
+                
+                # 4. CAI DAT (Icon/Small button next to Logout or elsewhere) - TOP LEFT
+                if 20 < x < 150 and 15 < y < 65:
+                    self.current_state = STATE_SETTINGS
 
     def draw_main_menu(self, w=1280, h=720):
         """Draw a professional menu responsive to window size."""
@@ -179,6 +185,12 @@ class AttendanceUI:
             cv2.rectangle(frame, (cX + 140, h - 84), (cX + 380, h - 20), (100, 50, 150), -1)
             cv2.putText(frame, "QUAN LY CONG TY", (cX + 160, h - 40),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            
+            # 4. Settings Button (Top Left)
+            cv2.rectangle(frame, (20, 15), (150, 65), (80, 80, 80), -1)
+            cv2.rectangle(frame, (20, 15), (150, 65), (255, 255, 255), 1)
+            cv2.putText(frame, "CAI DAT", (45, 48),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6 * (w/800), (255, 255, 255), 2)
         
         # User Info Display
         user_label = f"User: {self.session_username} ({self.session_role})"
@@ -585,8 +597,7 @@ class AttendanceUI:
 
         root.mainloop()
 
-    @staticmethod
-    def show_hkb_connections_ui():
+    def show_hkb_connections_ui(self):
         """
         Displays a list of HKB connections and allows registering/connecting.
         """
@@ -595,43 +606,53 @@ class AttendanceUI:
         from src.services.hkb_service import hkb_service
         from src.config import AuthServiceConfig
 
+        # Lấy user_id từ session đang đăng nhập, mặc định là 1
+        current_user_id = getattr(self, "session_user_id", 1) or 1
+
         root = tk.Tk()
-        root.title("Kết nối HKB Auth")
-        root.geometry("600x450")
+        root.title("Kết nối AuthService")
+        root.geometry("1000x500")
         root.attributes('-topmost', True)
 
-        tk.Label(root, text="DANH SÁCH KẾT NỐI HKB", font=("Arial", 12, "bold")).pack(pady=10)
+        tk.Label(root, text="DANH SÁCH KẾT NỐI", font=("Arial", 14, "bold")).pack(pady=10)
 
-        # Create Treeview
-        columns = ("id", "system_id", "register", "description", "status")
+        # Create Treeview with more columns
+        columns = ("id", "name", "system_id", "endpoint", "actived", "status")
         tree = ttk.Treeview(root, columns=columns, show="headings")
         
         tree.heading("id", text="ID")
+        tree.heading("name", text="Tên hệ thống")
         tree.heading("system_id", text="System ID")
-        tree.heading("register", text="Module")
-        tree.heading("description", text="Mô tả")
+        tree.heading("endpoint", text="Endpoint")
+        tree.heading("actived", text="Hoạt động")
         tree.heading("status", text="Trạng thái")
         
-        tree.column("id", width=50)
-        tree.column("system_id", width=120)
-        tree.column("register", width=100)
-        tree.column("description", width=150)
-        tree.column("status", width=80)
+        tree.column("id", width=40, anchor="center")
+        tree.column("name", width=250)
+        tree.column("system_id", width=200)
+        tree.column("endpoint", width=200)
+        tree.column("actived", width=80, anchor="center")
+        tree.column("status", width=120, anchor="center")
 
         def refresh_list():
             for item in tree.get_children():
                 tree.delete(item)
             
-            connections = hkb_service.get_connections()
+            # Truyền user_id hiện tại để lọc danh sách UUID đã đăng ký
+            connections = hkb_service.get_connections(user_id=current_user_id)
             if connections and isinstance(connections, list):
                 for conn in connections:
-                    # Adjust based on actual API result structure
+                    # Logic: client_register = 0 -> Chưa kết nối, 1 -> Đã kết nối
+                    is_registered = conn.get("client_register", 0)
+                    status_str = "Đã kết nối" if is_registered == 1 else "Chưa kết nối"
+                    
                     tree.insert("", tk.END, values=(
                         conn.get("id", "N/A"),
+                        conn.get("name", "N/A"),
                         conn.get("system_id", "N/A"),
-                        conn.get("system_register", "N/A"),
-                        conn.get("description", "N/A"),
-                        "Connected" # If it's in the list, assume it works
+                        conn.get("endpoint", "N/A"),
+                        "Có" if conn.get("actived") == 1 else "Không",
+                        status_str
                     ))
             elif connections:
                 # Might be a single dict or other structure
@@ -640,22 +661,90 @@ class AttendanceUI:
                 messagebox.showinfo("Thông báo", "Không tìm thấy kết nối nào hoặc lỗi API.")
 
         def on_register():
-            # Simple dialog to register current system
+            sel = tree.selection()
+            if not sel:
+                messagebox.showwarning("!", "Vui lòng chọn hệ thống cần kết nối từ danh sách")
+                return
+            
+            # Get data from selected row
+            item = tree.item(sel[0])['values']
+            conn_id = item[0]
+            conn_name = item[1]
+            remote_sys_id = item[2]
+
+            # Gửi yêu cầu kết nối với thông tin hệ thống được chọn
+            root.config(cursor="watch") # Đổi chuột sang trạng thái chờ
+            root.update()
+            
+            result = hkb_service.register_client(
+                system_id=remote_sys_id,
+                external_id=current_user_id,
+                description=f"đang yêu cầu kết nối hệ thống {conn_name}",
+                user_info={"app": "Face Attendance System"},
+                system_connection_id=conn_id,
+                system_register=AuthServiceConfig.SYSTEM_ID
+            )
+            
+            root.config(cursor="") # Trả lại chuột bình thường
+            
+            if result and result.success:
+                msg = result.message if result.message else f"Đã gửi yêu cầu kết nối tới: {conn_name}"
+                messagebox.showinfo("Thành công", msg)
+                refresh_list()
+            else:
+                err_msg = result.message if result and result.message else "Gửi yêu cầu kết nối thất bại"
+                messagebox.showerror("Lỗi", err_msg)
+
+        def on_revoke():
+            sel = tree.selection()
+            if not sel:
+                messagebox.showwarning("!", "Vui lòng chọn hệ thống cần hủy kết nối")
+                return
+            
+            item = tree.item(sel[0])['values']
+            conn_name = item[1]
+            remote_sys_id = item[2]
+            status_str = item[5]
+
+            if status_str != "Đã kết nối":
+                messagebox.showwarning("!", "Hệ thống này chưa được kết nối!")
+                return
+
+            if not messagebox.askyesno("Xác nhận", f"Bạn có chắc chắn muốn hủy kết nối với {conn_name}?\nHành động này sẽ vô hiệu hóa API Key hiện tại."):
+                return
+
+            # Lấy API Key từ MongoDB cục bộ
+            auth_data = mongo_db.auth_services.find_one({"uuid": remote_sys_id})
+            if not auth_data or not auth_data.get("key"):
+                messagebox.showerror("Lỗi", "Không tìm thấy API Key cục bộ để thực hiện hủy!")
+                return
+            
+            api_key = auth_data["key"]
+
+            # Yêu cầu nhập mật khẩu xác nhận
             from tkinter import simpledialog
-            desc = simpledialog.askstring("Đăng ký", "Nhập mô tả cho hệ thống này:", parent=root)
-            if desc:
-                # In a real app, external_id might be the device ID or similar
-                result = hkb_service.register_client(
-                    system_id=AuthServiceConfig.SYSTEM_ID,
-                    external_id=1, # Default
-                    description=desc,
-                    user_info={"app": "Face Attendance System"}
-                )
-                if result:
-                    messagebox.showinfo("Thành công", "Đã đăng ký hệ thống lên HKB.")
-                    refresh_list()
-                else:
-                    messagebox.showerror("Lỗi", "Đăng ký thất bại.")
+            password = simpledialog.askstring("Xác thực", f"Nhập mật khẩu của hệ thống '{conn_name}' để xác nhận hủy:", show='*')
+            
+            if not password:
+                return
+
+            root.config(cursor="watch")
+            root.update()
+            
+            result = hkb_service.revoke_connection(
+                system_id=remote_sys_id,
+                api_key=api_key,
+                password=password
+            )
+            
+            root.config(cursor="")
+            
+            if result and result.success:
+                messagebox.showinfo("Thành công", f"Đã hủy kết nối thành công với: {conn_name}")
+                refresh_list()
+            else:
+                err_msg = result.message if result and result.message else "Hủy kết nối thất bại"
+                messagebox.showerror("Lỗi", err_msg)
 
         tree.pack(expand=True, fill="both", padx=10, pady=10)
         
@@ -664,6 +753,7 @@ class AttendanceUI:
 
         tk.Button(btn_container, text="LÀM MỚI", command=refresh_list, width=15).pack(side=tk.LEFT, padx=5)
         tk.Button(btn_container, text="ĐĂNG KÝ HỆ THỐNG", command=on_register, width=15, bg="#28a745", fg="white").pack(side=tk.LEFT, padx=5)
+        tk.Button(btn_container, text="HỦY KẾT NỐI", command=on_revoke, width=15, bg="#dc3545", fg="white").pack(side=tk.LEFT, padx=5)
         tk.Button(btn_container, text="ĐÓNG", command=root.destroy, width=15, bg="#007bff", fg="white").pack(side=tk.LEFT, padx=5)
 
         refresh_list()
@@ -853,6 +943,7 @@ class AttendanceUI:
                 self.session_role = auth_info["role"]
                 self.session_company_id = auth_info["company_id"]
                 self.session_username = auth_info["username"]
+                self.session_user_id = auth_info.get("user_id", 1) # Lấy user_id từ DB nếu có
                 login_root.destroy()
             else:
                 messagebox.showerror("Lỗi", "Sai tài khoản hoặc mật khẩu Cloud!")
@@ -869,6 +960,45 @@ class AttendanceUI:
 
         login_root.mainloop()
         return login_status["authenticated"]
+
+    @staticmethod
+    def show_system_settings_ui(mongo_db):
+        """UI to manage system-wide settings like Group Keys."""
+        import tkinter as tk
+        from tkinter import messagebox
+
+        root = tk.Tk()
+        root.title("Cài đặt Hệ thống")
+        root.geometry("500x350")
+        root.attributes('-topmost', True)
+
+        tk.Label(root, text="CẤU HÌNH HỆ THỐNG", font=("Arial", 14, "bold")).pack(pady=20)
+
+        # 1. Group Keys Setting
+        tk.Label(root, text="Group Keys (Cung cấp nhiều key, ngăn cách bởi dấu phẩy):", font=("Arial", 10)).pack(anchor="w", padx=20)
+        
+        # Lấy giá trị hiện tại từ DB
+        current_keys = mongo_db.get_setting("group_keys", "")
+        
+        text_keys = tk.Text(root, height=5, width=55)
+        text_keys.pack(pady=10, padx=20)
+        text_keys.insert("1.0", current_keys)
+
+        def save_settings():
+            new_keys = text_keys.get("1.0", "end-1c").strip()
+            if mongo_db.set_setting("group_keys", new_keys):
+                messagebox.showinfo("Thành công", "Đã lưu cài đặt hệ thống!")
+                root.destroy()
+            else:
+                messagebox.showerror("Lỗi", "Không thể lưu cài đặt!")
+
+        btn_frame = tk.Frame(root)
+        btn_frame.pack(pady=20)
+        
+        tk.Button(btn_frame, text="LƯU CÀI ĐẶT", command=save_settings, bg="#28a745", fg="white", width=15, font=("Arial", 10, "bold")).pack(side=tk.LEFT, padx=10)
+        tk.Button(btn_frame, text="HỦY", command=root.destroy, width=15).pack(side=tk.LEFT, padx=10)
+
+        root.mainloop()
 
     @staticmethod
     def draw_status_bar(frame, fps, processing_time):

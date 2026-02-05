@@ -16,7 +16,7 @@ from src.attendance.qdrant_db import QdrantAttendanceManager
 from src.attendance.mongodb_mgr import mongo_db
 from src.recognition.tracker import FaceTracker
 from src.config import MongoDbConfig
-from src.ui.app_ui import AttendanceUI, STATE_MENU, STATE_DETECT, STATE_ENROLL_CAM, STATE_ENROLL_UPLOAD, STATE_EDIT, STATE_LIST, STATE_HISTORY, STATE_HKB_LIST, STATE_COMPANY, STATE_CLOUD_USER, STATE_LOGOUT
+from src.ui.app_ui import AttendanceUI, STATE_MENU, STATE_DETECT, STATE_ENROLL_CAM, STATE_ENROLL_UPLOAD, STATE_EDIT, STATE_LIST, STATE_HISTORY, STATE_HKB_LIST, STATE_COMPANY, STATE_CLOUD_USER, STATE_LOGOUT, STATE_SETTINGS
 
 
 def enroll_from_camera(camera, face_rec, attendance, ui):
@@ -169,6 +169,8 @@ def main():
         while True:
             # Get actual window size for responsive drawing
             _, _, cur_w, cur_h = cv2.getWindowImageRect(win_name)
+            if cur_w <= 0 or cur_h <= 0:
+                cur_w, cur_h = 1280, 720
             
             if ui.current_state == STATE_MENU:
                 display_frame = ui.draw_main_menu(w=cur_w, h=cur_h)
@@ -295,6 +297,11 @@ def main():
 
             elif ui.current_state == STATE_CLOUD_USER:
                 ui.show_user_management_ui(mongo_db)
+                ui.current_state = STATE_MENU
+                continue
+
+            elif ui.current_state == STATE_SETTINGS:
+                ui.show_system_settings_ui(mongo_db)
                 ui.current_state = STATE_MENU
                 continue
 

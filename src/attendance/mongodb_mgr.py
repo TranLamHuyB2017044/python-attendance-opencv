@@ -18,15 +18,42 @@ class MongoDBManager:
             self.logs = self.db["attendance_logs"]
             self.companies = self.db["companies"]
             self.users = self.db["users"] # Admins and Company accounts
+            self.auth_services = self.db["auth_services"] # HKB/Auth Connections
+            self.settings = self.db["settings"] # System Settings
             
             # Create indexes for faster queries
             self.logs.create_index([("company_id", 1), ("date", -1)])
             self.logs.create_index([("user_id", 1)])
             self.users.create_index([("username", 1)], unique=True)
+            self.auth_services.create_index([("uuid", 1)], unique=True)
+            self.settings.create_index([("key", 1)], unique=True)
             
             logger.info("Connected to MongoDB Cloud successfully")
         except Exception as e:
             logger.error(f"Failed to connect to MongoDB: {e}")
+
+    # --- Settings Methods ---
+    def get_setting(self, key, default=None):
+        """Retrieve a system setting."""
+        try:
+            setting = self.settings.find_one({"key": key})
+            return setting.get("value", default) if setting else default
+        except Exception as e:
+            logger.error(f"Failed to get setting {key}: {e}")
+            return default
+
+    def set_setting(self, key, value):
+        """Save/Update a system setting."""
+        try:
+            self.settings.update_one(
+                {"key": key},
+                {"$set": {"value": value, "updated_at": datetime.utcnow()}},
+                upsert=True
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Failed to set setting {key}: {e}")
+            return False
 
     def log_attendance(self, user_id, user_name, status=None, frame=None):
         """
@@ -104,7 +131,8 @@ class MongoDBManager:
             return {
                 "role": user.get("role"),
                 "company_id": user.get("company_id"),
-                "username": user.get("username")
+                "username": user.get("username"),
+                "user_id": user.get("user_id") # Trả về user_id (int) nếu có
             }
         return None
 
@@ -163,6 +191,24 @@ class MongoDBManager:
             self.companies.delete_one({"company_id": company_id})
             return True
         except Exception:
+            return False
+
+    def save_auth_service(self, data):
+        """Save or update auth service connection info."""
+        try:
+            # data should follow src.models.auth_services.AuthService structure
+            query = {"uuid": data["uuid"]}
+            data["updated_at"] = datetime.utcnow()
+            
+            self.auth_services.update_one(
+                query, 
+                {"$set": data, "$setOnInsert": {"created_at": datetime.utcnow()}}, 
+                upsert=True
+            )
+            logger.success(f"Saved auth service connection: {data.get('app_name')} ({data['uuid']})")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to save auth service: {e}")
             return False
 
 # Global instance

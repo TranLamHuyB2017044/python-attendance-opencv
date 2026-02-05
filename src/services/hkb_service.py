@@ -4,6 +4,7 @@ from src.config import AuthServiceConfig
 from loguru import logger
 import os
 import json
+from src.attendance.mongodb_mgr import mongo_db
 
 class HKBService:
     """
@@ -29,7 +30,7 @@ class HKBService:
         Register a new client system.
         """
         try:
-            logger.info(f"HKB Service: Registering client {system_id} for external_id {external_id}")
+            logger.info(f"HKB Service: Registering client. Data: cid={system_connection_id}, sys_id={system_id}, reg={system_register}, ext_id={external_id}, desc={description}, info={user_info}")
             coro = self.client.register_client(
                 system_connection_id=system_connection_id,
                 system_id=system_id,
@@ -39,6 +40,39 @@ class HKBService:
                 user_info=user_info
             )
             result = self._run_sync(coro)
+            if result:
+                logger.info(f"HKB Service Response: Success={result.success}, Message={result.message}, Data={result.data}")
+                
+                # Save to MongoDB if successful
+                if result.success and result.data:
+                    try:
+                        data = result.data
+                        sys_conn = data.get("system_connection", {})
+                        
+                        auth_data = {
+                            "uuid": sys_conn.get("system_id", system_id), # uuid is systemId
+                            "endpoint": sys_conn.get("endpoint"),         # endpoint is endpoint
+                            "connection_type": "hkb",
+                            "key": data.get("api_key"),                   # api key lưu vào key
+                            "user_id": data.get("external_id"),
+                            "app_name": sys_conn.get("name"),             # appname là name
+                            "app_info": json.dumps(data, ensure_ascii=False) # app info là full response kiểu json
+                        }
+                        mongo_db.save_auth_service(auth_data)
+
+                        # Tự động gọi authenticate để lấy token sau khi kết nối thành công
+                        remote_system_id = auth_data["uuid"]
+                        remote_api_key = auth_data["key"]
+                        logger.info(f"HKB Service: Automatically authenticating for system {remote_system_id}")
+                        self.authenticate(
+                            system_id=remote_system_id,
+                            api_key=remote_api_key,
+                            user_id=data.get("external_id", external_id)
+                        )
+                    except Exception as e:
+                        logger.error(f"HKB Service: Failed to process/save response data or authenticate: {e}")
+            else:
+                logger.warning("HKB Service Response: None (Sync execution failed)")
             return result
         except Exception as e:
             logger.error(f"HKB Service: Register client failed: {e}")
@@ -61,15 +95,54 @@ class HKBService:
             logger.error(f"HKB Service: Authenticate failed: {e}")
             return None
 
-    def get_connections(self):
+    def revoke_connection(self, system_id, api_key, password):
+        """
+        Revoke an existing connection/API key.
+        """
+        try:
+            logger.info(f"HKB Service: Revoking connection for system {system_id}")
+            coro = self.client.revoke_api_key(
+                system_id=system_id,
+                api_key=api_key,
+                password=password
+            )
+            result = self._run_sync(coro)
+            
+            if result and result.success:
+                logger.success(f"HKB Service: Successfully revoked connection for {system_id}")
+                # Optional: remove from local DB
+                mongo_db.auth_services.delete_one({"uuid": system_id})
+            
+            return result
+        except Exception as e:
+            logger.error(f"HKB Service: Revoke connection failed: {e}")
+            return None
+
+    def get_connections(self, user_id: int = 1):
         """
         Get list of connections for the current API Key.
         """
         try:
-            logger.info("HKB Service: Fetching connections list")
+            # Lấy danh sách Group Keys từ settings (nếu có)
+            custom_keys = mongo_db.get_setting("group_keys", "")
+            if custom_keys:
+                # Tách chuỗi comma-separated thành list và loại bỏ khoảng trắng
+                group_keys = [k.strip() for k in custom_keys.split(",") if k.strip()]
+            else:
+                group_keys = [AuthServiceConfig.API_KEY]
+
+            # Lấy danh sách UUID đã đăng ký từ DB theo user_id
+            auth_records = list(mongo_db.auth_services.find({"user_id": user_id}))
+            client_registers = [r["uuid"] for r in auth_records]
+            
+            # Nếu chưa có bản ghi nào, mặc định dùng SYSTEM_ID để có thể thấy danh sách chung
+            if not client_registers:
+                client_registers = [AuthServiceConfig.SYSTEM_ID]
+
+            logger.info(f"HKB Service: Fetching connections list. group_keys: {group_keys}, user_id: {user_id}")
             coro = self.client.get_system_connections(
-                group_key="dwX1S5cHAPDYo6Gom2fv8F3D7rNZqPu",
-                client_registers=[""]
+                group_key=group_keys, # Giờ truyền list string
+                client_registers=client_registers,
             )
             result = self._run_sync(coro)
             
