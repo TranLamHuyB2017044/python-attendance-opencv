@@ -108,6 +108,11 @@ class MongoDbConfig:
     COMPANY_ID: str = os.getenv("COMPANY_ID", "default_company")
 
 
+class WebhookConfig:
+    """Webhook configuration for attendance notifications."""
+    USER_WEBHOOK_URL: str = os.getenv("USER_WEBHOOK_URL", "https://voice-cheking.bittechx.cloud/api/webhooks/user")
+
+
 # Export all configs
 __all__ = [
     "PROJECT_ROOT",
@@ -124,4 +129,5 @@ __all__ = [
     "LogConfig",
     "AuthServiceConfig",
     "MongoDbConfig",
+    "WebhookConfig",
 ]

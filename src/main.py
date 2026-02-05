@@ -75,7 +75,7 @@ def enroll_from_camera(camera, face_rec, attendance, ui):
 
     target_company = MongoDbConfig.COMPANY_ID
     # Use selected company if admin, otherwise session company
-    if ui.session_role == 'admin' and selected_cid:
+    if str(ui.session_role).lower() == 'admin' and selected_cid:
         target_company = selected_cid
     elif ui.session_company_id:
         target_company = ui.session_company_id
@@ -120,7 +120,7 @@ def enroll_by_upload(face_rec, attendance, ui):
 
     if samples:
         target_company = MongoDbConfig.COMPANY_ID
-        if ui.session_role == 'admin' and selected_cid:
+        if str(ui.session_role).lower() == 'admin' and selected_cid:
             target_company = selected_cid
         elif ui.session_company_id:
             target_company = ui.session_company_id
@@ -218,14 +218,18 @@ def main():
                 target_company = ui.session_company_id
                 
                 # If admin, pick company first
-                if ui.session_role == "admin":
+                if str(ui.session_role).lower() == "admin":
                     companies = mongo_db.get_all_companies()
-                    picked = ui.pick_company_ui(companies)
-                    if picked:
-                        target_company = picked
+                    if companies:
+                        picked = ui.pick_company_ui(companies)
+                        if picked:
+                            target_company = picked
+                        else:
+                            ui.current_state = STATE_MENU
+                            continue
                     else:
-                        ui.current_state = STATE_MENU
-                        continue
+                        # No companies created yet, continue with session_company_id (likely 'admin')
+                        pass
                 
                 # 2. Pick User from that company
                 users = attendance.get_all_users(company_id=target_company)
@@ -256,14 +260,19 @@ def main():
                 target_company = ui.session_company_id
                 
                 # Nếu là admin, cho phép chọn công ty
-                if ui.session_role == "admin":
+                if str(ui.session_role).lower() == "admin":
                     companies = mongo_db.get_all_companies()
-                    picked = ui.pick_company_ui(companies)
-                    if picked:
-                        target_company = picked
+                    if companies:
+                        picked = ui.pick_company_ui(companies)
+                        if picked:
+                            target_company = picked
+                        else:
+                            # Nếu có danh sách mà bấm hủy -> Về menu
+                            ui.current_state = STATE_MENU
+                            continue
                     else:
-                        ui.current_state = STATE_MENU
-                        continue
+                        # Chưa có công ty nào -> Mặc định lấy theo session_company_id (admin)
+                        pass
                 
                 users = attendance.get_all_users(company_id=target_company)
                 ui.show_user_list_ui(users)
@@ -275,14 +284,18 @@ def main():
                 target_company = ui.session_company_id
                 
                 # Nếu là admin, cho phép chọn công ty
-                if ui.session_role == "admin":
+                if str(ui.session_role).lower() == "admin":
                     companies = mongo_db.get_all_companies()
-                    picked = ui.pick_company_ui(companies)
-                    if picked:
-                        target_company = picked
+                    if companies:
+                        picked = ui.pick_company_ui(companies)
+                        if picked:
+                            target_company = picked
+                        else:
+                            ui.current_state = STATE_MENU
+                            continue
                     else:
-                        ui.current_state = STATE_MENU
-                        continue
+                        # Chưa có công ty -> Lấy nốt log của session_company_id hiện tại (admin/default)
+                        pass
                 
                 # 2. Filter history by company
                 logs = mongo_db.get_todays_logs(company_id=target_company)

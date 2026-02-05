@@ -22,3 +22,4 @@ pymongo==4.6.1
 -e D:/WorkSpace/Bittech_Project/bittech-auth-sdk
 fastapi==0.110.0
 uvicorn==0.27.1
+requests==2.32.3

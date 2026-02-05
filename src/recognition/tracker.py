@@ -3,7 +3,9 @@ import numpy as np
 from loguru import logger
 from typing import List, Dict, Any
 import cv2
-from src.config import RecognitionConfig, CAPTURES_DIR, ApiConfig, CameraConfig
+import requests
+import threading
+from src.config import RecognitionConfig, CAPTURES_DIR, ApiConfig, CameraConfig, WebhookConfig
 from src.attendance.mongodb_mgr import mongo_db
 from src.utils.string_utils import remove_accents
 from src.utils.time_manager import time_mgr
@@ -20,6 +22,32 @@ class FaceTracker:
         
         # Global cooldowns: {user_id: last_detection_time}
         self.user_cooldowns: Dict[str, float] = {}
+
+    def _send_user_webhook(self, user_id, user_name, status):
+        """
+        Sends user detection info to the configured webhook URL in a background thread.
+        """
+        def thread_task():
+            try:
+                payload = {
+                    "user_id": user_id,
+                    "user_name": user_name,
+                    "status": status or "DETECTED"
+                }
+                response = requests.post(
+                    WebhookConfig.USER_WEBHOOK_URL,
+                    json=payload,
+                    timeout=5
+                )
+                if response.status_code == 200:
+                    logger.debug(f"Webhook sent successfully for {user_name}")
+                else:
+                    logger.warning(f"Webhook failed for {user_name}: {response.status_code}")
+            except Exception as e:
+                logger.error(f"Error sending webhook: {e}")
+
+        # Run in background to not block the tracking loop
+        threading.Thread(target=thread_task, daemon=True).start()
 
     def _get_center(self, bbox):
         return (int((bbox[0] + bbox[2]) / 2), int((bbox[1] + bbox[3]) / 2))
@@ -148,6 +176,9 @@ class FaceTracker:
                                 if status == 'IN': logger.info(f"Diem danh VAO: {user_name}")
                                 elif status == 'OUT': logger.info(f"Diem danh RA: {user_name}")
                                 else: logger.info(f"Diem danh THANH CONG: {user_name}")
+                                
+                                # Send Webhook notification
+                                self._send_user_webhook(user_id, user_name, status)
                         else:
                             f_data['status'] = 'RECOGNIZED'
                             f_data['user_data'] = user_data
@@ -157,6 +188,9 @@ class FaceTracker:
                             if status == 'IN': logger.info(f"Diem danh VAO: {user_name}")
                             elif status == 'OUT': logger.info(f"Diem danh RA: {user_name}")
                             else: logger.info(f"Diem danh THANH CONG: {user_name}")
+                            
+                            # Send Webhook notification
+                            self._send_user_webhook(user_id, user_name, status)
                         
                         f_data['unknown_attempts'] = 0 # Reset khi thành công
                     

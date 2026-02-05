@@ -66,7 +66,7 @@ class AttendanceUI:
                 self.current_state = STATE_EDIT
 
             # --- ADMIN & COMPANY RECOGNITION ACTIONS ---
-            if self.session_role in ['admin', 'company']:
+            if str(self.session_role).lower() in ['admin', 'company']:
                 # DANG KY CAM (Col 1, Row 2)
                 if col1_L < x < col1_R and cY+gap_y < y < cY+gap_y+btn_h: 
                     self.current_state = STATE_ENROLL_CAM
@@ -78,7 +78,7 @@ class AttendanceUI:
                     self.current_state = STATE_HISTORY
 
             # --- ADMIN ONLY SYSTEM MANAGEMENT ---
-            if self.session_role == 'admin':
+            if str(self.session_role).lower() == 'admin':
                 # --- ADMIN ONLY BOTTOM BAR ---
                 if h - int(84*(h/600)) < y < h - int(20*(h/600)):
                     # 1. KET NOI HKB (Bottom Left)
@@ -172,7 +172,7 @@ class AttendanceUI:
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4 * (w/800), (100, 100, 100), 1)
         
         # Bottom Management Buttons (Admin Only)
-        if self.session_role == 'admin':
+        if str(self.session_role).lower() == 'admin':
             # 1. Connect HKB (Left)
             cv2.putText(frame, "KET NOI HKB", (cX - 355, h - 40),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
@@ -252,7 +252,7 @@ class AttendanceUI:
             u_bday = entry_bday.get().strip()
             
             # Get company_id based on role or selection
-            if session_role == 'admin':
+            if str(session_role).lower() == 'admin':
                 selected_cid = combo_cid.get()
                 if not selected_cid:
                     messagebox.showwarning("!", "Vui lòng chọn Công ty")
@@ -291,7 +291,7 @@ class AttendanceUI:
         entry_bday = tk.Entry(root, width=30)
         entry_bday.pack(pady=2)
 
-        if session_role == 'admin' and mongo_db:
+        if str(session_role).lower() == 'admin' and mongo_db:
             from tkinter import ttk
             tk.Label(root, text="Phân quyền Công ty *:").pack(pady=(5, 0))
             companies = mongo_db.get_all_companies()
