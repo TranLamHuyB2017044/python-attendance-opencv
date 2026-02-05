@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 from loguru import logger
+from src.attendance.mongodb_mgr import mongo_db
 
 # State Management Constants
 STATE_MENU = 0
@@ -552,7 +553,7 @@ class AttendanceUI:
         tree.column("time", width=180)
         tree.column("status", width=100)
 
-        # logs structure from sqlite: (id, user_id, user_name, timestamp, date, status, image_path)
+        # logs structure from MongoDB: (id, user_id, user_name, timestamp, date, status, image_path)
         for log in logs:
             # Note: status is at index 5 now
             status_val = log[5] if len(log) > 5 else "N/A"
@@ -571,12 +572,10 @@ class AttendanceUI:
             
             item_values = tree.item(selected_item)['values']
             # item_values: (id, user_id, name, time, status)
-            # Find the original log to get the image_path
-            log_id = item_values[0]
-            log_data = next((l for l in logs if l[0] == log_id), None)
+            log_id = str(item_values[0])
+            log_data = next((l for l in logs if str(l[0]) == log_id), None)
             
             if log_data:
-                # log_data: (id, user_id, user_name, timestamp, date, status, image_path)
                 res = hkb_service.upload_attendance(
                     user_id=log_data[1],
                     user_name=log_data[2],
@@ -589,9 +588,42 @@ class AttendanceUI:
                 else:
                     messagebox.showerror("Lỗi", "Upload thất bại. Vui lòng kiểm tra cấu hình HKB.")
 
+        def on_view_image():
+            selected_item = tree.selection()
+            if not selected_item:
+                messagebox.showwarning("Cảnh báo", "Vui lòng chọn một lượt điểm danh để xem ảnh!")
+                return
+            
+            from src.attendance.mongodb_mgr import mongo_db
+            import cv2
+            import numpy as np
+            from tkinter import messagebox
+
+            item_values = tree.item(selected_item)['values']
+            log_id = str(item_values[0])
+            user_name = item_values[2]
+            
+            # Fetch image from MongoDB
+            img_bytes = mongo_db.get_log_image(log_id)
+            if img_bytes:
+                # Decode WebP/Image from bytes
+                nparr = np.frombuffer(img_bytes, np.uint8)
+                img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                
+                if img is not None:
+                    # Show image in a new OpenCV window
+                    win_title = f"Anh diem danh: {user_name} ({log_id})"
+                    cv2.imshow(win_title, img)
+                    cv2.waitKey(1) # Keep window responsive
+                else:
+                    messagebox.showerror("Lỗi", "Không thể hiển thị dữ liệu ảnh.")
+            else:
+                messagebox.showwarning("Thông báo", "Lượt điểm danh này không có dữ liệu ảnh hoặc ảnh đã bị xóa.")
+
         btn_container = tk.Frame(root)
         btn_container.pack(pady=10)
 
+        tk.Button(btn_container, text="XEM ẢNH", command=on_view_image, width=15, bg="#f39c12", fg="white").pack(side=tk.LEFT, padx=5)
         tk.Button(btn_container, text="UPLOAD LÊN HKB", command=on_upload, width=15, bg="#28a745", fg="white").pack(side=tk.LEFT, padx=5)
         tk.Button(btn_container, text="ĐÓNG", command=root.destroy, width=15, bg="#007bff", fg="white").pack(side=tk.LEFT, padx=5)
 
@@ -721,12 +753,8 @@ class AttendanceUI:
             
             api_key = auth_data["key"]
 
-            # Yêu cầu nhập mật khẩu xác nhận
-            from tkinter import simpledialog
-            password = simpledialog.askstring("Xác thực", f"Nhập mật khẩu của hệ thống '{conn_name}' để xác nhận hủy:", show='*')
-            
-            if not password:
-                return
+            # Mặc định mật khẩu là 123 khi hủy kết nối
+            password = "123"
 
             root.config(cursor="watch")
             root.update()

@@ -20,6 +20,7 @@ class MongoDBManager:
             self.users = self.db["users"] # Admins and Company accounts
             self.auth_services = self.db["auth_services"] # HKB/Auth Connections
             self.settings = self.db["settings"] # System Settings
+            self.employees = self.db["employees"] # Metadata for registered employees
             
             # Create indexes for faster queries
             self.logs.create_index([("company_id", 1), ("date", -1)])
@@ -27,6 +28,7 @@ class MongoDBManager:
             self.users.create_index([("username", 1)], unique=True)
             self.auth_services.create_index([("uuid", 1)], unique=True)
             self.settings.create_index([("key", 1)], unique=True)
+            self.employees.create_index([("company_id", 1), ("user_id", 1)], unique=True)
             
             logger.info("Connected to MongoDB Cloud successfully")
         except Exception as e:
@@ -55,13 +57,16 @@ class MongoDBManager:
             logger.error(f"Failed to set setting {key}: {e}")
             return False
 
-    def log_attendance(self, user_id, user_name, status=None, frame=None):
+    def log_attendance(self, user_id, user_name, status=None, frame=None, company_id=None):
         """
         Record a new attendance entry to MongoDB Cloud.
         """
         try:
             from src.utils.time_manager import time_mgr
             timestamp_str, date_str = time_mgr.get_formatted_time()
+            
+            # Use provided company_id or fallback to default
+            cid = company_id or MongoDbConfig.COMPANY_ID
             
             # Handle image compression to WebP
             image_blob = None
@@ -79,7 +84,7 @@ class MongoDBManager:
                     status = "FAILED"
                 else:
                     last_record = self.logs.find_one(
-                        {"user_id": user_id, "date": date_str, "company_id": MongoDbConfig.COMPANY_ID},
+                        {"user_id": user_id, "date": date_str, "company_id": cid},
                         sort=[("_id", -1)]
                     )
                     if not last_record or last_record.get('status') in ['OUT', 'FAILED']:
@@ -93,13 +98,13 @@ class MongoDBManager:
                 "timestamp": timestamp_str,
                 "date": date_str,
                 "status": status,
-                "company_id": MongoDbConfig.COMPANY_ID,
+                "company_id": cid,
                 "image_webp": image_blob,
                 "created_at": datetime.utcnow()
             }
             
             self.logs.insert_one(log_entry)
-            logger.info(f"Logged to MongoDB ({status}) for: {user_name} (Company: {MongoDbConfig.COMPANY_ID})")
+            logger.info(f"Logged to MongoDB ({status}) for: {user_name} (Company: {cid})")
             return status
             
         except Exception as e:
@@ -135,6 +140,29 @@ class MongoDBManager:
                 "user_id": user.get("user_id") # Trả về user_id (int) nếu có
             }
         return None
+
+    def save_employee(self, user_id, name, birthday, company_id):
+        """
+        Store or update employee metadata in MongoDB.
+        """
+        try:
+            employee_data = {
+                "user_id": user_id,
+                "name": name,
+                "birthday": birthday,
+                "company_id": company_id,
+                "updated_at": datetime.utcnow()
+            }
+            self.employees.update_one(
+                {"user_id": user_id, "company_id": company_id},
+                {"$set": employee_data, "$setOnInsert": {"created_at": datetime.utcnow()}},
+                upsert=True
+            )
+            logger.info(f"MongoDB: Saved employee metadata for {name} (ID: {user_id})")
+            return True
+        except Exception as e:
+            logger.error(f"MongoDB: Failed to save employee: {e}")
+            return False
 
     # --- Management Methods ---
     

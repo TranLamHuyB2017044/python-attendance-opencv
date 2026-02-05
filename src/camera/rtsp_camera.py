@@ -97,7 +97,18 @@ class RTSPCamera:
             
         with self.lock:
             if self.frame is not None:
-                return True, self.frame.copy()
+                frame = self.frame.copy()
+                
+                # Apply Center Crop if ROI is smaller than frame
+                h, w = frame.shape[:2]
+                roi_w, roi_h = CameraConfig.ROI_SIZE
+                
+                if roi_w < w or roi_h < h:
+                    x1 = max(0, (w - roi_w) // 2)
+                    y1 = max(0, (h - roi_h) // 2)
+                    frame = frame[y1:y1+roi_h, x1:x1+roi_w]
+                
+                return True, frame
             return False, None
 
     def reconnect(self) -> bool:

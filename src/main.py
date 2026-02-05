@@ -82,6 +82,7 @@ def enroll_from_camera(camera, face_rec, attendance, ui):
 
     if len(samples) >= 3:
         attendance.upsert_user(user_name, user_id, birthday, samples, company_id=target_company)
+        mongo_db.save_employee(user_id, user_name, birthday, target_company)
         logger.success(f"Da dang ky: {user_name} (ID: {user_id}) cho cong ty: {target_company}")
         
         # Show success message
@@ -125,6 +126,7 @@ def enroll_by_upload(face_rec, attendance, ui):
             target_company = ui.session_company_id
             
         attendance.upsert_user(u_name, u_id, u_bday, samples, company_id=target_company)
+        mongo_db.save_employee(u_id, u_name, u_bday, target_company)
         logger.success(f"Enrolled {u_name} via upload for company: {target_company}")
         
         # Show success message
@@ -144,7 +146,7 @@ def main():
         face_rec = FaceRecognition()
         attendance = QdrantAttendanceManager()
         camera = RTSPCamera()
-        tracker = FaceTracker(threshold_seconds=2.5)
+        tracker = FaceTracker(threshold_seconds=2.0)
         ui = AttendanceUI()
     except Exception as e:
         logger.critical(f"Khoi tao that bai: {e}")
@@ -269,11 +271,23 @@ def main():
                 continue
 
             elif ui.current_state == STATE_HISTORY:
-                # Filter history by company
-                logs = mongo_db.get_todays_logs(company_id=ui.session_company_id)
+                # 1. Logic phân quyền xem lịch sử
+                target_company = ui.session_company_id
                 
-                # Format for display (The UI expects a list of tuples/lists or similar for sqlite legacy)
-                # But since we switched to Cloud, let's pass dicts if adapted or use tuples
+                # Nếu là admin, cho phép chọn công ty
+                if ui.session_role == "admin":
+                    companies = mongo_db.get_all_companies()
+                    picked = ui.pick_company_ui(companies)
+                    if picked:
+                        target_company = picked
+                    else:
+                        ui.current_state = STATE_MENU
+                        continue
+                
+                # 2. Filter history by company
+                logs = mongo_db.get_todays_logs(company_id=target_company)
+                
+                # Format for display
                 display_logs = []
                 for l in logs:
                     display_logs.append((

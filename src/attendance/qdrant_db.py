@@ -42,13 +42,18 @@ class QdrantAttendanceManager:
                 )
                 logger.success(f"Collection '{self.collection_name}' created.")
             
-            # Ensure payload index for user_id exists (required for filtering in count)
+            # Ensure payload index for user_id and company_id exists
             self.client.create_payload_index(
                 collection_name=self.collection_name,
                 field_name="user_id",
                 field_schema=models.PayloadSchemaType.KEYWORD,
             )
-            logger.info(f"Payload index for 'user_id' ensured in {self.collection_name}")
+            self.client.create_payload_index(
+                collection_name=self.collection_name,
+                field_name="company_id",
+                field_schema=models.PayloadSchemaType.KEYWORD,
+            )
+            logger.info(f"Payload indexes for 'user_id' and 'company_id' ensured in {self.collection_name}")
             
         except Exception as e:
             logger.error(f"Failed to ensure Qdrant collection/indexes: {e}")
@@ -92,6 +97,7 @@ class QdrantAttendanceManager:
             "name": "Unknown",
             "user_id": "Unknown",
             "birthday": "N/A",
+            "company_id": "Unknown",
             "score": 0.0,
             "detect_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "vector_count": 0
@@ -132,6 +138,7 @@ class QdrantAttendanceManager:
                 "name": payload.get("user_name", "Unknown"),
                 "user_id": user_id,
                 "birthday": payload.get("birthday", "N/A"),
+                "company_id": payload.get("company_id", "Unknown"),
                 "score": score,
                 "detect_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "vector_count": count_res.count

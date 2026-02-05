@@ -62,6 +62,7 @@ Hãy đảm bảo bạn đã kết nối Camera IP hoặc có luồng RTSP hợp
 
 ```bash
 python -m src.main
+python -m src.api
 ```
 
 ### Các phím điều khiển:
