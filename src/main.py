@@ -188,7 +188,8 @@ def main():
                 success, frame = camera.read_frame()
                 if not success: continue
 
-                faces = face_rec.detect_and_extract(frame)
+                from src.config import RecognitionConfig
+                faces = face_rec.detect_and_extract(frame, max_faces=RecognitionConfig.MAX_FACES)
                 tracker.update(faces, attendance, frame)
                 display_frame = face_rec.draw_faces(frame, faces)
                 
@@ -293,22 +294,25 @@ def main():
                         else:
                             ui.current_state = STATE_MENU
                             continue
-                    else:
-                        # Chưa có công ty -> Lấy nốt log của session_company_id hiện tại (admin/default)
-                        pass
                 
-                # 2. Filter history by company
-                logs = mongo_db.get_todays_logs(company_id=target_company)
+                # 2. Chọn ngày cần xem
+                target_date = ui.get_date_form(title=f"Lịch sử [{target_company}]")
+                if not target_date:
+                    ui.current_state = STATE_MENU
+                    continue
+
+                # 3. Filter history by company and date
+                logs = mongo_db.get_logs(company_id=target_company, date=target_date)
                 
                 # Format for display
                 display_logs = []
                 for l in logs:
                     display_logs.append((
                         str(l["_id"]), l["user_id"], l["user_name"], 
-                        l["timestamp"], l["date"], l["status"], None
+                        l["timestamp"], l["date"], l["status"], l.get("image_webp")
                     ))
                 
-                ui.show_attendance_logs_ui(display_logs)
+                ui.show_attendance_logs_ui(display_logs, title=f"Lịch sử ngày {target_date}")
                 ui.current_state = STATE_MENU
                 continue
 

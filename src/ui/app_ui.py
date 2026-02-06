@@ -77,15 +77,19 @@ class AttendanceUI:
                 elif col2_L < x < col2_R and cY+gap_y*2+btn_h < y < cY+gap_y*2+btn_h*2: 
                     self.current_state = STATE_HISTORY
 
+            # --- ADMIN & COMPANY MANAGEMENT ---
+            if str(self.session_role).lower() in ['admin', 'company']:
+                # 1. KET NOI HKB (Bottom Left)
+                if h - int(84*(h/600)) < y < h - int(20*(h/600)):
+                    if cX - int(380*(w/800)) < x < cX - int(140*(w/800)):
+                        self.current_state = STATE_HKB_LIST
+
             # --- ADMIN ONLY SYSTEM MANAGEMENT ---
             if str(self.session_role).lower() == 'admin':
                 # --- ADMIN ONLY BOTTOM BAR ---
                 if h - int(84*(h/600)) < y < h - int(20*(h/600)):
-                    # 1. KET NOI HKB (Bottom Left)
-                    if cX - int(380*(w/800)) < x < cX - int(140*(w/800)):
-                        self.current_state = STATE_HKB_LIST
                     # 2. QUAN LY USER (Bottom Center)
-                    elif cX - int(120*(w/800)) < x < cX + int(120*(w/800)):
+                    if cX - int(120*(w/800)) < x < cX + int(120*(w/800)):
                         self.current_state = STATE_CLOUD_USER
                     # 3. QUAN LY CONG TY (Bottom Right)
                     elif cX + int(140*(w/800)) < x < cX + int(380*(w/800)): 
@@ -171,18 +175,21 @@ class AttendanceUI:
         cv2.putText(frame, "Phat trien boi Biitech", (w - int(180 * (w/800)), h - int(20 * (h/600))),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4 * (w/800), (100, 100, 100), 1)
         
-        # Bottom Management Buttons (Admin Only)
-        if str(self.session_role).lower() == 'admin':
-            # 1. Connect HKB (Left)
+        # Management Buttons
+        role_lower = str(self.session_role).lower()
+        if role_lower in ['admin', 'company']:
+            # 1. Connect HKB (Left) - Available for both Admin and Company
+            cv2.rectangle(frame, (cX - 380, h - 84), (cX - 140, h - 20), (50, 100, 50), -1) # Dark Green
             cv2.putText(frame, "KET NOI HKB", (cX - 355, h - 40),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
-            # 2. Manage Users (Center)
+        if role_lower == 'admin':
+            # 2. Manage Users (Center) - Admin Only
             cv2.rectangle(frame, (cX - 120, h - 84), (cX + 120, h - 20), (60, 60, 180), -1)
             cv2.putText(frame, "QUAN LY USER", (cX - 95, h - 40),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
-            # 3. Manage Company (Right)
+            # 3. Manage Company (Right) - Admin Only
             cv2.rectangle(frame, (cX + 140, h - 84), (cX + 380, h - 20), (100, 50, 150), -1)
             cv2.putText(frame, "QUAN LY CONG TY", (cX + 160, h - 40),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
@@ -515,15 +522,60 @@ class AttendanceUI:
         return selected["id"]
 
     @staticmethod
-    def show_attendance_logs_ui(logs):
+    def get_date_form(title="Chọn ngày"):
+        """
+        Dialog to select a date. Returns string YYYY-MM-DD or None.
+        """
+        import tkinter as tk
+        from datetime import datetime
+        
+        root = tk.Tk()
+        root.title(title)
+        root.geometry("300x180")
+        root.attributes('-topmost', True)
+        
+        result = {"date": None}
+        today = datetime.now().strftime("%Y-%m-%d")
+        
+        tk.Label(root, text="NHẬP NGÀY CẦN XEM", font=("Arial", 11, "bold")).pack(pady=15)
+        
+        tk.Label(root, text="Định dạng: YYYY-MM-DD").pack()
+        entry_date = tk.Entry(root, width=20)
+        entry_date.insert(0, today)
+        entry_date.pack(pady=5)
+        
+        def on_ok():
+            date_str = entry_date.get().strip()
+            # Simple validation
+            try:
+                datetime.strptime(date_str, "%Y-%m-%d")
+                result["date"] = date_str
+                root.destroy()
+            except ValueError:
+                from tkinter import messagebox
+                messagebox.showerror("Lỗi", "Định dạng ngày không hợp lệ! Vui lòng nhập YYYY-MM-DD")
+
+        def on_cancel():
+            root.destroy()
+
+        btn_frame = tk.Frame(root)
+        btn_frame.pack(pady=15)
+        tk.Button(btn_frame, text="XÁC NHẬN", command=on_ok, bg="green", fg="white", width=12).pack(side=tk.LEFT, padx=5)
+        tk.Button(btn_frame, text="HỦY", command=on_cancel, width=12).pack(side=tk.LEFT, padx=5)
+        
+        root.mainloop()
+        return result["date"]
+
+    @staticmethod
+    def show_attendance_logs_ui(logs, title="Lịch sử điểm danh"):
         """
         Displays a table of attendance logs using tkinter.
         """
         import tkinter as tk
-        from tkinter import ttk
+        from tkinter import ttk, messagebox
 
         root = tk.Tk()
-        root.title("Lịch sử điểm danh (Hôm nay)")
+        root.title(title)
         
         window_width, window_height = 700, 500
         screen_width = root.winfo_screenwidth()
@@ -534,7 +586,7 @@ class AttendanceUI:
         
         root.attributes('-topmost', True)
 
-        label = tk.Label(root, text=f"Lịch sử điểm danh hôm nay ({len(logs)} lượt)", font=("Arial", 11, "bold"))
+        label = tk.Label(root, text=f"{title} ({len(logs)} lượt)", font=("Arial", 11, "bold"))
         label.pack(pady=10)
 
         # Create Treeview
@@ -774,6 +826,57 @@ class AttendanceUI:
                 err_msg = result.message if result and result.message else "Hủy kết nối thất bại"
                 messagebox.showerror("Lỗi", err_msg)
 
+        def on_get_employees():
+            sel = tree.selection()
+            if not sel:
+                messagebox.showwarning("!", "Vui lòng chọn hệ thống để lấy danh sách nhân sự")
+                return
+            
+            item = tree.item(sel[0])['values']
+            conn_name = item[1]
+            remote_sys_id = item[2]
+            endpoint = item[3]
+            status_str = item[5]
+
+            if status_str != "Đã kết nối":
+                messagebox.showwarning("!", "Hệ thống này chưa được kết nối! Vui lòng đăng ký trước.")
+                return
+
+            # Lấy API Key từ MongoDB cục bộ
+            auth_data = mongo_db.auth_services.find_one({"uuid": remote_sys_id})
+            if not auth_data or not auth_data.get("key"):
+                messagebox.showerror("Lỗi", "Không tìm thấy API Key cục bộ để thực hiện lấy dữ liệu!")
+                return
+            
+            api_key = auth_data["key"]
+            ext_id = auth_data.get("user_id", current_user_id)
+
+            root.config(cursor="watch")
+            root.update()
+            
+            result = hkb_service.get_employees(
+                endpoint=endpoint,
+                system_id=remote_sys_id,
+                api_key=api_key,
+                user_id=ext_id
+            )
+            
+            root.config(cursor="")
+            
+            if result and result.success:
+                employees = result.data
+                if not employees or not isinstance(employees, list):
+                    messagebox.showinfo("Thông báo", "Không có dữ liệu nhân sự hoặc định dạng không đúng.")
+                    return
+                
+                # Hiển thị danh sách nhân sự trong một cửa sổ mới
+                self.show_remote_employees_ui(conn_name, employees)
+            else:
+                err_msg = result.message if result and result.message else "Lấy danh sách nhân sự thất bại"
+                if result and result.data and "raw" in result.data:
+                    logger.debug(f"Raw response: {result.data['raw']}")
+                messagebox.showerror("Lỗi", err_msg)
+
         tree.pack(expand=True, fill="both", padx=10, pady=10)
         
         btn_container = tk.Frame(root)
@@ -781,10 +884,53 @@ class AttendanceUI:
 
         tk.Button(btn_container, text="LÀM MỚI", command=refresh_list, width=15).pack(side=tk.LEFT, padx=5)
         tk.Button(btn_container, text="ĐĂNG KÝ HỆ THỐNG", command=on_register, width=15, bg="#28a745", fg="white").pack(side=tk.LEFT, padx=5)
+        tk.Button(btn_container, text="LẤY DANH SÁCH NV", command=on_get_employees, width=15, bg="#17a2b8", fg="white").pack(side=tk.LEFT, padx=5)
         tk.Button(btn_container, text="HỦY KẾT NỐI", command=on_revoke, width=15, bg="#dc3545", fg="white").pack(side=tk.LEFT, padx=5)
         tk.Button(btn_container, text="ĐÓNG", command=root.destroy, width=15, bg="#007bff", fg="white").pack(side=tk.LEFT, padx=5)
 
         refresh_list()
+        root.mainloop()
+
+    def show_remote_employees_ui(self, system_name, employees):
+        """
+        Displays a list of employees fetched from a remote system.
+        """
+        import tkinter as tk
+        from tkinter import ttk
+
+        root = tk.Tk()
+        root.title(f"Nhân viên từ {system_name}")
+        root.geometry("600x450")
+        root.attributes('-topmost', True)
+
+        tk.Label(root, text=f"DANH SÁCH NHÂN VIÊN - {system_name}", font=("Arial", 12, "bold")).pack(pady=10)
+        tk.Label(root, text=f"Tổng cộng: {len(employees)} nhân sự", font=("Arial", 10)).pack()
+
+        # Create Treeview
+        columns = ("user_id", "name", "group")
+        tree = ttk.Treeview(root, columns=columns, show="headings")
+        
+        tree.heading("user_id", text="Mã nhân viên")
+        tree.heading("name", text="Họ và tên")
+        tree.heading("group", text="Nhóm/Phòng ban")
+        
+        tree.column("user_id", width=100, anchor="center")
+        tree.column("name", width=250)
+        tree.column("group", width=150)
+
+        for emp in employees:
+            # Handle different possible field names (SDK/API variations)
+            u_id = emp.get("user_id") or emp.get("uid") or emp.get("id") or emp.get("barcode") or "N/A"
+            u_name = emp.get("full_name") or emp.get("name") or emp.get("user_name") or "Unknown"
+            u_group = emp.get("group_id") or emp.get("company_id") or emp.get("description") or emp.get("sex") or "-"
+            
+            tree.insert("", tk.END, values=(u_id, u_name, u_group))
+
+        tree.pack(expand=True, fill="both", padx=10, pady=10)
+        
+        btn_close = tk.Button(root, text="ĐÓNG", command=root.destroy, width=15, bg="#007bff", fg="white")
+        btn_close.pack(pady=10)
+
         root.mainloop()
 
     @staticmethod

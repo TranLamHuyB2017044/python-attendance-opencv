@@ -204,5 +204,73 @@ class HKBService:
             logger.error(f"HKB Service: Upload attendance failed: {e}")
             return None
 
+    def get_employees(self, endpoint, system_id, api_key, user_id):
+        """
+        Fetch employee list from external endpoint.
+        """
+        try:
+            url = f"{endpoint.rstrip('/')}/api/hr/users"
+
+            logger.info(f"HKB Service: Fetching employees from {url}")
+            coro = self.client.get_employees(
+                url=url,
+                system_id=system_id,
+                api_key=api_key,
+                user_id=user_id
+            )
+            result = self._run_sync(coro)
+            if result:
+                logger.info(f"HKB Service: Get employees result: Success={result.success}")
+                if result.data:
+                    try:
+                        logger.info(f"HKB Service: Employee List JSON: {json.dumps(result.data, ensure_ascii=False)}")
+                    except Exception as e:
+                        logger.error(f"Failed to log employee list JSON: {e}")
+                
+                if result.success and result.data:
+                    # Save fetched employees to local DB
+                    employees = result.data
+                    if isinstance(employees, list):
+                        saved_count = 0
+                        for emp in employees:
+                            # Map fields based on various possible API responses
+                            u_id = emp.get("user_id") or emp.get("uid") or emp.get("id") or emp.get("barcode")
+                            u_name = emp.get("full_name") or emp.get("name") or emp.get("user_name")
+                            u_bday = emp.get("birthday") or emp.get("birth_day")
+                            u_cid = emp.get("company_id") or emp.get("group_id") or emp.get("uuid")
+                            
+                            if u_id and u_name:
+                                # Default company fallback if u_cid is missing or same as system uuid
+                                target_cid = u_cid if u_cid else "default"
+                                if mongo_db.save_employee(u_id, u_name, u_bday, target_cid):
+                                    saved_count += 1
+                        logger.success(f"HKB Service: Automatically saved {saved_count} employees to local DB")
+
+                if not result.success and result.data and "raw" in result.data:
+                    logger.warning(f"HKB Service: Raw response: {result.data['raw'][:1000]}")
+            return result
+        except Exception as e:
+            logger.error(f"HKB Service: Fetch employees failed: {e}")
+            return None
+
+    def get_hr_users(self, endpoint, system_id, api_key, user_id):
+        """
+        Fetch HR user list from external endpoint. 
+        Intended for tester environment.
+        """
+        try:
+            logger.info(f"HKB Service: Fetching HR users from {endpoint}")
+            coro = self.client.get_hr_users(
+                endpoint=endpoint,
+                system_id=system_id,
+                api_key=api_key,
+                user_id=user_id
+            )
+            result = self._run_sync(coro)
+            return result
+        except Exception as e:
+            logger.error(f"HKB Service: Get HR users failed: {e}")
+            return None
+
 # Global instance
 hkb_service = HKBService()

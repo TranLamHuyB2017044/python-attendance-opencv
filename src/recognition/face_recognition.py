@@ -55,19 +55,22 @@ class FaceRecognition:
             logger.error(f"Failed to load InsightFace model: {e}")
             raise e
 
-    def detect_and_extract(self, frame: np.ndarray) -> List[Any]:
+    def detect_and_extract(self, frame: np.ndarray, max_faces: Optional[int] = None) -> List[Any]:
         """
         Detect faces and extract embeddings from a frame.
-        
-        Args:
-            frame: Input image (BGR from OpenCV)
-            
-        Returns:
-            List of Face objects containing bbox, kps, embedding, etc.
+        Sorted by size (largest first).
         """
         try:
-            # InsightFace expects BGR image (OpenCV default)
             faces = self.app.get(frame)
+            
+            # Sort by bbox area: (x2-x1)*(y2-y1) - largest first
+            if faces:
+                faces.sort(key=lambda x: (x.bbox[2]-x.bbox[0])*(x.bbox[3]-x.bbox[1]), reverse=True)
+                
+                # Limit number of faces if specified
+                if max_faces is not None:
+                    faces = faces[:max_faces]
+                    
             return faces
         except Exception as e:
             logger.error(f"Error during face detection/extraction: {e}")

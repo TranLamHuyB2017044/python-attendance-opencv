@@ -29,11 +29,32 @@ class FaceTracker:
         """
         def thread_task():
             try:
+                from src.utils.string_utils import remove_accents
+                from src.utils.time_manager import time_mgr
+                
+                # 1. Format time HH:MM:SS from VN Time
+                vn_now = time_mgr.get_accurate_time()
+                time_str = vn_now.strftime("%H:%M:%S")
+                
+                # 2. Format user_name without accents for the JSON field
+                name_no_accents = remove_accents(user_name)
+                
+                # 3. Format voice text for TTS
+                if status in ["IN", "OUT"]:
+                    action_vn = "vào" if status == "IN" else "ra"
+                    voice_text = f"Xin chào {user_name}, bạn đã chấm công {action_vn} thành công"
+                else:
+                    # Default for unknown/unauthorized
+                    voice_text = "Xin vui lòng thử lại"
+
                 payload = {
                     "user_id": user_id,
-                    "user_name": user_name,
-                    "status": status or "DETECTED"
+                    "user_name": name_no_accents,
+                    "status": status or "DETECTED",
+                    "voice_text": voice_text,
+                    "time": time_str
                 }
+                
                 response = requests.post(
                     WebhookConfig.USER_WEBHOOK_URL,
                     json=payload,
@@ -145,12 +166,12 @@ class FaceTracker:
                     # Người mới: Cần đủ thời gian ổn định (2.0s)
                     if time_stayed >= self.threshold_seconds:
                         can_attempt = True
-                elif f_data['status'] == 'RETRY_WAIT':
+                elif f_data['status'] == 'RETRY_WAIT' or f_data['status'] == 'UNAUTHORIZED':
                     if f_data['unknown_attempts'] < 5:
                         # Chu kỳ 1: Thử lại liên tục 5 lần đầu (không delay)
                         can_attempt = True
-                    elif f_data['unknown_attempts'] < 10:
-                        # Chu kỳ 2: Sau 5 lần xịt, nghỉ 5s rồi cho thử tiếp 5 lần nữa
+                    else:
+                        # Chu kỳ 2: Sau 5 lần, cứ mỗi 5 giây cho phép nhận diện lại để gửi webhook liên tục
                         if wait_time >= 5.0:
                             can_attempt = True
 
@@ -199,23 +220,23 @@ class FaceTracker:
                         f_data['unknown_attempts'] += 1
                         f_data['last_attempt_time'] = current_time
                         f_data['user_data'] = user_data
-                        f_data['status'] = 'RETRY_WAIT'
                         
-                        # Ghi log lỗi vào DB tại các mốc quan trọng
-                        if f_data['unknown_attempts'] == 5:
-                            # Sau 5 lần đầu thất bại: Ghi log 1 lần
-                            self._save_log_with_bbox(frame, face, "Unknown", "Người lạ", user_data.get('score', 0.0), is_known=False, status="FAILED", company_id=user_data.get('company_id'))
-                            logger.warning(f"Unknown face 5 times. Cooldown 5s started.")
+                        # Bắt đầu từ lần thứ 5, gửi Webhook liên tục (mỗi 5 giây theo logic RETRY_WAIT ở trên)
+                        if f_data['unknown_attempts'] >= 5:
+                            logger.warning(f"Unknown face detected (Attempt {f_data['unknown_attempts']}). Sending webhook...")
+                            self._send_user_webhook("Unknown", f"Nguoi la {f_data['unknown_attempts']}", "unknown")
+                            
+                            # Ghi log DB cục bộ và MongoDB mỗi 5 lần để tránh spam DB nhưng vẫn có dữ liệu
+                            if f_data['unknown_attempts'] % 5 == 0:
+                                self._save_log_with_bbox(frame, face, "Unknown", "Người lạ", user_data.get('score', 0.0), is_known=False, status="FAILED", company_id=user_data.get('company_id'))
                         
-                        elif f_data['unknown_attempts'] == 10:
-                            # Sau 10 lần tổng cộng: Đánh dấu là Người lạ/Truy cập trái phép
+                        if f_data['unknown_attempts'] >= 10:
                             f_data['status'] = 'UNAUTHORIZED'
-                            self._save_log_with_bbox(frame, face, "Stranger", "Truy cập lạ", user_data.get('score', 0.0), is_known=False, status="FAILED", company_id=user_data.get('company_id'))
-                            logger.error("Unauthorized access confirmed: 10 failed attempts.")
-                        
                         else:
-                            # Các lần thử khác chỉ log console để theo dõi
-                            logger.warning(f"Unknown face. Attempt {f_data['unknown_attempts']}/10")
+                            f_data['status'] = 'RETRY_WAIT'
+                        
+                        # Các lần thử khác chỉ log console để theo dõi
+                        logger.warning(f"Unknown face. Attempt {f_data['unknown_attempts']} in progress.")
                 
                 updated_faces_map[matched_id] = f_data
 

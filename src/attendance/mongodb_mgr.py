@@ -111,14 +111,20 @@ class MongoDBManager:
             logger.error(f"Failed to log to MongoDB: {e}")
             return None
 
+    def get_logs(self, company_id=None, date=None):
+        """Fetch logs for a specific date and company."""
+        cid = company_id or MongoDbConfig.COMPANY_ID
+        query = {"company_id": cid}
+        if date:
+            query["date"] = date
+        
+        return list(self.logs.find(query).sort("_id", -1))
+
     def get_todays_logs(self, company_id=None):
         """Fetch logs for today for a specific company."""
         from src.utils.time_manager import time_mgr
         _, today = time_mgr.get_formatted_time()
-        
-        cid = company_id or MongoDbConfig.COMPANY_ID
-        query = {"date": today, "company_id": cid}
-        return list(self.logs.find(query).sort("_id", -1))
+        return self.get_logs(company_id=company_id, date=today)
 
     def get_log_image(self, log_id):
         """Retrieve binary image data from MongoDB."""

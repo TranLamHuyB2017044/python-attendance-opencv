@@ -23,7 +23,7 @@ class RTSPCamera:
         width: Optional[int] = None,
         height: Optional[int] = None,
         fps: Optional[int] = None,
-        reconnect_delay: int = 5,
+        reconnect_delay: int = 3,
     ):
         self.rtsp_url = rtsp_url or CameraConfig.RTSP_URL
         self.width = width or CameraConfig.WIDTH
@@ -99,14 +99,14 @@ class RTSPCamera:
             if self.frame is not None:
                 frame = self.frame.copy()
                 
-                # Apply Center Crop if ROI is smaller than frame
-                h, w = frame.shape[:2]
-                roi_w, roi_h = CameraConfig.ROI_SIZE
+                # No cropping - keep original camera size
+                # h, w = frame.shape[:2]
+                # roi_w, roi_h = CameraConfig.ROI_SIZE
                 
-                if roi_w < w or roi_h < h:
-                    x1 = max(0, (w - roi_w) // 2)
-                    y1 = max(0, (h - roi_h) // 2)
-                    frame = frame[y1:y1+roi_h, x1:x1+roi_w]
+                # if roi_w < w or roi_h < h:
+                #     x1 = max(0, (w - roi_w) // 2)
+                #     y1 = max(0, (h - roi_h) // 2)
+                #     frame = frame[y1:y1+roi_h, x1:x1+roi_w]
                 
                 return True, frame
             return False, None

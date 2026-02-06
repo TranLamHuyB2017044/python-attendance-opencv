@@ -6,6 +6,8 @@ from datetime import datetime
 from src.attendance.mongodb_mgr import mongo_db
 from src.config import ApiConfig, CAPTURES_DIR
 import uvicorn
+import json
+from loguru import logger
 from bson.objectid import ObjectId
 
 app = FastAPI(title="Face Attendance External API")
@@ -89,6 +91,84 @@ async def get_log_image(log_id: str):
         return Response(content=img_bytes, media_type="image/webp")
     except HTTPException:
         raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/share/employees")
+async def get_shared_employees(
+    authorization: str = Header(..., description="Bearer <token>")
+):
+    """
+    Fetch all employees for sharing with other systems via HKB Auth flow.
+    """
+    # 1. Token check
+    token = authorization.replace("Bearer ", "")
+    user_context = VALID_TOKENS.get(token)
+    if not user_context:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    cid = user_context["company_id"]
+    
+    try:
+        # Fetch employees from MongoDB for this company
+        employees_cursor = mongo_db.employees.find({"company_id": cid})
+        results = []
+        for emp in employees_cursor:
+            results.append({
+                "user_id": emp["user_id"],
+                "name": emp["name"],
+                "group_id": emp.get("group_id", cid),
+                "birthday": emp.get("birthday")
+            })
+        
+        logger.info(f"API: Sharing {len(results)} employees for company {cid}")
+        logger.debug(f"Employee Data JSON: {json.dumps(results, ensure_ascii=False)}")
+
+        return {
+            "success": True,
+            "status": "success",
+            "message": f"Found {len(results)} employees for company {cid}",
+            "data": results
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.api_route("/api/hr/users", methods=["GET", "POST"])
+async def get_hr_users_api(
+    authorization: str = Header(..., description="Bearer <token>")
+):
+    """
+    Fetch all users for HR purposes, specifically for 'tester' environment.
+    """
+    # 1. Token check
+    token = authorization.replace("Bearer ", "")
+    user_context = VALID_TOKENS.get(token)
+    if not user_context:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    cid = user_context["company_id"]
+    
+    try:
+        # Fetch employees from MongoDB for this company
+        employees_cursor = mongo_db.employees.find({"company_id": cid})
+        results = []
+        for emp in employees_cursor:
+            results.append({
+                "user_id": emp["user_id"],
+                "name": emp["name"],
+                "company_id": emp["company_id"],
+                "birthday": emp.get("birthday")
+            })
+        
+        logger.info(f"API: Retrieved {len(results)} users for HR/Tester (Company: {cid})")
+        logger.debug(f"HR User Data JSON: {json.dumps(results, ensure_ascii=False)}")
+
+        return {
+            "success": True,
+            "status": "success",
+            "message": f"Retrieved {len(results)} users for HR/Tester",
+            "data": results
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -37,7 +37,7 @@ class CameraConfig:
     HEIGHT: int = int(os.getenv("CAMERA_HEIGHT", "720"))
     FPS: int = int(os.getenv("CAMERA_FPS", "30"))
     CAMERA_NAME: str = os.getenv("CAMERA_NAME", "Main Camera")
-    ROI_SIZE: Tuple[int, int] = (1024, 576) # 16:9 ratio, less cropping
+    ROI_SIZE: Tuple[int, int] = (1280, 720) # Match default resolution, no cropping
     
     @classmethod
     def validate(cls) -> bool:
@@ -65,6 +65,7 @@ class RecognitionConfig:
     EMBEDDING_DIM: int = int(os.getenv("EMBEDDING_DIM", "512"))
     TEST_MODE: bool = os.getenv("TEST_MODE", "false").lower() == "true"
     COOLDOWN_SECONDS: int = int(os.getenv("DETECTION_COOLDOWN", "3600")) # 1 hour
+    MAX_FACES: int = int(os.getenv("MAX_FACES", "100")) # Default allow multiple, can be set to 1
 
 
 class QdrantConfig:
