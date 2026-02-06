@@ -173,18 +173,24 @@ class MongoDBManager:
     # --- Management Methods ---
     
     def create_company(self, company_id, name, description=""):
-        """Create a new company record."""
+        """Create or update a company record."""
         try:
-            if self.companies.find_one({"company_id": company_id}):
-                return False, "Company ID already exists"
-            self.companies.insert_one({
-                "company_id": company_id,
-                "name": name,
-                "description": description,
-                "created_at": datetime.utcnow()
-            })
+            self.companies.update_one(
+                {"company_id": company_id},
+                {
+                    "$set": {
+                        "name": name,
+                        "description": description,
+                        "updated_at": datetime.utcnow()
+                    },
+                    "$setOnInsert": {"created_at": datetime.utcnow()}
+                },
+                upsert=True
+            )
+            logger.info(f"MongoDB: Created/Updated company {name} ({company_id})")
             return True, "Success"
         except Exception as e:
+            logger.error(f"MongoDB: Failed to create company: {e}")
             return False, str(e)
 
     def create_user(self, username, password, role, company_id):

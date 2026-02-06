@@ -57,18 +57,18 @@ class AttendanceUI:
             if col1_L < x < col1_R and cY-btn_h-gap_y < y < cY-gap_y: 
                 self.current_state = STATE_DETECT
                 
-            # 2. DANH SACH (Available to all)
-            elif col2_L < x < col2_R and cY+gap_y < y < cY+gap_y+btn_h: 
-                self.current_state = STATE_LIST
-
-            # 3. CHINH SUA (Available to all)
-            elif col2_L < x < col2_R and cY-btn_h-gap_y < y < cY-gap_y: 
-                self.current_state = STATE_EDIT
-
             # --- ADMIN & COMPANY RECOGNITION ACTIONS ---
             if str(self.session_role).lower() in ['admin', 'company']:
+                # DANH SACH
+                if col2_L < x < col2_R and cY+gap_y < y < cY+gap_y+btn_h: 
+                    self.current_state = STATE_LIST
+                
+                # CHINH SUA
+                elif col2_L < x < col2_R and cY-btn_h-gap_y < y < cY-gap_y: 
+                    self.current_state = STATE_EDIT
+
                 # DANG KY CAM (Col 1, Row 2)
-                if col1_L < x < col1_R and cY+gap_y < y < cY+gap_y+btn_h: 
+                elif col1_L < x < col1_R and cY+gap_y < y < cY+gap_y+btn_h: 
                     self.current_state = STATE_ENROLL_CAM
                 # DANG KY FILE (Col 1, Row 3)
                 elif col1_L < x < col1_R and cY+gap_y*2+btn_h < y < cY+gap_y*2+btn_h*2: 
@@ -118,6 +118,7 @@ class AttendanceUI:
         btn_w, btn_h = int(300 * (w/800)), int(60 * (h/600))
         gap_x = int(10 * (w/800))
         gap_y = int(20 * (h/600))
+        role_lower = str(self.session_role).lower()
         
         col1_x = cX - btn_w - gap_x
         col2_x = cX + gap_x
@@ -129,7 +130,7 @@ class AttendanceUI:
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8 * (w/800), (255, 255, 255), 2)
         
         # Enrollment Buttons (Available to Admin and Company Managers)
-        if self.session_role in ['admin', 'company']:
+        if role_lower in ['admin', 'company']:
             # Button 2: Enroll Camera
             cv2.rectangle(frame, (col1_x, cY + gap_y), (col1_x + btn_w, cY + gap_y + btn_h), (200, 120, 0), -1)
             cv2.putText(frame, "DANG KY (CAM)", (col1_x + int(50 * (w/800)), cY + gap_y + int(42 * (h/600))),
@@ -140,21 +141,22 @@ class AttendanceUI:
             cv2.putText(frame, "DANG KY (FILE)", (col1_x + int(50 * (w/800)), cY + gap_y*2 + btn_h + int(42 * (h/600))),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8 * (w/800), (255, 255, 255), 2)
         
-        # Column 2
-        # Button 4: Edit (All)
-        cv2.rectangle(frame, (col2_x, cY - btn_h - gap_y), (col2_x + btn_w, cY - gap_y), (100, 100, 100), -1)
-        cv2.putText(frame, "CHINH SUA", (col2_x + int(75 * (w/800)), cY - gap_y - int(18 * (h/600))),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8 * (w/800), (255, 255, 255), 2)
+        # Management Buttons (Admin & Company Only)
+        if role_lower in ['admin', 'company']:
+            # Button 4: Edit
+            cv2.rectangle(frame, (col2_x, cY - btn_h - gap_y), (col2_x + btn_w, cY - gap_y), (100, 100, 100), -1)
+            cv2.putText(frame, "CHINH SUA", (col2_x + int(75 * (w/800)), cY - gap_y - int(18 * (h/600))),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8 * (w/800), (255, 255, 255), 2)
 
-        # Button 5: List (All)
-        cv2.rectangle(frame, (col2_x, cY + gap_y), (col2_x + btn_w, cY + gap_y + btn_h), (150, 50, 150), -1)
-        cv2.putText(frame, "DANH SACH", (col2_x + int(75 * (w/800)), cY + gap_y + int(42 * (h/600))),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8 * (w/800), (255, 255, 255), 2)
+            # Button 5: List
+            cv2.rectangle(frame, (col2_x, cY + gap_y), (col2_x + btn_w, cY + gap_y + btn_h), (150, 50, 150), -1)
+            cv2.putText(frame, "DANH SACH", (col2_x + int(75 * (w/800)), cY + gap_y + int(42 * (h/600))),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8 * (w/800), (255, 255, 255), 2)
 
-        # Button 6: History
-        cv2.rectangle(frame, (col2_x, cY + gap_y*2 + btn_h), (col2_x + btn_w, cY + gap_y*2 + btn_h*2), (100, 50, 0), -1)
-        cv2.putText(frame, "LICH SU", (col2_x + int(90 * (w/800)), cY + gap_y*2 + btn_h + int(42 * (h/600))),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8 * (w/800), (255, 255, 255), 2)
+            # Button 6: History
+            cv2.rectangle(frame, (col2_x, cY + gap_y*2 + btn_h), (col2_x + btn_w, cY + gap_y*2 + btn_h*2), (100, 50, 0), -1)
+            cv2.putText(frame, "LICH SU", (col2_x + int(90 * (w/800)), cY + gap_y*2 + btn_h + int(42 * (h/600))),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8 * (w/800), (255, 255, 255), 2)
         
         # --- Instruction Table (Compact) ---
         table_x, table_y = int(30 * (w/800)), int(480 * (h/600))
@@ -176,7 +178,6 @@ class AttendanceUI:
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4 * (w/800), (100, 100, 100), 1)
         
         # Management Buttons
-        role_lower = str(self.session_role).lower()
         if role_lower in ['admin', 'company']:
             # 1. Connect HKB (Left) - Available for both Admin and Company
             cv2.rectangle(frame, (cX - 380, h - 84), (cX - 140, h - 20), (50, 100, 50), -1) # Dark Green
@@ -870,7 +871,7 @@ class AttendanceUI:
                     return
                 
                 # Hiển thị danh sách nhân sự trong một cửa sổ mới
-                self.show_remote_employees_ui(conn_name, employees)
+                self.show_remote_employees_ui(conn_name, employees, remote_sys_id)
             else:
                 err_msg = result.message if result and result.message else "Lấy danh sách nhân sự thất bại"
                 if result and result.data and "raw" in result.data:
@@ -891,45 +892,84 @@ class AttendanceUI:
         refresh_list()
         root.mainloop()
 
-    def show_remote_employees_ui(self, system_name, employees):
+    def show_remote_employees_ui(self, system_name, employees, target_company_id):
         """
-        Displays a list of employees fetched from a remote system.
+        Displays a list of employees fetched from a remote system with saving options.
         """
         import tkinter as tk
-        from tkinter import ttk
+        from tkinter import ttk, messagebox
 
         root = tk.Tk()
         root.title(f"Nhân viên từ {system_name}")
-        root.geometry("600x450")
+        root.geometry("700x550")
         root.attributes('-topmost', True)
 
         tk.Label(root, text=f"DANH SÁCH NHÂN VIÊN - {system_name}", font=("Arial", 12, "bold")).pack(pady=10)
-        tk.Label(root, text=f"Tổng cộng: {len(employees)} nhân sự", font=("Arial", 10)).pack()
+        tk.Label(root, text=f"Công ty: {target_company_id}", font=("Arial", 10, "italic"), fg="gray").pack()
+        tk.Label(root, text=f"Tìm thấy: {len(employees)} nhân sự", font=("Arial", 10)).pack(pady=5)
 
-        # Create Treeview
-        columns = ("user_id", "name", "group")
-        tree = ttk.Treeview(root, columns=columns, show="headings")
+        # Create Treeview with multiple selection enabled (default)
+        columns = ("user_id", "name", "bday", "group")
+        tree = ttk.Treeview(root, columns=columns, show="headings", selectmode="extended")
         
         tree.heading("user_id", text="Mã nhân viên")
         tree.heading("name", text="Họ và tên")
+        tree.heading("bday", text="Ngày sinh")
         tree.heading("group", text="Nhóm/Phòng ban")
         
         tree.column("user_id", width=100, anchor="center")
-        tree.column("name", width=250)
+        tree.column("name", width=200)
+        tree.column("bday", width=100, anchor="center")
         tree.column("group", width=150)
 
+        # Store full employee data for lookup
+        emp_map = {}
         for emp in employees:
-            # Handle different possible field names (SDK/API variations)
-            u_id = emp.get("user_id") or emp.get("uid") or emp.get("id") or emp.get("barcode") or "N/A"
+            u_id = emp.get("barcode") or emp.get("user_id") or emp.get("uid") or emp.get("id") or "N/A"
             u_name = emp.get("full_name") or emp.get("name") or emp.get("user_name") or "Unknown"
+            u_bday = emp.get("birthday") or emp.get("birth_day") or "N/A"
             u_group = emp.get("group_id") or emp.get("company_id") or emp.get("description") or emp.get("sex") or "-"
             
-            tree.insert("", tk.END, values=(u_id, u_name, u_group))
+            item_id = tree.insert("", tk.END, values=(u_id, u_name, u_bday, u_group))
+            emp_map[item_id] = {
+                "id": u_id,
+                "name": u_name,
+                "bday": u_bday,
+                "cid": target_company_id
+            }
 
         tree.pack(expand=True, fill="both", padx=10, pady=10)
-        
-        btn_close = tk.Button(root, text="ĐÓNG", command=root.destroy, width=15, bg="#007bff", fg="white")
-        btn_close.pack(pady=10)
+
+        def save_to_db(selected_only=False):
+            if selected_only:
+                items = tree.selection()
+                if not items:
+                    messagebox.showwarning("!", "Vui lòng chọn ít nhất một nhân viên")
+                    return
+                targets = [emp_map[i] for i in items]
+                msg_confirm = f"Lưu {len(targets)} nhân viên đã chọn vào hệ thống?"
+            else:
+                targets = list(emp_map.values())
+                msg_confirm = f"Lưu TẤT CẢ {len(targets)} nhân viên vào hệ thống?"
+
+            if not messagebox.askyesno("Xác nhận", msg_confirm):
+                return
+            
+            saved_count = 0
+            for t in targets:
+                if mongo_db.save_employee(t["id"], t["name"], t["bday"], t["cid"]):
+                    saved_count += 1
+            
+            messagebox.showinfo("Thành công", f"Đã lưu thành công {saved_count}/{len(targets)} nhân viên vào công ty {target_company_id}")
+            if saved_count > 0:
+                root.destroy()
+
+        btn_frame = tk.Frame(root)
+        btn_frame.pack(pady=15)
+
+        tk.Button(btn_frame, text="LƯU ĐÃ CHỌN", command=lambda: save_to_db(True), width=20, bg="#28a745", fg="white", font=("Arial", 10, "bold")).pack(side=tk.LEFT, padx=10)
+        tk.Button(btn_frame, text="LƯU TẤT CẢ", command=lambda: save_to_db(False), width=20, bg="#17a2b8", fg="white", font=("Arial", 10, "bold")).pack(side=tk.LEFT, padx=10)
+        tk.Button(btn_frame, text="HỦY", command=root.destroy, width=15).pack(side=tk.LEFT, padx=10)
 
         root.mainloop()
 

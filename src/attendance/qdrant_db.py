@@ -74,7 +74,7 @@ class QdrantAttendanceManager:
                         "user_id": user_id,
                         "user_name": user_name,
                         "birthday": birthday,
-                        "company_id": kwargs.get("company_id", "default"),
+                        "company_id": str(kwargs.get("company_id", "default")),
                         "created_at": datetime.now().isoformat()
                     }
                 ))
@@ -159,7 +159,7 @@ class QdrantAttendanceManager:
             scroll_filter = None
             if company_id:
                 scroll_filter = models.Filter(
-                    must=[models.FieldCondition(key="company_id", match=models.MatchValue(value=company_id))]
+                    must=[models.FieldCondition(key="company_id", match=models.MatchValue(value=str(company_id)))]
                 )
             
             while True:

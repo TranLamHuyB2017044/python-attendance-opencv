@@ -59,6 +59,28 @@ class HKBService:
                             "app_info": json.dumps(data, ensure_ascii=False) # app info là full response kiểu json
                         }
                         mongo_db.save_auth_service(auth_data)
+                        
+                        # Create company based on system connection ONLY if:
+                        # 1. We are using the admin token (AuthServiceConfig.API_KEY is present)
+                        # 2. The company doesn't exist yet
+                        system_name = auth_data.get("app_name")
+                        remote_system_id = auth_data.get("uuid")
+                        
+                        if system_name and remote_system_id:
+                            # Check if company exists
+                            existing_company = mongo_db.companies.find_one({"company_id": remote_system_id})
+                            
+                            # Allow company creation if it doesn't exist.
+                            # The UI already restricts who can reach this registration step.
+                            if not existing_company:
+                                logger.info(f"HKB Service: Creating local company for system {system_name} ({remote_system_id})")
+                                mongo_db.create_company(
+                                    company_id=remote_system_id, 
+                                    name=system_name, 
+                                    description=f"Connected from HKB Service: {system_name}"
+                                )
+                            else:
+                                logger.info(f"HKB Service: Company {remote_system_id} already exists, skipping creation.")
 
                         # Tự động gọi authenticate để lấy token sau khi kết nối thành công
                         remote_system_id = auth_data["uuid"]
@@ -227,25 +249,6 @@ class HKBService:
                     except Exception as e:
                         logger.error(f"Failed to log employee list JSON: {e}")
                 
-                if result.success and result.data:
-                    # Save fetched employees to local DB
-                    employees = result.data
-                    if isinstance(employees, list):
-                        saved_count = 0
-                        for emp in employees:
-                            # Map fields based on various possible API responses
-                            u_id = emp.get("user_id") or emp.get("uid") or emp.get("id") or emp.get("barcode")
-                            u_name = emp.get("full_name") or emp.get("name") or emp.get("user_name")
-                            u_bday = emp.get("birthday") or emp.get("birth_day")
-                            u_cid = emp.get("company_id") or emp.get("group_id") or emp.get("uuid")
-                            
-                            if u_id and u_name:
-                                # Default company fallback if u_cid is missing or same as system uuid
-                                target_cid = u_cid if u_cid else "default"
-                                if mongo_db.save_employee(u_id, u_name, u_bday, target_cid):
-                                    saved_count += 1
-                        logger.success(f"HKB Service: Automatically saved {saved_count} employees to local DB")
-
                 if not result.success and result.data and "raw" in result.data:
                     logger.warning(f"HKB Service: Raw response: {result.data['raw'][:1000]}")
             return result
