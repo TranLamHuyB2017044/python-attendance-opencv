@@ -26,6 +26,15 @@ class RTSPCamera:
         reconnect_delay: int = 3,
     ):
         self.rtsp_url = rtsp_url or CameraConfig.RTSP_URL
+        
+        # Convert to int if it's a numeric string (webcam index)
+        try:
+            self.camera_source = int(self.rtsp_url)
+            self.is_webcam = True
+        except (ValueError, TypeError):
+            self.camera_source = self.rtsp_url
+            self.is_webcam = False
+        
         self.width = width or CameraConfig.WIDTH
         self.height = height or CameraConfig.HEIGHT
         self.fps = fps or CameraConfig.FPS
@@ -38,7 +47,10 @@ class RTSPCamera:
         self.thread: Optional[threading.Thread] = None
         self.lock = threading.Lock()
         
-        logger.info(f"RTSPCamera initialized in STREAM mode: {self._mask_url(self.rtsp_url)}")
+        if self.is_webcam:
+            logger.info(f"RTSPCamera initialized with WEBCAM mode: index {self.camera_source}")
+        else:
+            logger.info(f"RTSPCamera initialized in STREAM mode: {self._mask_url(str(self.camera_source))}")
 
     def _mask_url(self, url: str) -> str:
         if "@" in url:
@@ -46,16 +58,52 @@ class RTSPCamera:
             return f"rtsp://***:***@{parts[-1]}"
         return url
 
+    def _connect_with_timeout(self, timeout_seconds=10):
+        """Try to connect with timeout to prevent blocking."""
+        result = {"success": False, "cap": None}
+        
+        def _try_connect():
+            try:
+                cap = cv2.VideoCapture(self.camera_source)
+                if self.is_webcam:
+                    # Webcam settings
+                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                else:
+                    # RTSP settings
+                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                    cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000)  # 5 second timeout
+                    cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000)
+                
+                if cap.isOpened():
+                    result["cap"] = cap
+                    result["success"] = True
+                else:
+                    if cap:
+                        cap.release()
+            except Exception as e:
+                logger.error(f"Exception during connection: {e}")
+        
+        # Run connection in separate thread with timeout
+        connect_thread = threading.Thread(target=_try_connect, daemon=True)
+        connect_thread.start()
+        connect_thread.join(timeout=timeout_seconds)
+        
+        if connect_thread.is_alive():
+            logger.error(f"Connection timeout after {timeout_seconds} seconds")
+            return None
+        
+        return result["cap"] if result["success"] else None
+
     def connect(self) -> bool:
         """Connect to stream and start background thread."""
         try:
-            self.cap = cv2.VideoCapture(self.rtsp_url)
+            logger.info(f"Attempting to connect to {'webcam' if self.is_webcam else 'RTSP camera'}...")
             
-            # Optimization for RTSP
-            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            # Use timeout connection
+            self.cap = self._connect_with_timeout(timeout_seconds=10)
             
-            if not self.cap.isOpened():
-                logger.error("Failed to open RTSP stream")
+            if self.cap is None or not self.cap.isOpened():
+                logger.error(f"Failed to open {'webcam' if self.is_webcam else 'RTSP stream'}")
                 return False
 
             self.is_connected = True
@@ -66,11 +114,11 @@ class RTSPCamera:
                 self.thread = threading.Thread(target=self._update, daemon=True)
                 self.thread.start()
                 
-            logger.success("Successfully connected and started background streaming thread.")
+            logger.success(f"Successfully connected to {'webcam' if self.is_webcam else 'RTSP stream'} and started background thread.")
             return True
             
         except Exception as e:
-            logger.error(f"Error connecting to RTSP: {e}")
+            logger.error(f"Error connecting to {'webcam' if self.is_webcam else 'RTSP'}: {e}")
             return False
 
     def _update(self):

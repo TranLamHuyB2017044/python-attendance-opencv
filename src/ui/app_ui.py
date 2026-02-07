@@ -244,52 +244,13 @@ class AttendanceUI:
         root.focus_force()
 
         form_data = {"id": None, "name": None, "bday": None, "files": [], "company_id": None}
-        
-        def on_select_files():
-            paths = filedialog.askopenfilenames(
-                title="Chọn ảnh khuôn mặt (Tối đa 5)",
-                filetypes=[("Image files", "*.jpg *.jpeg *.png")]
-            )
-            if paths:
-                form_data["files"] = list(paths)[:5]
-                lbl_file_count.config(text=f"Đã chọn: {len(form_data['files'])} ảnh")
 
-        def on_submit():
-            u_id = entry_id.get().strip()
-            u_name = entry_name.get().strip()
-            u_bday = entry_bday.get().strip()
-            
-            # Get company_id based on role or selection
-            if str(session_role).lower() == 'admin':
-                selected_cid = combo_cid.get()
-                if not selected_cid:
-                    messagebox.showwarning("!", "Vui lòng chọn Công ty")
-                    return
-                form_data["company_id"] = selected_cid
-            else:
-                # Default for non-admin will be handled in main or passed in session
-                form_data["company_id"] = None 
-
-            if not u_id or not u_name:
-                messagebox.showwarning("Cảnh báo", "Vui lòng nhập ID và Họ tên!")
-                return
-            
-            if include_upload and not form_data["files"]:
-                messagebox.showwarning("Cảnh báo", "Vui lòng chọn ít nhất 1 ảnh!")
-                return
-            
-            form_data["id"] = u_id
-            form_data["name"] = u_name
-            form_data["bday"] = u_bday or "N/A"
-            root.destroy()
-
-        # UI Elements
+        # UI Elements - Create widgets FIRST
         tk.Label(root, text="ĐĂNG KÝ THÔNG TIN", font=("Arial", 12, "bold")).pack(pady=10)
         
         tk.Label(root, text="Mã nhân viên *:").pack()
         entry_id = tk.Entry(root, width=30)
         entry_id.pack(pady=2)
-        entry_id.focus_set()
 
         tk.Label(root, text="Họ và tên *:").pack()
         entry_name = tk.Entry(root, width=30)
@@ -299,22 +260,157 @@ class AttendanceUI:
         entry_bday = tk.Entry(root, width=30)
         entry_bday.pack(pady=2)
 
+        # Company selection for admin
+        combo_cid = None
+        company_map = {}  # Map display name to company_id
+        
         if str(session_role).lower() == 'admin' and mongo_db:
             from tkinter import ttk
             tk.Label(root, text="Phân quyền Công ty *:").pack(pady=(5, 0))
             companies = mongo_db.get_all_companies()
-            company_list = [c.get("company_id") for c in companies]
-            if "admin" not in company_list: company_list = ["admin"] + company_list
             
-            combo_cid = ttk.Combobox(root, values=company_list, width=27)
-            combo_cid.set("admin")
+            # Create mapping: "Company Name (ID)" -> company_id
+            company_map = {}
+            company_display_list = []
+            
+            # Add admin option
+            company_map["Admin (admin)"] = "admin"
+            company_display_list.append("Admin (admin)")
+            
+            # Add all companies with format: "Name (ID)"
+            for c in companies:
+                cid = c.get("company_id")
+                cname = c.get("name", cid)
+                display_name = f"{cname} ({cid})"
+                company_map[display_name] = cid
+                company_display_list.append(display_name)
+            
+            combo_cid = ttk.Combobox(root, values=company_display_list, width=27, state="readonly")
+            combo_cid.set("Admin (admin)")
             combo_cid.pack(pady=2)
 
+        # File upload section
+        lbl_file_count = None
         if include_upload:
             tk.Label(root, text="Ảnh khuôn mặt *:").pack(pady=(10, 0))
+            
+            def on_select_files():
+                from tkinter import filedialog
+                files = filedialog.askopenfilenames(
+                    title="Chọn ảnh khuôn mặt",
+                    filetypes=[("Image files", "*.jpg *.jpeg *.png *.bmp")]
+                )
+                if files:
+                    form_data["files"] = list(files)
+                    lbl_file_count.config(text=f"Đã chọn {len(files)} ảnh", fg="green")
+            
             tk.Button(root, text="Chọn ảnh", command=on_select_files).pack(pady=2)
             lbl_file_count = tk.Label(root, text="Chưa chọn ảnh", fg="gray")
             lbl_file_count.pack()
+
+        # NOW define callbacks that use the widgets
+        def on_select_existing():
+            """Allow user to select an existing employee from MongoDB."""
+            if not mongo_db:
+                from tkinter import messagebox
+                messagebox.showwarning("Cảnh báo", "Không thể truy cập danh sách nhân viên")
+                return
+            
+            # Determine target company
+            target_cid = None
+            
+            if str(session_role).lower() == 'admin':
+                # Admin: Let them pick a company first
+                companies = mongo_db.get_all_companies()
+                if not companies:
+                    from tkinter import messagebox
+                    messagebox.showinfo("Thông báo", "Chưa có công ty nào trong hệ thống")
+                    return
+                
+                # Show company selection dialog
+                from src.ui.app_ui import AttendanceUI
+                target_cid = AttendanceUI.pick_company_ui(companies)
+                
+                if not target_cid:
+                    return  # User cancelled
+                
+                # Update the combo box if it exists - find matching display name
+                if combo_cid and company_map:
+                    for display_name, cid in company_map.items():
+                        if cid == target_cid:
+                            combo_cid.set(display_name)
+                            break
+            else:
+                # Company role: use their company
+                target_cid = session_company_id
+            
+            # Get employees from MongoDB for the selected company
+            employees = mongo_db.get_all_employees(company_id=target_cid)
+            
+            if not employees:
+                from tkinter import messagebox
+                messagebox.showinfo("Thông báo", f"Chưa có nhân viên nào trong công ty {target_cid}")
+                return
+            
+            # Show selection dialog
+            from src.ui.app_ui import AttendanceUI
+            # Convert to format expected by pick_user_ui
+            emp_list = [{
+                'user_id': e['user_id'],
+                'user_name': e['name'],
+                'birthday': e.get('birthday', 'N/A'),
+                'has_face': False  # These are for enrollment, so assume no face yet
+            } for e in employees]
+            
+            selected_id = AttendanceUI.pick_user_ui(emp_list)
+            
+            if selected_id:
+                # Find the selected employee
+                selected_emp = next((e for e in employees if str(e['user_id']) == str(selected_id)), None)
+                if selected_emp:
+                    # Pre-fill form
+                    entry_id.delete(0, tk.END)
+                    entry_id.insert(0, selected_emp['user_id'])
+                    entry_name.delete(0, tk.END)
+                    entry_name.insert(0, selected_emp['name'])
+                    entry_bday.delete(0, tk.END)
+                    entry_bday.insert(0, selected_emp.get('birthday', ''))
+
+        def on_submit():
+            u_id = entry_id.get().strip()
+            u_name = entry_name.get().strip()
+            u_bday = entry_bday.get().strip()
+            
+            if not u_id or not u_name:
+                from tkinter import messagebox
+                messagebox.showwarning("Cảnh báo", "Vui lòng nhập đầy đủ Mã nhân viên và Họ tên!")
+                return
+            
+            if include_upload and not form_data["files"]:
+                from tkinter import messagebox
+                messagebox.showwarning("Cảnh báo", "Vui lòng chọn ít nhất một ảnh!")
+                return
+            
+            # Get selected company - convert display name back to company_id
+            if str(session_role).lower() == 'admin' and combo_cid:
+                display_name = combo_cid.get()
+                form_data["company_id"] = company_map.get(display_name, "admin")
+            else:
+                form_data["company_id"] = session_company_id
+            
+            form_data["id"] = u_id
+            form_data["name"] = u_name
+            form_data["bday"] = u_bday or "N/A"
+            root.destroy()
+
+        # Add button to select existing employee at the top
+        btn_select_frame = tk.Frame(root)
+        btn_select_frame.pack(pady=10, before=entry_id.master.winfo_children()[1])  # Insert after title
+        tk.Button(btn_select_frame, text="📋 Chọn nhân viên có sẵn", command=on_select_existing, 
+                 bg="#17a2b8", fg="white", font=("Arial", 9)).pack()
+        tk.Label(btn_select_frame, text="hoặc nhập thông tin mới:", font=("Arial", 8, "italic"), fg="gray").pack()
+
+        entry_id.focus_set()
 
         tk.Button(root, text="XÁC NHẬN", command=on_submit, width=15, bg="#28a745", fg="white").pack(pady=15)
         
@@ -342,7 +438,7 @@ class AttendanceUI:
     @staticmethod
     def get_edit_user_form(current_id, current_name, current_bday):
         """
-        Dialog to edit Name and Birthday.
+        Dialog to edit Name, Birthday, and optionally enroll face.
         """
         import tkinter as tk
         from tkinter import messagebox
@@ -350,7 +446,7 @@ class AttendanceUI:
         root = tk.Tk()
         root.title("Chỉnh sửa thông tin")
         
-        window_width, window_height = 350, 280
+        window_width, window_height = 400, 420
         screen_width = root.winfo_screenwidth()
         screen_height = root.winfo_screenheight()
         pos_x = (screen_width // 2) - (window_width // 2)
@@ -360,7 +456,13 @@ class AttendanceUI:
         root.attributes('-topmost', True)
         root.focus_force()
 
-        result = {"name": None, "bday": None, "delete": False}
+        result = {
+            "name": None, 
+            "bday": None, 
+            "delete": False,
+            "enroll_camera": False,
+            "enroll_upload": False
+        }
         
         def on_save():
             result["name"] = entry_name.get().strip()
@@ -374,24 +476,61 @@ class AttendanceUI:
             if messagebox.askyesno("Xác nhận", "Bạn có chắc chắn muốn xóa nhân viên này?"):
                 result["delete"] = True
                 root.destroy()
+        
+        def on_enroll_camera():
+            """Mark for camera enrollment after saving."""
+            result["name"] = entry_name.get().strip()
+            result["bday"] = entry_bday.get().strip()
+            if not result["name"]:
+                messagebox.showwarning("Cảnh báo", "Họ tên không được để trống!")
+                return
+            result["enroll_camera"] = True
+            root.destroy()
+        
+        def on_enroll_upload():
+            """Mark for file upload enrollment after saving."""
+            result["name"] = entry_name.get().strip()
+            result["bday"] = entry_bday.get().strip()
+            if not result["name"]:
+                messagebox.showwarning("Cảnh báo", "Họ tên không được để trống!")
+                return
+            result["enroll_upload"] = True
+            root.destroy()
 
         tk.Label(root, text=f"ID: {current_id}", font=("Arial", 10, "bold")).pack(pady=10)
         
         tk.Label(root, text="Họ và tên:").pack()
-        entry_name = tk.Entry(root, width=30)
+        entry_name = tk.Entry(root, width=35)
         entry_name.insert(0, current_name)
         entry_name.pack(pady=2)
 
         tk.Label(root, text="Ngày sinh (DD/MM/YYYY):").pack()
-        entry_bday = tk.Entry(root, width=30)
+        entry_bday = tk.Entry(root, width=35)
         entry_bday.insert(0, current_bday)
         entry_bday.pack(pady=2)
 
-        tk.Button(root, text="LƯU THAY ĐỔI", command=on_save, width=20, bg="#28a745", fg="white").pack(pady=10)
-        tk.Button(root, text="XÓA NHÂN VIÊN", command=on_delete, width=20, bg="#dc3545", fg="white").pack(pady=5)
+        # Separator
+        tk.Label(root, text="─" * 50, fg="gray").pack(pady=10)
+        tk.Label(root, text="ĐĂNG KÝ KHUÔN MẶT", font=("Arial", 9, "bold"), fg="#17a2b8").pack()
+        
+        # Face enrollment buttons
+        face_btn_frame = tk.Frame(root)
+        face_btn_frame.pack(pady=5)
+        
+        tk.Button(face_btn_frame, text="📷 Chụp bằng Camera", command=on_enroll_camera, 
+                 width=18, bg="#007bff", fg="white", font=("Arial", 9)).pack(side=tk.LEFT, padx=5)
+        tk.Button(face_btn_frame, text="📁 Upload từ File", command=on_enroll_upload, 
+                 width=18, bg="#6c757d", fg="white", font=("Arial", 9)).pack(side=tk.LEFT, padx=5)
+        
+        # Separator
+        tk.Label(root, text="─" * 50, fg="gray").pack(pady=10)
+        
+        # Action buttons
+        tk.Button(root, text="LƯU THAY ĐỔI", command=on_save, width=25, bg="#28a745", fg="white").pack(pady=5)
+        tk.Button(root, text="XÓA NHÂN VIÊN", command=on_delete, width=25, bg="#dc3545", fg="white").pack(pady=5)
         
         root.mainloop()
-        return result if result["name"] or result["delete"] else None
+        return result if result["name"] or result["delete"] or result["enroll_camera"] or result["enroll_upload"] else None
 
     @staticmethod
     def show_user_list_ui(user_list):
@@ -417,19 +556,29 @@ class AttendanceUI:
         label.pack(pady=10)
 
         # Create Treeview
-        columns = ("id", "name", "birthday")
+        columns = ("id", "name", "birthday", "face_status")
         tree = ttk.Treeview(root, columns=columns, show="headings")
         
         tree.heading("id", text="Mã nhân viên")
         tree.heading("name", text="Họ và tên")
         tree.heading("birthday", text="Ngày sinh")
+        tree.heading("face_status", text="Khuôn mặt")
         
         tree.column("id", width=120)
         tree.column("name", width=200)
-        tree.column("birthday", width=150)
+        tree.column("birthday", width=120)
+        tree.column("face_status", width=100, anchor="center")
 
         for user in user_list:
-            tree.insert("", tk.END, values=(user["user_id"], user["user_name"], user["birthday"]))
+            # Handle both old format (dict with user_id, user_name, birthday) 
+            # and new format (dict with user_id, user_name, birthday, has_face)
+            u_id = user.get("user_id", "N/A")
+            u_name = user.get("user_name") or user.get("name", "Unknown")
+            u_bday = user.get("birthday", "N/A")
+            has_face = user.get("has_face", True)  # Default True for backward compatibility
+            face_status = "✓ Đã đăng ký" if has_face else "⚠ Chưa có"
+            
+            tree.insert("", tk.END, values=(u_id, u_name, u_bday, face_status))
 
         tree.pack(expand=True, fill="both", padx=10, pady=10)
         
@@ -488,24 +637,32 @@ class AttendanceUI:
 
         root = tk.Tk()
         root.title("Chọn Nhân viên")
-        root.geometry("500x400")
+        root.geometry("600x400")
         root.attributes('-topmost', True)
 
         tk.Label(root, text="CHỌN NHÂN VIÊN CẦN CHỈNH SỬA", font=("Arial", 11, "bold")).pack(pady=10)
 
         selected = {"id": None}
         
-        tree = ttk.Treeview(root, columns=("id", "name", "bday"), show="headings")
+        tree = ttk.Treeview(root, columns=("id", "name", "bday", "face_status"), show="headings")
         tree.heading("id", text="Mã NV")
         tree.heading("name", text="Họ tên")
         tree.heading("bday", text="Ngày sinh")
+        tree.heading("face_status", text="Khuôn mặt")
         
         tree.column("id", width=100)
         tree.column("name", width=200)
         tree.column("bday", width=120)
+        tree.column("face_status", width=100, anchor="center")
 
         for u in user_list:
-            tree.insert("", tk.END, values=(u.get('user_id'), u.get('user_name'), u.get('birthday')))
+            u_id = u.get('user_id')
+            u_name = u.get('user_name') or u.get('name', 'Unknown')
+            u_bday = u.get('birthday', 'N/A')
+            has_face = u.get('has_face', True)  # Default True for backward compatibility
+            face_status = "✓ Có" if has_face else "⚠ Chưa"
+            
+            tree.insert("", tk.END, values=(u_id, u_name, u_bday, face_status))
 
         def on_select():
             sel = tree.selection()
@@ -568,7 +725,68 @@ class AttendanceUI:
         return result["date"]
 
     @staticmethod
-    def show_attendance_logs_ui(logs, title="Lịch sử điểm danh"):
+    def pick_system_for_upload(systems, parent=None):
+        """
+        Dialog to select a system for uploading attendance logs.
+        Returns selected system dict or None.
+        """
+        import tkinter as tk
+        from tkinter import ttk
+
+        if parent:
+            root = tk.Toplevel(parent)
+            root.transient(parent)
+            root.grab_set()
+        else:
+            root = tk.Tk()
+            
+        root.title("Chọn Hệ thống Upload")
+        root.geometry("600x450")
+        root.attributes('-topmost', True)
+
+        tk.Label(root, text="CHỌN HỆ THỐNG ĐỂ UPLOAD CHẤM CÔNG", font=("Arial", 12, "bold")).pack(pady=10)
+
+        selected = {"system": None}
+        
+        tree = ttk.Treeview(root, columns=("id", "name", "endpoint"), show="headings")
+        tree.heading("id", text="System ID")
+        tree.heading("name", text="Tên hệ thống")
+        tree.heading("endpoint", text="Endpoint")
+        tree.column("id", width=150)
+        tree.column("name", width=200)
+        tree.column("endpoint", width=200)
+
+        for sys in systems:
+            tree.insert("", tk.END, values=(
+                sys.get('system_id'), 
+                sys.get('name'), 
+                sys.get('endpoint')
+            ))
+
+        def on_select():
+            sel = tree.selection()
+            if sel:
+                values = tree.item(sel[0])['values']
+                # Find the full system object
+                selected["system"] = next((s for s in systems if s.get('system_id') == values[0]), None)
+                root.destroy()
+
+        tree.pack(padx=10, pady=10, fill="both", expand=True)
+        
+        btn_frame = tk.Frame(root)
+        btn_frame.pack(pady=10)
+        tk.Button(btn_frame, text="XÁC NHẬN", command=on_select, bg="#28a745", fg="white", width=15).pack(side=tk.LEFT, padx=5)
+        tk.Button(btn_frame, text="HỦY", command=root.destroy, width=15).pack(side=tk.LEFT, padx=5)
+
+        if not parent:
+            root.mainloop()
+        else:
+            parent.wait_window(root)
+            
+        return selected["system"]
+
+    @staticmethod
+    def show_attendance_logs_ui(logs, title="Lịch sử điểm danh", session_role=None, session_user_id=None):
         """
         Displays a table of attendance logs using tkinter.
         """
@@ -578,7 +796,7 @@ class AttendanceUI:
         root = tk.Tk()
         root.title(title)
         
-        window_width, window_height = 700, 500
+        window_width, window_height = 800, 550
         screen_width = root.winfo_screenwidth()
         screen_height = root.winfo_screenheight()
         pos_x = (screen_width // 2) - (window_width // 2)
@@ -590,56 +808,129 @@ class AttendanceUI:
         label = tk.Label(root, text=f"{title} ({len(logs)} lượt)", font=("Arial", 11, "bold"))
         label.pack(pady=10)
 
-        # Create Treeview
-        columns = ("id", "user_id", "name", "time", "status")
-        tree = ttk.Treeview(root, columns=columns, show="headings")
+        # Create Treeview with checkboxes via selectmode
+        columns = ("id", "user_id", "name", "time", "status", "uploaded")
+        tree = ttk.Treeview(root, columns=columns, show="headings", selectmode="extended")
         
         tree.heading("id", text="ID")
         tree.heading("user_id", text="Mã NV")
         tree.heading("name", text="Họ và tên")
         tree.heading("time", text="Thời gian")
         tree.heading("status", text="Trạng thái")
+        tree.heading("uploaded", text="Đã upload")
         
         tree.column("id", width=50)
         tree.column("user_id", width=100)
-        tree.column("name", width=180)
-        tree.column("time", width=180)
-        tree.column("status", width=100)
+        tree.column("name", width=150)
+        tree.column("time", width=150)
+        tree.column("status", width=80)
+        tree.column("uploaded", width=100)
 
-        # logs structure from MongoDB: (id, user_id, user_name, timestamp, date, status, image_path)
+        # logs structure from MongoDB: (id, user_id, user_name, timestamp, date, status, image_path, uploaded_to)
         for log in logs:
-            # Note: status is at index 5 now
             status_val = log[5] if len(log) > 5 else "N/A"
-            tree.insert("", tk.END, values=(log[0], log[1], log[2], log[3], status_val))
+            uploaded_to = log[7] if len(log) > 7 else []
+            uploaded_str = "✓" if uploaded_to else ""
+            tree.insert("", tk.END, values=(log[0], log[1], log[2], log[3], status_val, uploaded_str))
 
         tree.pack(expand=True, fill="both", padx=10, pady=10)
         
-        def on_upload():
-            selected_item = tree.selection()
-            if not selected_item:
-                messagebox.showwarning("Cảnh báo", "Vui lòng chọn một lượt điểm danh để upload!")
+        def on_batch_upload():
+            """Upload selected or all attendance logs to a chosen system."""
+            from src.services.hkb_service import hkb_service
+            from src.attendance.mongodb_mgr import mongo_db
+            
+            logger.info("Batch upload button clicked.")
+            
+            # 1. COLLECT ALL DATA FROM TREE IMMEDIATELY before opening any other windows
+            selected_items = tree.selection()
+            if not selected_items:
+                if not messagebox.askyesno("Xác nhận", "Không có dòng nào được chọn. Upload tất cả?"):
+                    return
+                selected_items = tree.get_children()
+            
+            if not selected_items:
+                messagebox.showwarning("!", "Không có dữ liệu để upload")
                 return
             
-            from src.services.hkb_service import hkb_service
-            from tkinter import messagebox
+            # Map item data while the tree is still valid
+            log_items_batch = []
+            for item in selected_items:
+                log_items_batch.append({
+                    "id_from_tree": str(tree.item(item)['values'][0]),
+                    "item_id": item
+                })
+
+            # 2. Get list of connected systems for this user
+            user_id = session_user_id or 1
+            connections = hkb_service.get_connections(user_id=user_id)
             
-            item_values = tree.item(selected_item)['values']
-            # item_values: (id, user_id, name, time, status)
-            log_id = str(item_values[0])
-            log_data = next((l for l in logs if str(l[0]) == log_id), None)
+            if not connections or not isinstance(connections, list):
+                messagebox.showerror("Lỗi", "Không tìm thấy hệ thống đã kết nối")
+                return
             
-            if log_data:
-                res = hkb_service.upload_attendance(
-                    user_id=log_data[1],
-                    user_name=log_data[2],
-                    timestamp=log_data[3],
-                    status=log_data[5],
-                    image_path=log_data[6]
-                )
-                if res:
-                    messagebox.showinfo("Thành công", f"Đã upload lượt điểm danh của {log_data[2]}")
-                else:
-                    messagebox.showerror("Lỗi", "Upload thất bại. Vui lòng kiểm tra cấu hình HKB.")
+            # Filter only connected systems
+            connected_systems = [c for c in connections if c.get("client_register") == 1]
+            if not connected_systems:
+                messagebox.showwarning("!", "Chưa có hệ thống nào được kết nối")
+                return
+            
+            # 3. Show system selection dialog (passing main root for Toplevel use)
+            selected_system = AttendanceUI.pick_system_for_upload(connected_systems, parent=root)
+            if not selected_system:
+                return
+            
+            # 4. Prepare logs data for upload using the pre-collected IDs
+            upload_logs = []
+            log_ids = []
+            
+            for item_info in log_items_batch:
+                log_id = item_info["id_from_tree"]
+                log_data = next((l for l in logs if str(l[0]) == log_id), None)
+                
+                if log_data:
+                    log_ids.append(log_id)
+                    upload_logs.append({
+                        "session_id": log_data[6] if len(log_data) > 6 else log_id,
+                        "user_id": log_data[1],
+                        "user_name": log_data[2],
+                        "timestamp": log_data[3],
+                        "status": log_data[5] if len(log_data) > 5 else "IN",
+                        "image_webp": mongo_db.get_log_image(log_id)
+                    })
+            
+            if not upload_logs:
+                messagebox.showwarning("!", "Không có dữ liệu hợp lệ để upload")
+                return
+            
+            # Get auth info for selected system
+            auth_data = mongo_db.auth_services.find_one({"uuid": selected_system["system_id"]})
+            if not auth_data:
+                messagebox.showerror("Lỗi", "Không tìm thấy thông tin xác thực cho hệ thống này")
+                return
+            
+            # Upload
+            root.config(cursor="watch")
+            root.update()
+            
+            result = hkb_service.upload_timekeepers(
+                endpoint=selected_system["endpoint"],
+                system_id=selected_system["system_id"],
+                api_key=auth_data["key"],
+                user_id=auth_data.get("user_id", user_id),
+                attendance_logs=upload_logs
+            )
+            
+            root.config(cursor="")
+            
+            if result and result.success:
+                # Mark as uploaded
+                mongo_db.mark_logs_uploaded(log_ids, selected_system["system_id"])
+                messagebox.showinfo("Thành công", f"Đã upload {len(upload_logs)} lượt chấm công lên {selected_system['name']}")
+                root.destroy()
+            else:
+                err_msg = result.message if result and result.message else "Upload thất bại"
+                messagebox.showerror("Lỗi", err_msg)
 
         def on_view_image():
             selected_item = tree.selection()
@@ -650,9 +941,8 @@ class AttendanceUI:
             from src.attendance.mongodb_mgr import mongo_db
             import cv2
             import numpy as np
-            from tkinter import messagebox
 
-            item_values = tree.item(selected_item)['values']
+            item_values = tree.item(selected_item[0])['values']
             log_id = str(item_values[0])
             user_name = item_values[2]
             
@@ -677,7 +967,11 @@ class AttendanceUI:
         btn_container.pack(pady=10)
 
         tk.Button(btn_container, text="XEM ẢNH", command=on_view_image, width=15, bg="#f39c12", fg="white").pack(side=tk.LEFT, padx=5)
-        tk.Button(btn_container, text="UPLOAD LÊN HKB", command=on_upload, width=15, bg="#28a745", fg="white").pack(side=tk.LEFT, padx=5)
+        
+        # Show batch upload button for admin and company roles
+        if session_role and str(session_role).lower() in ['admin', 'company']:
+            tk.Button(btn_container, text="UPLOAD LÊN HỆ THỐNG", command=on_batch_upload, width=20, bg="#28a745", fg="white").pack(side=tk.LEFT, padx=5)
+        
         tk.Button(btn_container, text="ĐÓNG", command=root.destroy, width=15, bg="#007bff", fg="white").pack(side=tk.LEFT, padx=5)
 
         root.mainloop()
@@ -901,7 +1195,7 @@ class AttendanceUI:
 
         root = tk.Tk()
         root.title(f"Nhân viên từ {system_name}")
-        root.geometry("700x550")
+        root.geometry("900x550")
         root.attributes('-topmost', True)
 
         tk.Label(root, text=f"DANH SÁCH NHÂN VIÊN - {system_name}", font=("Arial", 12, "bold")).pack(pady=10)
@@ -909,17 +1203,19 @@ class AttendanceUI:
         tk.Label(root, text=f"Tìm thấy: {len(employees)} nhân sự", font=("Arial", 10)).pack(pady=5)
 
         # Create Treeview with multiple selection enabled (default)
-        columns = ("user_id", "name", "bday", "group")
+        columns = ("user_id", "name", "bday", "sex", "group")
         tree = ttk.Treeview(root, columns=columns, show="headings", selectmode="extended")
         
         tree.heading("user_id", text="Mã nhân viên")
         tree.heading("name", text="Họ và tên")
         tree.heading("bday", text="Ngày sinh")
+        tree.heading("sex", text="Giới tính")
         tree.heading("group", text="Nhóm/Phòng ban")
         
         tree.column("user_id", width=100, anchor="center")
         tree.column("name", width=200)
         tree.column("bday", width=100, anchor="center")
+        tree.column("sex", width=80, anchor="center")
         tree.column("group", width=150)
 
         # Store full employee data for lookup
@@ -928,9 +1224,10 @@ class AttendanceUI:
             u_id = emp.get("barcode") or emp.get("user_id") or emp.get("uid") or emp.get("id") or "N/A"
             u_name = emp.get("full_name") or emp.get("name") or emp.get("user_name") or "Unknown"
             u_bday = emp.get("birthday") or emp.get("birth_day") or "N/A"
-            u_group = emp.get("group_id") or emp.get("company_id") or emp.get("description") or emp.get("sex") or "-"
+            u_sex = emp.get("sex") or "-"
+            u_group = emp.get("group_id") or emp.get("company_id") or emp.get("description") or "-"
             
-            item_id = tree.insert("", tk.END, values=(u_id, u_name, u_bday, u_group))
+            item_id = tree.insert("", tk.END, values=(u_id, u_name, u_bday, u_sex, u_group))
             emp_map[item_id] = {
                 "id": u_id,
                 "name": u_name,

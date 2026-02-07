@@ -110,22 +110,29 @@ class FaceTracker:
         # Save to local captures
         current_time = time.time()
         img_prefix = user_id if is_known else "unknown"
-        img_name = f"{img_prefix}_{int(current_time)}.jpg"
+        img_name = f"{img_prefix}_{int(current_time)}.webp"
         img_path = str(CAPTURES_DIR / img_name)
-        cv2.imwrite(img_path, annotated_frame)
+        # Use WebP with quality 75 for balance between size and quality
+        cv2.imwrite(img_path, annotated_frame, [int(cv2.IMWRITE_WEBP_QUALITY), 75])
         
         # Log to MongoDB with the annotated frame
         res_status = mongo_db.log_attendance(user_id, user_name, status=status, frame=annotated_frame, company_id=company_id)
         
+        if not is_known:
+            logger.debug(f"Unknown face log saved. Status: {res_status}, Company: {company_id}")
+            
         url = f"{ApiConfig.BASE_URL}/captures/{img_name}"
         return url, res_status
 
-    def update(self, detected_faces, attendance_mgr, frame=None):
+    def update(self, detected_faces, attendance_mgr, frame=None, company_id=None):
         """
         Assigns IDs and decides when to trigger recognition or alerts.
         """
         current_time = time.time()
         updated_faces_map = {}
+        
+        # Use provided company_id or fallback
+        active_company = company_id
         
         for face in detected_faces:
             center = self._get_center(face.bbox)
@@ -182,6 +189,8 @@ class FaceTracker:
                     
                     if user_name != "Unknown":
                         # CASE: THÀNH CÔNG
+                        target_cid = user_data.get('company_id') or active_company
+                        
                         if not RecognitionConfig.TEST_MODE and user_id in self.user_cooldowns:
                             elapsed = current_time - self.user_cooldowns[user_id]
                             if elapsed < RecognitionConfig.COOLDOWN_SECONDS:
@@ -192,7 +201,7 @@ class FaceTracker:
                                 f_data['status'] = 'RECOGNIZED'
                                 f_data['user_data'] = user_data
                                 self.user_cooldowns[user_id] = current_time
-                                _, status = self._save_log_with_bbox(frame, face, user_id, user_name, user_data.get('score', 0.0), company_id=user_data.get('company_id'))
+                                _, status = self._save_log_with_bbox(frame, face, user_id, user_name, user_data.get('score', 0.0), company_id=target_cid)
                                 
                                 if status == 'IN': logger.info(f"Diem danh VAO: {user_name}")
                                 elif status == 'OUT': logger.info(f"Diem danh RA: {user_name}")
@@ -204,7 +213,7 @@ class FaceTracker:
                             f_data['status'] = 'RECOGNIZED'
                             f_data['user_data'] = user_data
                             self.user_cooldowns[user_id] = current_time
-                            _, status = self._save_log_with_bbox(frame, face, user_id, user_name, user_data.get('score', 0.0), company_id=user_data.get('company_id'))
+                            _, status = self._save_log_with_bbox(frame, face, user_id, user_name, user_data.get('score', 0.0), company_id=target_cid)
                             
                             if status == 'IN': logger.info(f"Diem danh VAO: {user_name}")
                             elif status == 'OUT': logger.info(f"Diem danh RA: {user_name}")
@@ -213,6 +222,19 @@ class FaceTracker:
                             # Send Webhook notification
                             self._send_user_webhook(user_id, user_name, status)
                         
+                        # --- Tự động bổ sung embedding nếu chưa đủ 5 mẫu ---
+                        vector_count = user_data.get('vector_count', 0)
+                        if vector_count < 5:
+                            logger.info(f"Auto-enriching: {user_name} has {vector_count}/5 samples. Adding new one...")
+                            attendance_mgr.upsert_user(
+                                user_name=user_name,
+                                user_id=user_id,
+                                birthday=user_data.get('birthday', 'N/A'),
+                                embeddings=[face.normed_embedding],
+                                company_id=target_cid
+                            )
+                        # --------------------------------------------------
+
                         f_data['unknown_attempts'] = 0 # Reset khi thành công
                     
                     else:
@@ -221,14 +243,10 @@ class FaceTracker:
                         f_data['last_attempt_time'] = current_time
                         f_data['user_data'] = user_data
                         
-                        # Bắt đầu từ lần thứ 5, gửi Webhook liên tục (mỗi 5 giây theo logic RETRY_WAIT ở trên)
-                        if f_data['unknown_attempts'] >= 5:
-                            logger.warning(f"Unknown face detected (Attempt {f_data['unknown_attempts']}). Sending webhook...")
-                            self._send_user_webhook("Unknown", f"Nguoi la {f_data['unknown_attempts']}", "unknown")
-                            
-                            # Ghi log DB cục bộ và MongoDB mỗi 5 lần để tránh spam DB nhưng vẫn có dữ liệu
-                            if f_data['unknown_attempts'] % 5 == 0:
-                                self._save_log_with_bbox(frame, face, "Unknown", "Người lạ", user_data.get('score', 0.0), is_known=False, status="FAILED", company_id=user_data.get('company_id'))
+                        # Gửi Webhook và ghi log DB cho người lạ TRÊN MỖI LẦN NHẬN DIỆN
+                        logger.warning(f"Unknown face detected (Attempt {f_data['unknown_attempts']}). Logging and sending webhook...")
+                        self._send_user_webhook("Unknown", f"Nguoi la {f_data['unknown_attempts']}", "unknown")
+                        self._save_log_with_bbox(frame, face, "Unknown", "Người lạ", user_data.get('score', 0.0), is_known=False, status="FAILED", company_id=active_company)
                         
                         if f_data['unknown_attempts'] >= 10:
                             f_data['status'] = 'UNAUTHORIZED'
