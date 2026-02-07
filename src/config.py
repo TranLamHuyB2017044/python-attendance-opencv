@@ -32,7 +32,10 @@ CAPTURES_DIR.mkdir(parents=True, exist_ok=True)
 class CameraConfig:
     """Camera configuration settings."""
     
-    RTSP_URL: str = os.getenv("RTSP_URL", "")
+    # Auto-detect: Use webcam if RTSP_URL is not set
+    _rtsp_url_env = os.getenv("RTSP_URL", "")
+    RTSP_URL: str = _rtsp_url_env if _rtsp_url_env else "0"  # Default to webcam index 0
+    
     WIDTH: int = int(os.getenv("CAMERA_WIDTH", "1280"))
     HEIGHT: int = int(os.getenv("CAMERA_HEIGHT", "720"))
     FPS: int = int(os.getenv("CAMERA_FPS", "30"))
@@ -43,8 +46,8 @@ class CameraConfig:
     def validate(cls) -> bool:
         """Validate camera configuration."""
         if not cls.RTSP_URL:
-            logger.warning("RTSP_URL is not set in environment variables")
-            return False
+            logger.warning("RTSP_URL is not set, using default webcam (index 0)")
+            cls.RTSP_URL = "0"
         return True
 
 

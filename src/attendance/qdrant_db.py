@@ -65,13 +65,14 @@ class QdrantAttendanceManager:
         """
         try:
             points = []
+            user_id_str = str(user_id)
             for emb in embeddings:
                 vector = emb.tolist() if isinstance(emb, np.ndarray) else list(emb)
                 points.append(models.PointStruct(
                     id=str(uuid.uuid4()),
                     vector=vector,
                     payload={
-                        "user_id": user_id,
+                        "user_id": user_id_str,
                         "user_name": user_name,
                         "birthday": birthday,
                         "company_id": str(kwargs.get("company_id", "default")),
@@ -97,7 +98,7 @@ class QdrantAttendanceManager:
             "name": "Unknown",
             "user_id": "Unknown",
             "birthday": "N/A",
-            "company_id": "Unknown",
+            "company_id": None,
             "score": 0.0,
             "detect_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "vector_count": 0
@@ -124,19 +125,20 @@ class QdrantAttendanceManager:
                 return default_res
 
             payload = result.payload
-            user_id = payload.get("user_id")
+            u_id = payload.get("user_id")
+            user_id_str = str(u_id) if u_id is not None else "Unknown"
 
             # Count total vectors for this user
             count_res = self.client.count(
                 collection_name=self.collection_name,
                 count_filter=models.Filter(
-                    must=[models.FieldCondition(key="user_id", match=models.MatchValue(value=user_id))]
+                    must=[models.FieldCondition(key="user_id", match=models.MatchValue(value=user_id_str))]
                 )
             )
 
             return {
                 "name": payload.get("user_name", "Unknown"),
-                "user_id": user_id,
+                "user_id": user_id_str,
                 "birthday": payload.get("birthday", "N/A"),
                 "company_id": payload.get("company_id", "Unknown"),
                 "score": score,
@@ -174,12 +176,14 @@ class QdrantAttendanceManager:
                 for point in results:
                     payload = point.payload
                     u_id = payload.get("user_id")
-                    if u_id and u_id not in all_users:
-                        all_users[u_id] = {
-                            "user_id": u_id,
-                            "user_name": payload.get("user_name"),
-                            "birthday": payload.get("birthday")
-                        }
+                    if u_id is not None:
+                        u_id_str = str(u_id)
+                        if u_id_str not in all_users:
+                            all_users[u_id_str] = {
+                                "user_id": u_id_str,
+                                "user_name": payload.get("user_name"),
+                                "birthday": payload.get("birthday")
+                            }
                 
                 if offset is None:
                     break
@@ -197,7 +201,7 @@ class QdrantAttendanceManager:
             results = self.client.scroll(
                 collection_name=self.collection_name,
                 scroll_filter=models.Filter(
-                    must=[models.FieldCondition(key="user_id", match=models.MatchValue(value=user_id))]
+                    must=[models.FieldCondition(key="user_id", match=models.MatchValue(value=str(user_id)))]
                 ),
                 limit=1,
                 with_payload=True
@@ -227,7 +231,7 @@ class QdrantAttendanceManager:
                     "birthday": new_birthday
                 },
                 points=models.Filter(
-                    must=[models.FieldCondition(key="user_id", match=models.MatchValue(value=user_id))]
+                    must=[models.FieldCondition(key="user_id", match=models.MatchValue(value=str(user_id)))]
                 )
             )
             logger.success(f"Updated info for user ID: {user_id}")
@@ -245,7 +249,7 @@ class QdrantAttendanceManager:
                 collection_name=self.collection_name,
                 points_selector=models.FilterSelector(
                     filter=models.Filter(
-                        must=[models.FieldCondition(key="user_id", match=models.MatchValue(value=user_id))]
+                        must=[models.FieldCondition(key="user_id", match=models.MatchValue(value=str(user_id)))]
                     )
                 )
             )

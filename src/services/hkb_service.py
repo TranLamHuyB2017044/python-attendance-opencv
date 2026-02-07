@@ -112,6 +112,13 @@ class HKBService:
                 user_id=user_id
             )
             auth = self._run_sync(coro)
+            if auth:
+                status_icon = "SUCCESS" if auth.success else "FAILED"
+                logger.info(f"HKB Service: Authenticate result ({status_icon}): {auth.message}")
+                if auth.data:
+                    logger.debug(f"HKB Service: Authenticate Response Data: {json.dumps(auth.data, ensure_ascii=False)}")
+                if not auth.success and hasattr(auth, 'status_code'):
+                    logger.warning(f"HKB Service: Authenticate failed with Status Code: {auth.status_code}")
             return auth
         except Exception as e:
             logger.error(f"HKB Service: Authenticate failed: {e}")
@@ -273,6 +280,107 @@ class HKBService:
             return result
         except Exception as e:
             logger.error(f"HKB Service: Get HR users failed: {e}")
+            return None
+
+    def upload_timekeepers(self, endpoint, system_id, api_key, user_id, attendance_logs):
+        """
+        Upload attendance logs (timekeepers) to external system with images.
+        
+        Args:
+            endpoint: Base URL of the target system
+            system_id: System ID for authentication
+            api_key: API key for authentication
+            user_id: User ID for authentication
+            attendance_logs: List of attendance log dicts with session_id, user_id, user_name, timestamp, status, image_webp
+        
+        Returns:
+            Result object with success status
+        """
+        try:
+            url = f"{endpoint.rstrip('/')}/api/hr/timekeepers"
+            logger.info(f"HKB Service: Uploading {len(attendance_logs)} timekeepers to {url}")
+            
+            # Prepare payload data
+            payload_data = []
+            files_data = {}
+            
+            for log in attendance_logs:
+                # Map status to io field
+                io_status = log.get("status", "IN")  # IN, OUT, or FAILED
+                
+                payload_item = {
+                    "session_id": log.get("session_id"),
+                    "employee_code": log.get("user_id"),
+                    "full_name": log.get("user_name"),
+                    "datetime": log.get("timestamp"),
+                    "io": io_status
+                }
+                payload_data.append(payload_item)
+                
+                # Prepare image file if available
+                image_blob = log.get("image_webp")
+                if image_blob:
+                    session_id = log.get("session_id")
+                    files_data[session_id] = image_blob
+            
+            # Call SDK method
+            logger.debug(f"HKB Service Request - SystemID: {system_id}, UserID: {user_id}")
+            logger.debug(f"HKB Service Payload (first 2): {payload_data[:2]}")
+            logger.debug(f"HKB Service Files count: {len(files_data)}")
+            
+            coro = self.client.upload_timekeepers(
+                url=url,
+                system_id=system_id,
+                api_key=api_key,
+                user_id=user_id,
+                payload=payload_data,
+                files=files_data
+            )
+            result = self._run_sync(coro)
+            
+            # --- AUTO RE-AUTHENTICATION LOGIC ---
+            # If result is None or failed with a token error, try to re-authenticate and retry once
+            token_error_keywords = ["token", "expired", "unauthorized", "401", "403", "truy cập bị từ chối", "hết hạn"]
+            is_token_error = False
+            if result and not result.success and result.message:
+                msg_lower = result.message.lower()
+                if any(k in msg_lower for k in token_error_keywords):
+                    is_token_error = True
+            
+            if not result or is_token_error:
+                logger.warning(f"HKB Service: Upload failed (token error: {is_token_error}). Attempting auto-reauth for system {system_id}...")
+                auth_res = self.authenticate(system_id=system_id, api_key=api_key, user_id=user_id)
+                
+                if auth_res and auth_res.success:
+                    logger.success(f"HKB Service: Re-auth successful, retrying upload...")
+                    coro_retry = self.client.upload_timekeepers(
+                        url=url,
+                        system_id=system_id,
+                        api_key=api_key,
+                        user_id=user_id,
+                        payload=payload_data,
+                        files=files_data
+                    )
+                    result = self._run_sync(coro_retry)
+                else:
+                    logger.error(f"HKB Service: Auto-reauth failed for {system_id}")
+            # ------------------------------------
+
+            if result:
+                logger.info(f"HKB Service: Upload result: Success={result.success}, Message={result.message}")
+                if not result.success:
+                    # Log everything inside the result object to see what's happening
+                    try:
+                        res_details = {attr: getattr(result, attr) for attr in dir(result) if not attr.startswith('__')}
+                        logger.warning(f"HKB Service: Upload Full Result Object: {res_details}")
+                    except Exception as le:
+                        logger.error(f"Could not log full result: {le}")
+            else:
+                logger.warning("HKB Service: Upload timekeepers returned None after retry")
+            
+            return result
+        except Exception as e:
+            logger.error(f"HKB Service: Upload timekeepers failed: {e}")
             return None
 
 # Global instance

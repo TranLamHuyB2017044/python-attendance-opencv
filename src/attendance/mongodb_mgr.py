@@ -92,6 +92,7 @@ class MongoDBManager:
                     else:
                         status = 'OUT'
 
+            import uuid
             log_entry = {
                 "user_id": user_id,
                 "user_name": user_name,
@@ -100,6 +101,8 @@ class MongoDBManager:
                 "status": status,
                 "company_id": cid,
                 "image_webp": image_blob,
+                "session_id": str(uuid.uuid4()),  # Unique ID for this attendance record
+                "uploaded_to": [],  # List of system_ids this has been uploaded to
                 "created_at": datetime.utcnow()
             }
             
@@ -152,6 +155,10 @@ class MongoDBManager:
         Store or update employee metadata in MongoDB.
         """
         try:
+            # Ensure user_id is string for consistency
+            user_id = str(user_id)
+            company_id = str(company_id)
+            
             employee_data = {
                 "user_id": user_id,
                 "name": name,
@@ -169,6 +176,27 @@ class MongoDBManager:
         except Exception as e:
             logger.error(f"MongoDB: Failed to save employee: {e}")
             return False
+
+    def get_all_employees(self, company_id=None):
+        """
+        Get all employees from MongoDB (includes employees without face embeddings).
+        
+        Args:
+            company_id: Optional company filter
+            
+        Returns:
+            List of employee dicts with user_id, name, birthday
+        """
+        try:
+            query = {}
+            if company_id:
+                query["company_id"] = str(company_id)  # Ensure string for consistency
+            
+            employees = list(self.employees.find(query, {"_id": 0, "user_id": 1, "name": 1, "birthday": 1}))
+            return employees
+        except Exception as e:
+            logger.error(f"MongoDB: Failed to get employees: {e}")
+            return []
 
     # --- Management Methods ---
     
@@ -249,6 +277,22 @@ class MongoDBManager:
             return True
         except Exception as e:
             logger.error(f"Failed to save auth service: {e}")
+            return False
+
+    def mark_logs_uploaded(self, log_ids, system_id):
+        """Mark attendance logs as uploaded to a specific system."""
+        try:
+            from bson.objectid import ObjectId
+            object_ids = [ObjectId(log_id) for log_id in log_ids]
+            
+            result = self.logs.update_many(
+                {"_id": {"$in": object_ids}},
+                {"$addToSet": {"uploaded_to": system_id}}
+            )
+            logger.success(f"Marked {result.modified_count} logs as uploaded to {system_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to mark logs as uploaded: {e}")
             return False
 
 # Global instance
