@@ -222,32 +222,36 @@ class AttendanceUI:
         Returns: (ID, Name, Birthday, file_paths, company_id) or None if cancelled.
         """
         import tkinter as tk
-        from tkinter import messagebox, filedialog
-
+        from tkinter import messagebox, filedialog, ttk
+        
+        logger.info("Initializing enrollment form UI...")
         root = tk.Tk()
         root.title("Form Đăng Ký Người Dùng")
         
         # Center the window
-        # Dynamic height based on fields
         base_h = 300
         if include_upload: base_h += 100
-        if session_role == 'admin': base_h += 60
+        if str(session_role).lower() == 'admin': base_h += 60
         
         window_width, window_height = 380, base_h
-        screen_width = root.winfo_screenwidth()
-        screen_height = root.winfo_screenheight()
-        pos_x = (screen_width // 2) - (window_width // 2)
-        pos_y = (screen_height // 2) - (window_height // 2)
-        root.geometry(f"{window_width}x{window_height}+{pos_x}+{pos_y}")
-        
+        try:
+            screen_width = root.winfo_screenwidth()
+            screen_height = root.winfo_screenheight()
+            pos_x = (screen_width // 2) - (window_width // 2)
+            pos_y = (screen_height // 2) - (window_height // 2)
+            root.geometry(f"{window_width}x{window_height}+{pos_x}+{pos_y}")
+        except:
+            root.geometry(f"{window_width}x{window_height}")
+            
         root.attributes('-topmost', True)
         root.focus_force()
 
         form_data = {"id": None, "name": None, "bday": None, "files": [], "company_id": None}
 
-        # UI Elements - Create widgets FIRST
+        # UI Elements
         tk.Label(root, text="ĐĂNG KÝ THÔNG TIN", font=("Arial", 12, "bold")).pack(pady=10)
         
+        # ID Selection / Entry
         tk.Label(root, text="Mã nhân viên *:").pack()
         entry_id = tk.Entry(root, width=30)
         entry_id.pack(pady=2)
@@ -262,32 +266,26 @@ class AttendanceUI:
 
         # Company selection for admin
         combo_cid = None
-        company_map = {}  # Map display name to company_id
+        company_map = {}
         
         if str(session_role).lower() == 'admin' and mongo_db:
-            from tkinter import ttk
             tk.Label(root, text="Phân quyền Công ty *:").pack(pady=(5, 0))
-            companies = mongo_db.get_all_companies()
-            
-            # Create mapping: "Company Name (ID)" -> company_id
-            company_map = {}
-            company_display_list = []
-            
-            # Add admin option
-            company_map["Admin (admin)"] = "admin"
-            company_display_list.append("Admin (admin)")
-            
-            # Add all companies with format: "Name (ID)"
-            for c in companies:
-                cid = c.get("company_id")
-                cname = c.get("name", cid)
-                display_name = f"{cname} ({cid})"
-                company_map[display_name] = cid
-                company_display_list.append(display_name)
-            
-            combo_cid = ttk.Combobox(root, values=company_display_list, width=27, state="readonly")
-            combo_cid.set("Admin (admin)")
-            combo_cid.pack(pady=2)
+            try:
+                companies = mongo_db.get_all_companies()
+                company_map["Admin (admin)"] = "admin"
+                company_display_list = ["Admin (admin)"]
+                for c in companies:
+                    cid = c.get("company_id")
+                    cname = c.get("name", cid)
+                    display_name = f"{cname} ({cid})"
+                    company_map[display_name] = cid
+                    company_display_list.append(display_name)
+                
+                combo_cid = ttk.Combobox(root, values=company_display_list, width=27, state="readonly")
+                combo_cid.set("Admin (admin)")
+                combo_cid.pack(pady=2)
+            except Exception as e:
+                logger.error(f"UI: Error loading companies: {e}")
 
         # File upload section
         lbl_file_count = None
@@ -295,129 +293,57 @@ class AttendanceUI:
             tk.Label(root, text="Ảnh khuôn mặt *:").pack(pady=(10, 0))
             
             def on_select_files():
-                from tkinter import filedialog
+                logger.info("Opening file dialog for image selection...")
                 files = filedialog.askopenfilenames(
                     title="Chọn ảnh khuôn mặt",
-                    filetypes=[("Image files", "*.jpg *.jpeg *.png *.bmp")]
+                    filetypes=[("Image files", "*.jpg *.jpeg *.png *.bmp *.webp")]
                 )
                 if files:
                     form_data["files"] = list(files)
                     lbl_file_count.config(text=f"Đã chọn {len(files)} ảnh", fg="green")
+                    logger.info(f"User selected {len(files)} files.")
+                else:
+                    logger.info("File selection cancelled.")
             
             tk.Button(root, text="Chọn ảnh", command=on_select_files).pack(pady=2)
             lbl_file_count = tk.Label(root, text="Chưa chọn ảnh", fg="gray")
             lbl_file_count.pack()
 
-        # NOW define callbacks that use the widgets
-        def on_select_existing():
-            """Allow user to select an existing employee from MongoDB."""
-            if not mongo_db:
-                from tkinter import messagebox
-                messagebox.showwarning("Cảnh báo", "Không thể truy cập danh sách nhân viên")
-                return
-            
-            # Determine target company
-            target_cid = None
-            
-            if str(session_role).lower() == 'admin':
-                # Admin: Let them pick a company first
-                companies = mongo_db.get_all_companies()
-                if not companies:
-                    from tkinter import messagebox
-                    messagebox.showinfo("Thông báo", "Chưa có công ty nào trong hệ thống")
-                    return
-                
-                # Show company selection dialog
-                from src.ui.app_ui import AttendanceUI
-                target_cid = AttendanceUI.pick_company_ui(companies)
-                
-                if not target_cid:
-                    return  # User cancelled
-                
-                # Update the combo box if it exists - find matching display name
-                if combo_cid and company_map:
-                    for display_name, cid in company_map.items():
-                        if cid == target_cid:
-                            combo_cid.set(display_name)
-                            break
-            else:
-                # Company role: use their company
-                target_cid = session_company_id
-            
-            # Get employees from MongoDB for the selected company
-            employees = mongo_db.get_all_employees(company_id=target_cid)
-            
-            if not employees:
-                from tkinter import messagebox
-                messagebox.showinfo("Thông báo", f"Chưa có nhân viên nào trong công ty {target_cid}")
-                return
-            
-            # Show selection dialog
-            from src.ui.app_ui import AttendanceUI
-            # Convert to format expected by pick_user_ui
-            emp_list = [{
-                'user_id': e['user_id'],
-                'user_name': e['name'],
-                'birthday': e.get('birthday', 'N/A'),
-                'has_face': False  # These are for enrollment, so assume no face yet
-            } for e in employees]
-            
-            selected_id = AttendanceUI.pick_user_ui(emp_list)
-            
-            if selected_id:
-                # Find the selected employee
-                selected_emp = next((e for e in employees if str(e['user_id']) == str(selected_id)), None)
-                if selected_emp:
-                    # Pre-fill form
-                    entry_id.delete(0, tk.END)
-                    entry_id.insert(0, selected_emp['user_id'])
-                    entry_name.delete(0, tk.END)
-                    entry_name.insert(0, selected_emp['name'])
-                    entry_bday.delete(0, tk.END)
-                    entry_bday.insert(0, selected_emp.get('birthday', ''))
-
         def on_submit():
+            logger.info("Enrollment form submit clicked.")
             u_id = entry_id.get().strip()
             u_name = entry_name.get().strip()
             u_bday = entry_bday.get().strip()
             
             if not u_id or not u_name:
-                from tkinter import messagebox
                 messagebox.showwarning("Cảnh báo", "Vui lòng nhập đầy đủ Mã nhân viên và Họ tên!")
                 return
             
             if include_upload and not form_data["files"]:
-                from tkinter import messagebox
                 messagebox.showwarning("Cảnh báo", "Vui lòng chọn ít nhất một ảnh!")
                 return
             
-            # Get selected company - convert display name back to company_id
             if str(session_role).lower() == 'admin' and combo_cid:
                 display_name = combo_cid.get()
                 form_data["company_id"] = company_map.get(display_name, "admin")
             else:
-                form_data["company_id"] = session_company_id
+                form_data["company_id"] = None # Will be set by caller or session
             
             form_data["id"] = u_id
             form_data["name"] = u_name
             form_data["bday"] = u_bday or "N/A"
+            logger.info(f"Form data validated for {u_name}. Closing form.")
             root.destroy()
 
-        # Add button to select existing employee at the top
-        btn_select_frame = tk.Frame(root)
-        btn_select_frame.pack(pady=10, before=entry_id.master.winfo_children()[1])  # Insert after title
-        tk.Button(btn_select_frame, text="📋 Chọn nhân viên có sẵn", command=on_select_existing, 
-                 bg="#17a2b8", fg="white", font=("Arial", 9)).pack()
-        tk.Label(btn_select_frame, text="hoặc nhập thông tin mới:", font=("Arial", 8, "italic"), fg="gray").pack()
-
-        entry_id.focus_set()
-
+        # Submit button
         tk.Button(root, text="XÁC NHẬN", command=on_submit, width=15, bg="#28a745", fg="white").pack(pady=15)
         
         root.protocol("WM_DELETE_WINDOW", root.destroy)
+        logger.info("Starting form mainloop...")
         root.mainloop()
         
         if form_data["id"] is None:
+            logger.info("Enrollment form closed without submission.")
             return None
             
         return form_data["id"], form_data["name"], form_data["bday"], form_data["files"], form_data["company_id"]

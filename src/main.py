@@ -123,7 +123,7 @@ def enroll_from_camera(camera, face_rec, attendance, ui):
                     logger.warning("No face detected to capture.")
             
             elif key == ord('f'):
-                if len(samples) >= 3:
+                if len(samples) >= 1:
                     break
             
             elif key == ord('m'):
@@ -141,7 +141,7 @@ def enroll_from_camera(camera, face_rec, attendance, ui):
         elif ui.session_company_id:
             target_company = ui.session_company_id
 
-        if len(samples) >= 3:
+        if len(samples) >= 1:
             attendance.upsert_user(user_name, user_id, birthday, samples, company_id=target_company)
             mongo_db.save_employee(user_id, user_name, birthday, target_company)
             logger.success(f"Da dang ky: {user_name} (ID: {user_id}) cho cong ty: {target_company}")
@@ -166,42 +166,79 @@ def enroll_by_upload(face_rec, attendance, ui):
     """
     Enroll users by uploading images from disk.
     """
-    # 1. Mở form nhập liệu UI TRƯỚC (có nút chọn ảnh bên trong)
-    user_info = AttendanceUI.get_user_form(include_upload=True, session_role=ui.session_role, mongo_db=mongo_db)
-    if not user_info:
-        logger.warning("Enrollment cancelled: No user information provided.")
-        return
+    try:
+        # 1. Mở form nhập liệu UI TRƯỚC (có nút chọn ảnh bên trong)
+        logger.info("Opening user enrollment form...")
+        user_info = AttendanceUI.get_user_form(include_upload=True, session_role=ui.session_role, mongo_db=mongo_db)
         
-    u_id, u_name, u_bday, file_paths, selected_cid = user_info
-    
-    samples = []
-    for path in file_paths:
-        img = cv2.imread(path)
-        if img is None: continue
-        faces = face_rec.detect_and_extract(img)
-        if faces:
-            faces.sort(key=lambda x: (x.bbox[2]-x.bbox[0])*(x.bbox[3]-x.bbox[1]), reverse=True)
-            samples.append(faces[0].normed_embedding)
-            logger.info(f"Extracted from: {path}")
-
-    if samples:
-        target_company = MongoDbConfig.COMPANY_ID
-        if str(ui.session_role).lower() == 'admin' and selected_cid:
-            target_company = selected_cid
-        elif ui.session_company_id:
-            target_company = ui.session_company_id
+        if not user_info:
+            logger.warning("Enrollment cancelled: No user information provided.")
+            return
             
-        attendance.upsert_user(u_name, u_id, u_bday, samples, company_id=target_company)
-        mongo_db.save_employee(u_id, u_name, u_bday, target_company)
-        logger.success(f"Enrolled {u_name} via upload for company: {target_company}")
+        u_id, u_name, u_bday, file_paths, selected_cid = user_info
+        logger.info(f"Processing enrollment for {u_name} (ID: {u_id}) with {len(file_paths)} files.")
         
-        # Show success message
-        from tkinter import messagebox
-        import tkinter as tk
-        root = tk.Tk()
-        root.withdraw()
-        messagebox.showinfo("Thành công", f"Đã đăng ký (Upload) thành công nhân viên: {u_name} (ID: {u_id})")
-        root.destroy()
+        samples = []
+        for i, path in enumerate(file_paths):
+            try:
+                logger.info(f"Processing image {i+1}/{len(file_paths)}: {path}")
+                img = cv2.imread(path)
+                if img is None:
+                    logger.error(f"Could not read image: {path}")
+                    continue
+                    
+                faces = face_rec.detect_and_extract(img)
+                if faces:
+                    # Sort by face size to get the most prominent face
+                    faces.sort(key=lambda x: (x.bbox[2]-x.bbox[0])*(x.bbox[3]-x.bbox[1]), reverse=True)
+                    samples.append(faces[0].normed_embedding)
+                    logger.info(f"Successfully extracted face embedding from: {path}")
+                else:
+                    logger.warning(f"No face detected in image: {path}")
+            except Exception as img_err:
+                logger.error(f"Error processing image {path}: {img_err}")
+
+        if samples:
+            logger.info(f"Face extraction complete. {len(samples)} valid samples found.")
+            target_company = MongoDbConfig.COMPANY_ID
+            if str(ui.session_role).lower() == 'admin' and selected_cid:
+                target_company = selected_cid
+            elif ui.session_company_id:
+                target_company = ui.session_company_id
+                
+            # Update databases
+            logger.info(f"Saving to Qdrant and MongoDB for company: {target_company}")
+            attendance.upsert_user(u_name, u_id, u_bday, samples, company_id=target_company)
+            mongo_db.save_employee(u_id, u_name, u_bday, target_company)
+            logger.success(f"Successfully enrolled {u_name} via upload.")
+            
+            # Show success message using a robust method
+            try:
+                from tkinter import messagebox
+                import tkinter as tk
+                root = tk.Tk()
+                root.withdraw()
+                root.attributes("-topmost", True)
+                messagebox.showinfo("Thành công", f"Đã đăng ký (Upload) thành công nhân viên: {u_name}")
+                root.destroy()
+            except:
+                pass
+        else:
+            logger.error("No valid face samples were extracted from the provided files.")
+            try:
+                from tkinter import messagebox
+                import tkinter as tk
+                root = tk.Tk()
+                root.withdraw()
+                messagebox.showwarning("Lỗi", "Không tìm thấy khuôn mặt hợp lệ trong các ảnh đã chọn!")
+                root.destroy()
+            except:
+                pass
+
+    except Exception as e:
+        logger.error(f"CRITICAL ERROR in enroll_by_upload: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
 
 
 def main():
@@ -442,7 +479,7 @@ def main():
                                             else:
                                                 logger.warning("No face detected to capture.")
                                         elif key == ord('f'):
-                                            if len(samples) >= 3:
+                                            if len(samples) >= 1:
                                                 break
                                         elif key == ord('m'):
                                             logger.info("Returning to menu...")
@@ -451,7 +488,7 @@ def main():
                                             logger.warning("Enrollment cancelled by user.")
                                             break
 
-                                    if len(samples) >= 3:
+                                    if len(samples) >= 1:
                                         attendance.upsert_user(edit_res["name"], u_id, edit_res["bday"], samples, company_id=target_company)
                                         logger.success(f"Da dang ky khuon mat cho: {edit_res['name']} (ID: {u_id})")
                                         
@@ -482,12 +519,12 @@ def main():
                                 file_root = tk.Tk()
                                 file_root.withdraw()
                                 file_paths = filedialog.askopenfilenames(
-                                    title="Chọn ảnh khuôn mặt (3-5 ảnh)",
-                                    filetypes=[("Image files", "*.jpg *.jpeg *.png *.bmp")]
+                                    title="Chọn ảnh khuôn mặt (Ít nhất 1 ảnh)",
+                                    filetypes=[("Image files", "*.jpg *.jpeg *.png *.bmp *.webp")]
                                 )
                                 file_root.destroy()
                                 
-                                if file_paths and len(file_paths) >= 3:
+                                if file_paths and len(file_paths) >= 1:
                                     samples = []
                                     for fpath in file_paths[:5]:
                                         img = cv2.imread(fpath)
@@ -497,7 +534,7 @@ def main():
                                                 samples.append(faces[0].normed_embedding)
                                                 logger.info(f"Extracted face from {fpath}")
                                     
-                                    if len(samples) >= 3:
+                                    if len(samples) >= 1:
                                         attendance.upsert_user(edit_res["name"], u_id, edit_res["bday"], samples, company_id=target_company)
                                         logger.success(f"Da dang ky khuon mat cho: {edit_res['name']} (ID: {u_id})")
                                         
@@ -512,7 +549,7 @@ def main():
                                         import tkinter as tk
                                         msg_root = tk.Tk()
                                         msg_root.withdraw()
-                                        messagebox.showwarning("Cảnh báo", "Cần ít nhất 3 ảnh có khuôn mặt hợp lệ!")
+                                        messagebox.showwarning("Cảnh báo", "Không tìm thấy khuôn mặt hợp lệ trong các ảnh đã chọn!")
                                         msg_root.destroy()
                             
                             else:

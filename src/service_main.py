@@ -27,6 +27,12 @@ def main():
 
     logger.info("System initialized. Processing camera feed...")
     
+    from src.config import DATA_DIR
+    import cv2
+    import os
+    
+    preview_path = DATA_DIR / "camera_preview.jpg"
+
     try:
         while True:
             if not camera.is_connected:
@@ -42,7 +48,28 @@ def main():
             faces = face_rec.detect_and_extract(frame)
             tracker.update(faces, attendance, frame)
             
-            # Small sleep to manage CPU usage if camera is too fast
+            # --- NEW: UPDATE HEARTBEAT & PREVIEW ---
+            try:
+                # 1. Update heartbeat in MongoDB (Company specific)
+                from src.config import MongoDbConfig
+                from src.attendance.mongodb_mgr import mongo_db
+                mongo_db.db.system_status.update_one(
+                    {"type": "camera_service", "company_id": MongoDbConfig.COMPANY_ID},
+                    {"$set": {"last_seen": time.time(), "status": "running"}},
+                    upsert=True
+                )
+                
+                # 2. Save a small preview frame (every ~1 second or every frame)
+                # To save CPU/Disk, we can resize it down
+                small_frame = cv2.resize(frame, (640, 360))
+                # Draw a timestamp or status on preview
+                cv2.putText(small_frame, f"LIVE: {time.strftime('%H:%M:%S')}", (10, 30), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.imwrite(str(preview_path), small_frame, [cv2.IMWRITE_JPEG_QUALITY, 50])
+            except Exception as e:
+                logger.warning(f"Failed to update service status: {e}")
+
+            # Small sleep to manage CPU usage
             time.sleep(0.01)
 
     except KeyboardInterrupt:

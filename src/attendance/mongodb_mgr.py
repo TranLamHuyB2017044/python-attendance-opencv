@@ -108,11 +108,65 @@ class MongoDBManager:
             
             self.logs.insert_one(log_entry)
             logger.info(f"Logged to MongoDB ({status}) for: {user_name} (Company: {cid})")
+
+            # --- AUTO SYNC TO HKB ---
+            self._trigger_background_sync(log_entry)
+            
             return status
             
         except Exception as e:
             logger.error(f"Failed to log to MongoDB: {e}")
             return None
+
+    def _trigger_background_sync(self, log_entry):
+        """
+        Triggers a background thread to upload the log to HKB services.
+        - Employees: Synchronized to their respective company's HKB services.
+        - Strangers (Unknown): Synchronized to ALL connected HKB services (Global alert).
+        """
+        import threading
+        
+        def sync_task():
+            try:
+                from src.services.hkb_service import hkb_service
+                
+                user_id = log_entry.get("user_id")
+                cid = log_entry.get("company_id")
+                
+                if user_id == "Unknown":
+                    # 1. Nếu là người lạ, lấy tất cả các dịch vụ HKB đã kết nối trong hệ thống
+                    logger.info("Sync: Stranger detected! Broadcasting to all connected HKB systems...")
+                    services = list(self.auth_services.find({}))
+                else:
+                    # 2. Nếu là nhân viên, chỉ gửi tới dịch vụ của công ty đó
+                    services = list(self.auth_services.find({"uuid": cid}))
+                
+                if not services:
+                    logger.debug(f"Sync: No HKB services found for sync (User: {user_id}, Company: {cid})")
+                    return
+
+                for service in services:
+                    logger.info(f"Sync: Auto-uploading attendance to {service['app_name']}...")
+                    
+                    # Gọi dịch vụ upload
+                    res = hkb_service.upload_timekeepers(
+                        endpoint=service["endpoint"],
+                        system_id=service["uuid"],
+                        api_key=service["key"],
+                        user_id=service.get("user_id", 1),
+                        attendance_logs=[log_entry]
+                    )
+                    
+                    if res and res.success:
+                        self.mark_logs_uploaded([log_entry["_id"]], service["uuid"])
+                        logger.success(f"Sync: Successfully synced to {service['app_name']}")
+                    else:
+                        logger.warning(f"Sync: Failed to sync to {service['app_name']}: {res.message if res else 'No response'}")
+            
+            except Exception as e:
+                logger.error(f"Sync: Background task error: {e}")
+
+        threading.Thread(target=sync_task, daemon=True).start()
 
     def get_logs(self, company_id=None, date=None):
         """Fetch logs for a specific date and company."""
