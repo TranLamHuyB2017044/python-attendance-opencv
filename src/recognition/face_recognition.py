@@ -46,7 +46,7 @@ class FaceRecognition:
             self.app = FaceAnalysis(
                 name=self.model_name,
                 root=str(MODELS_DIR),
-                allowed_modules=['detection', 'recognition'],
+                allowed_modules=['detection', 'recognition', 'attribute'],
                 providers=['CPUExecutionProvider'] # Forcing CPU as requested
             )
             self.app.prepare(ctx_id=ctx_id, det_size=self.det_size, det_thresh=self.det_thresh)
@@ -78,41 +78,50 @@ class FaceRecognition:
 
     def draw_faces(self, frame: np.ndarray, faces: List[Any]) -> np.ndarray:
         """
-        Draw bounding boxes and detailed metadata on the frame.
+        Draw bounding boxes and detailed metadata with plain text (no shadow).
         """
         res_frame = frame.copy()
         for face in faces:
             bbox = face.bbox.astype(int)
-            # Draw green rectangle for recognized faces, yellow for unknown
             is_known = getattr(face, 'name', 'Unknown') != "Unknown"
             color = (0, 255, 0) if is_known else (0, 255, 255)
             
+            # Draw Box
             cv2.rectangle(res_frame, (bbox[0], bbox[1]), (bbox[2], bbox[3]), color, 2)
             
-            # Display information
             if hasattr(face, 'name'):
                 y_offset = bbox[1] - 10
-                
-                # Main Label: Name (Score)
-                score = getattr(face, 'score', 0.0)
-                if score is None: score = 0.0
+                score = getattr(face, 'score', 0.0) or 0.0
                 label = f"{face.name} ({score:.2f})"
-                cv2.putText(res_frame, label, (bbox[0], y_offset),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                
+                # Draw label text
+                cv2.putText(res_frame, label, (bbox[0], y_offset), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2)
                 
                 if is_known:
-                    # Metadata lines
+                    gender_map = {0: "Nu", 1: "Nam"}
+                    gender_val = "N/A"
+                    if hasattr(face, 'gender') and face.gender is not None:
+                        gender_val = gender_map.get(int(face.gender), "N/A")
+                        
+                    age_val = "N/A"
+                    if hasattr(face, 'age') and face.age is not None:
+                        age_val = int(face.age)
+
                     meta_info = [
-                        f"ID: {face.user_id}",
-                        f"N-sinh: {getattr(face, 'birthday', 'N/A')}",
-                        f"Gio: {getattr(face, 'detect_time', '')}",
-                        f"Mau: {getattr(face, 'vector_count', 0)}"
+                        f"ID: {getattr(face, 'user_id', 'Unknown') or 'Unknown'}",
+                        f"N-sinh: {getattr(face, 'birthday', 'N/A') or 'N/A'}",
+                        f"G-tinh: {gender_val} ({age_val}t)",
+                        f"Gio: {getattr(face, 'detect_time', 'N/A') or 'N/A'}",
+                        f"Mau: {getattr(face, 'vector_count', 0) if getattr(face, 'vector_count', None) is not None else 0}"
                     ]
                     
                     for i, text in enumerate(meta_info):
-                        # Draw below the box
-                        cv2.putText(res_frame, text, (bbox[0], bbox[3] + 20 + (i * 20)),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                        pos = (bbox[0], bbox[3] + 25 + (i * 22))
+                        cv2.putText(res_frame, text, pos, 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
+                
+        return res_frame
                 
         return res_frame
 

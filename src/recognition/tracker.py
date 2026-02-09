@@ -263,8 +263,11 @@ class FaceTracker:
                 data = updated_faces_map[matched_id]
                 if data['user_data']:
                     u_d = data['user_data']
-                    face.user_id = u_d.get('user_id', 'Unknown')
-                    face.score = u_d.get('score', 0.0)
+                    face.user_id = u_d.get('user_id') or 'Unknown'
+                    face.score = u_d.get('score') or 0.0
+                    face.birthday = u_d.get('birthday') or 'N/A'
+                    face.detect_time = (u_d.get('detect_time') or '').split(' ')[-1] or 'N/A'
+                    face.vector_count = u_d.get('vector_count') if u_d.get('vector_count') is not None else 0
                     
                     if data['status'] == 'COOLDOWN':
                         name = remove_accents(u_d.get('name'))
