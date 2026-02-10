@@ -22,16 +22,61 @@ class FaceTracker:
         
         # Global cooldowns: {user_id: last_detection_time}
         self.user_cooldowns: Dict[str, float] = {}
+        
+        # Webhook cooldown for known users: {user_id: last_webhook_time}
+        # Prevents sending duplicate webhooks within 15 minutes
+        self.webhook_sent_time: Dict[str, float] = {}
+        
+        # Unknown face webhook counter (max 10, reset on successful checkin)
+        self.unknown_webhook_count = 0
+        self.unknown_webhook_limit = 10
 
-    def _send_user_webhook(self, user_id, user_name, status):
+    def _send_user_webhook(self, user_id, user_name, status, is_unknown=False):
         """
         Sends user detection info to the configured webhook URL in a background thread.
+        
+        Deduplication rules:
+        - Known users: Max 1 webhook per 15 minutes per user_id
+        - Unknown faces: Max 10 webhooks total, reset when any known user checks in
         """
         def thread_task():
             try:
                 from src.utils.string_utils import remove_accents
                 from src.utils.time_manager import time_mgr
                 
+                current_time = time.time()
+                
+                # === DEDUPLICATION LOGIC ===
+                if is_unknown:
+                    # Check if unknown webhook limit reached
+                    if self.unknown_webhook_count >= self.unknown_webhook_limit:
+                        logger.debug(f"Unknown webhook limit reached ({self.unknown_webhook_count}/{self.unknown_webhook_limit}). Skipping.")
+                        return
+                    
+                    # Increment counter
+                    self.unknown_webhook_count += 1
+                    logger.warning(f"Sending unknown webhook #{self.unknown_webhook_count}/{self.unknown_webhook_limit}")
+                else:
+                    # Known user - check 15 minute cooldown
+                    if user_id in self.webhook_sent_time:
+                        last_sent = self.webhook_sent_time[user_id]
+                        elapsed = current_time - last_sent
+                        if elapsed < 900:  # 15 minutes = 900 seconds
+                            remaining = int(900 - elapsed)
+                            logger.debug(f"Webhook blocked for {user_name} (sent {int(elapsed)}s ago, {remaining}s remaining)")
+                            return
+                    
+                    # Record this webhook send
+                    self.webhook_sent_time[user_id] = current_time
+                    
+                    # Reset unknown counter when a known user checks in successfully
+                    if self.unknown_webhook_count > 0:
+                        logger.info(f"Resetting unknown webhook counter (was {self.unknown_webhook_count})")
+                        self.unknown_webhook_count = 0
+                    
+                    logger.info(f"Webhook allowed for {user_name}")
+                
+                # === PREPARE PAYLOAD ===
                 # 1. Format time HH:MM:SS from VN Time
                 vn_now = time_mgr.get_accurate_time()
                 time_str = vn_now.strftime("%H:%M:%S")
@@ -205,7 +250,7 @@ class FaceTracker:
                     can_attempt = False
                 elif not recognition_done_this_frame:
                     if f_data['status'] == 'STABILIZING':
-                        if time_stayed >= 0.5:
+                        if time_stayed >= 1.5:  # Increased from 0.5s to 1.5s for better stability
                             can_attempt = True
                     elif f_data['status'] in ['RETRY_WAIT', 'UNAUTHORIZED']:
                         if f_data['unknown_attempts'] < 5 or wait_time >= 5.0:
@@ -231,26 +276,26 @@ class FaceTracker:
                                 f_data['status'] = 'RECOGNIZED'
                                 f_data['user_data'] = user_data
                                 self.user_cooldowns[user_id] = current_time
-                                _, status = self._save_log_with_bbox(frame, face, user_id, user_name, user_data.get('score', 0.0), company_id=target_cid)
+                                url, status = self._save_log_with_bbox(frame, face, user_id, user_name, user_data.get('score', 0.0), company_id=target_cid)
                                 
                                 if status == 'IN': logger.info(f"Diem danh VAO: {user_name}")
                                 elif status == 'OUT': logger.info(f"Diem danh RA: {user_name}")
                                 else: logger.info(f"Diem danh THANH CONG: {user_name}")
                                 
-                                # Send Webhook notification
-                                self._send_user_webhook(user_id, user_name, status)
+                                # Send Webhook notification (with 15-min deduplication)
+                                self._send_user_webhook(user_id, user_name, status, is_unknown=False)
                         else:
                             f_data['status'] = 'RECOGNIZED'
                             f_data['user_data'] = user_data
                             self.user_cooldowns[user_id] = current_time
-                            _, status = self._save_log_with_bbox(frame, face, user_id, user_name, user_data.get('score', 0.0), company_id=target_cid)
+                            url, status = self._save_log_with_bbox(frame, face, user_id, user_name, user_data.get('score', 0.0), company_id=target_cid)
                             
                             if status == 'IN': logger.info(f"Diem danh VAO: {user_name}")
                             elif status == 'OUT': logger.info(f"Diem danh RA: {user_name}")
                             else: logger.info(f"Diem danh THANH CONG: {user_name}")
                             
-                            # Send Webhook notification
-                            self._send_user_webhook(user_id, user_name, status)
+                            # Send Webhook notification (with 15-min deduplication)
+                            self._send_user_webhook(user_id, user_name, status, is_unknown=False)
                         
                         # --- Tự động bổ sung embedding nếu chưa đủ 5 mẫu ---
                         vector_count = user_data.get('vector_count', 0)
@@ -273,9 +318,9 @@ class FaceTracker:
                         f_data['last_attempt_time'] = current_time
                         f_data['user_data'] = user_data
                         
-                        # Gửi Webhook và ghi log DB cho người lạ TRÊN MỖI LẦN NHẬN DIỆN
-                        logger.warning(f"Unknown face detected (Attempt {f_data['unknown_attempts']}). Logging and sending webhook...")
-                        self._send_user_webhook("Unknown", f"Nguoi la {f_data['unknown_attempts']}", "unknown")
+                        # Gửi Webhook và ghi log DB cho người lạ (max 10 lần, reset khi có người checkin)
+                        logger.warning(f"Unknown face detected (Attempt {f_data['unknown_attempts']}).")
+                        self._send_user_webhook("Unknown", f"Nguoi la {f_data['unknown_attempts']}", "unknown", is_unknown=True)
                         self._save_log_with_bbox(frame, face, "Unknown", "Người lạ", user_data.get('score', 0.0), is_known=False, status="FAILED", company_id=active_company)
                         
                         if f_data['unknown_attempts'] >= 10:
