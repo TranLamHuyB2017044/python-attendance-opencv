@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 from loguru import logger
 from src.attendance.mongodb_mgr import mongo_db
+from tkinter import messagebox
 
 # State Management Constants
 STATE_MENU = 0
@@ -86,16 +87,16 @@ class AttendanceUI:
                     self.current_state = STATE_ENROLL_UPLOAD
 
                 # --- COLUMN 2 ACTIONS ---
-                # CHINH SUA
+                # CHINH SUA (Align with Row 1)
                 if col2_L < x < col2_R and row1_y < y < row1_y + btn_h: 
                     self.current_state = STATE_EDIT
 
-                # DANH SACH
-                elif col2_L < x < col2_R and row2_y < y < row2_y + btn_h: 
+                # DANH SACH (Align with Row 1.5)
+                elif col2_L < x < col2_R and row1_5_y < y < row1_5_y + btn_h: 
                     self.current_state = STATE_LIST
                 
-                # LICH SU
-                elif col2_L < x < col2_R and row3_y < y < row3_y + btn_h: 
+                # LICH SU (Align with Row 2)
+                elif col2_L < x < col2_R and row2_y < y < row2_y + btn_h: 
                     self.current_state = STATE_HISTORY
 
             # --- ADMIN & COMPANY MANAGEMENT ---
@@ -146,9 +147,14 @@ class AttendanceUI:
         col1_x = cX - btn_w - gap_x
         col2_x = cX + gap_x
 
+        # Define Rows (Shared for both columns)
+        row1_y = cY - int(120 * (h/600))
+        row1_5_y = cY - int(40 * (h/600))
+        row2_y = cY + int(40 * (h/600))
+        row3_y = cY + int(120 * (h/600))
+
         # --- Column 1 ---
         # Button 1: Start System / Monitor (All)
-        row1_y = cY - int(120 * (h/600))
         btn_color = (40, 180, 40) if service_active else (60, 60, 60)
         cv2.rectangle(frame, (col1_x, row1_y), (col1_x + btn_w, row1_y + btn_h), btn_color, -1)
         cv2.putText(frame, "XEM SERVICE (LIVE)", (col1_x + int(45 * (w/800)), row1_y + int(38 * (h/600))),
@@ -159,7 +165,6 @@ class AttendanceUI:
         cv2.circle(frame, (col1_x + int(20 * (w/800)), row1_y + int(30 * (h/600))), 8, dot_color, -1)
         
         # New Button: Direct Test Camera (No Service needed)
-        row1_5_y = cY - int(40 * (h/600))
         cv2.rectangle(frame, (col1_x, row1_5_y), (col1_x + btn_w, row1_5_y + btn_h), (80, 80, 200), -1)
         cv2.putText(frame, "TEST CAMERA (TRUC TIEP)", (col1_x + int(30 * (w/800)), row1_5_y + int(38 * (h/600))),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6 * (w/800), (255, 255, 255), 2)
@@ -167,32 +172,30 @@ class AttendanceUI:
         # Enrollment Buttons (Available to Admin and Company Managers)
         if role_lower in ['admin', 'company']:
             # Button 2: Enroll Camera
-            row2_y = cY + int(40 * (h/600))
             cv2.rectangle(frame, (col1_x, row2_y), (col1_x + btn_w, row2_y + btn_h), (200, 120, 0), -1)
             cv2.putText(frame, "DANG KY (CAM)", (col1_x + int(50 * (w/800)), row2_y + int(38 * (h/600))),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8 * (w/800), (255, 255, 255), 2)
             
             # Button 3: Enroll Upload
-            row3_y = cY + int(120 * (h/600))
             cv2.rectangle(frame, (col1_x, row3_y), (col1_x + btn_w, row3_y + btn_h), (0, 100, 200), -1)
             cv2.putText(frame, "DANG KY (FILE)", (col1_x + int(50 * (w/800)), row3_y + int(38 * (h/600))),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8 * (w/800), (255, 255, 255), 2)
         
         # Management Buttons (Admin & Company Only)
         if role_lower in ['admin', 'company']:
-            # Button 4: Edit
-            cv2.rectangle(frame, (col2_x, cY - btn_h - gap_y), (col2_x + btn_w, cY - gap_y), (100, 100, 100), -1)
-            cv2.putText(frame, "CHINH SUA", (col2_x + int(75 * (w/800)), cY - gap_y - int(18 * (h/600))),
+            # Button 4: Edit (Align with Row 1)
+            cv2.rectangle(frame, (col2_x, row1_y), (col2_x + btn_w, row1_y + btn_h), (100, 100, 100), -1)
+            cv2.putText(frame, "CHINH SUA", (col2_x + int(75 * (w/800)), row1_y + int(38 * (h/600))),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8 * (w/800), (255, 255, 255), 2)
 
-            # Button 5: List
-            cv2.rectangle(frame, (col2_x, cY + gap_y), (col2_x + btn_w, cY + gap_y + btn_h), (150, 50, 150), -1)
-            cv2.putText(frame, "DANH SACH", (col2_x + int(75 * (w/800)), cY + gap_y + int(42 * (h/600))),
+            # Button 5: List (Align with Row 1.5)
+            cv2.rectangle(frame, (col2_x, row1_5_y), (col2_x + btn_w, row1_5_y + btn_h), (150, 50, 150), -1)
+            cv2.putText(frame, "DANH SACH", (col2_x + int(75 * (w/800)), row1_5_y + int(38 * (h/600))),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8 * (w/800), (255, 255, 255), 2)
 
-            # Button 6: History
-            cv2.rectangle(frame, (col2_x, cY + gap_y*2 + btn_h), (col2_x + btn_w, cY + gap_y*2 + btn_h*2), (100, 50, 0), -1)
-            cv2.putText(frame, "LICH SU", (col2_x + int(90 * (w/800)), cY + gap_y*2 + btn_h + int(42 * (h/600))),
+            # Button 6: History (Align with Row 2)
+            cv2.rectangle(frame, (col2_x, row2_y), (col2_x + btn_w, row2_y + btn_h), (100, 50, 0), -1)
+            cv2.putText(frame, "LICH SU", (col2_x + int(90 * (w/800)), row2_y + int(38 * (h/600))),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8 * (w/800), (255, 255, 255), 2)
         
         # --- Instruction Table (Compact) ---
@@ -217,20 +220,20 @@ class AttendanceUI:
         # Management Buttons
         if role_lower in ['admin', 'company']:
             # 1. Connect HKB (Left) - Available for both Admin and Company
-            cv2.rectangle(frame, (cX - 380, h - 84), (cX - 140, h - 20), (50, 100, 50), -1) # Dark Green
-            cv2.putText(frame, "KET NOI HKB", (cX - 355, h - 40),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            cv2.rectangle(frame, (cX - int(380*(w/800)), h - int(84*(h/600))), (cX - int(140*(w/800)), h - int(20*(h/600))), (50, 100, 50), -1) 
+            cv2.putText(frame, "KET NOI HKB", (cX - int(355*(w/800)), h - int(40*(h/600))),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6 * (w/800), (255, 255, 255), 2)
 
         if role_lower == 'admin':
             # 2. Manage Users (Center) - Admin Only
-            cv2.rectangle(frame, (cX - 120, h - 84), (cX + 120, h - 20), (60, 60, 180), -1)
-            cv2.putText(frame, "QUAN LY USER", (cX - 95, h - 40),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            cv2.rectangle(frame, (cX - int(120*(w/800)), h - int(84*(h/600))), (cX + int(120*(w/800)), h - int(20*(h/600))), (60, 60, 180), -1)
+            cv2.putText(frame, "QUAN LY USER", (cX - int(95*(w/800)), h - int(40*(h/600))),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6 * (w/800), (255, 255, 255), 2)
 
             # 3. Manage Company (Right) - Admin Only
-            cv2.rectangle(frame, (cX + 140, h - 84), (cX + 380, h - 20), (100, 50, 150), -1)
-            cv2.putText(frame, "QUAN LY CONG TY", (cX + 160, h - 40),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            cv2.rectangle(frame, (cX + int(140*(w/800)), h - int(84*(h/600))), (cX + int(380*(w/800)), h - int(20*(h/600))), (100, 50, 150), -1)
+            cv2.putText(frame, "QUAN LY CONG TY", (cX + int(160*(w/800)), h - int(40*(h/600))),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6 * (w/800), (255, 255, 255), 2)
             
         # 4. Settings Button (Top Left) - Available to all logged-in users
         cv2.rectangle(frame, (20, 15), (150, 65), (80, 80, 80), -1)
@@ -400,7 +403,7 @@ class AttendanceUI:
         return u_id
 
     @staticmethod
-    def get_edit_user_form(current_id, current_name, current_bday):
+    def get_edit_user_form(current_id, current_name, current_bday, session_role=None):
         """
         Dialog to edit Name, Birthday, and optionally enroll face.
         """
@@ -461,16 +464,20 @@ class AttendanceUI:
             result["enroll_upload"] = True
             root.destroy()
 
+        is_company = (str(session_role).lower() == 'company')
+
         tk.Label(root, text=f"ID: {current_id}", font=("Arial", 10, "bold")).pack(pady=10)
         
         tk.Label(root, text="Họ và tên:").pack()
         entry_name = tk.Entry(root, width=35)
         entry_name.insert(0, current_name)
+        if is_company: entry_name.config(state='readonly')
         entry_name.pack(pady=2)
 
         tk.Label(root, text="Ngày sinh (DD/MM/YYYY):").pack()
         entry_bday = tk.Entry(root, width=35)
         entry_bday.insert(0, current_bday)
+        if is_company: entry_bday.config(state='readonly')
         entry_bday.pack(pady=2)
 
         # Separator
@@ -490,8 +497,16 @@ class AttendanceUI:
         tk.Label(root, text="─" * 50, fg="gray").pack(pady=10)
         
         # Action buttons
-        tk.Button(root, text="LƯU THAY ĐỔI", command=on_save, width=25, bg="#28a745", fg="white").pack(pady=5)
-        tk.Button(root, text="XÓA NHÂN VIÊN", command=on_delete, width=25, bg="#dc3545", fg="white").pack(pady=5)
+        btn_save = tk.Button(root, text="LƯU THAY ĐỔI", command=on_save, width=25, bg="#28a745", fg="white")
+        btn_delete = tk.Button(root, text="XÓA NHÂN VIÊN", command=on_delete, width=25, bg="#dc3545", fg="white")
+        
+        if is_company:
+            btn_save.config(state='disabled', bg='#6c757d')
+            btn_delete.config(state='disabled', bg='#6c757d')
+            tk.Label(root, text="* Quyền Company chỉ được phép cập nhật Ảnh Detect", fg="red", font=("Arial", 8)).pack()
+
+        btn_save.pack(pady=5)
+        btn_delete.pack(pady=5)
         
         root.mainloop()
         return result if result["name"] or result["delete"] or result["enroll_camera"] or result["enroll_upload"] else None
@@ -575,6 +590,9 @@ class AttendanceUI:
         tree.column("id", width=100)
         tree.column("name", width=250)
 
+        # Add "ALL" option for convenience
+        tree.insert("", tk.END, values=("ALL", "--- TẤT CẢ CÔNG TY ---"))
+        
         for c in companies:
             tree.insert("", tk.END, values=(c.get('company_id'), c.get('name')))
 
@@ -750,7 +768,7 @@ class AttendanceUI:
         return selected["system"]
 
     @staticmethod
-    def show_attendance_logs_ui(logs, title="Lịch sử điểm danh", session_role=None, session_user_id=None):
+    def show_attendance_logs_ui(logs, title="Lịch sử điểm danh", session_role=None, session_user_id=None, session_username="GLOBAL"):
         """
         Displays a table of attendance logs using tkinter.
         """
@@ -825,9 +843,9 @@ class AttendanceUI:
                     "item_id": item
                 })
 
-            # 2. Get list of connected systems for this user
+            # 2. Get list of connected systems for this user (user-specific keys)
             user_id = session_user_id or 1
-            connections = hkb_service.get_connections(user_id=user_id)
+            connections = hkb_service.get_connections(user_id=user_id, username=session_username)
             
             if not connections or not isinstance(connections, list):
                 messagebox.showerror("Lỗi", "Không tìm thấy hệ thống đã kết nối")
@@ -981,8 +999,11 @@ class AttendanceUI:
             for item in tree.get_children():
                 tree.delete(item)
             
-            # Truyền user_id hiện tại để lọc danh sách UUID đã đăng ký
-            connections = hkb_service.get_connections(user_id=current_user_id)
+            # Truyền user_id hiện tại để lọc danh sách UUID đã đăng ký, và session_username cho group keys
+            connections = hkb_service.get_connections(
+                user_id=current_user_id, 
+                username=getattr(self, "session_username", "GLOBAL")
+            )
             if connections and isinstance(connections, list):
                 for conn in connections:
                     # Logic: client_register = 0 -> Chưa kết nối, 1 -> Đã kết nối
@@ -1128,8 +1149,14 @@ class AttendanceUI:
                     messagebox.showinfo("Thông báo", "Không có dữ liệu nhân sự hoặc định dạng không đúng.")
                     return
                 
+                # Determine target company ID for saving
+                target_cid = remote_sys_id
+                if str(self.session_role).lower() == 'company' and self.session_company_id:
+                    target_cid = self.session_company_id
+                    logger.info(f"Company user sync: using forced company_id '{target_cid}' instead of system uuid '{remote_sys_id}'")
+                
                 # Hiển thị danh sách nhân sự trong một cửa sổ mới
-                self.show_remote_employees_ui(conn_name, employees, remote_sys_id)
+                self.show_remote_employees_ui(conn_name, employees, target_cid)
             else:
                 err_msg = result.message if result and result.message else "Lấy danh sách nhân sự thất bại"
                 if result and result.data and "raw" in result.data:
@@ -1217,11 +1244,54 @@ class AttendanceUI:
                 return
             
             saved_count = 0
-            for t in targets:
-                if mongo_db.save_employee(t["id"], t["name"], t["bday"], t["cid"]):
-                    saved_count += 1
+            errors = []
+            update_all = False
+            skip_all = False
             
-            messagebox.showinfo("Thành công", f"Đã lưu thành công {saved_count}/{len(targets)} nhân viên vào công ty {target_company_id}")
+            for t in targets:
+                # Try saving normally
+                ok, msg = mongo_db.save_employee(t["id"], t["name"], t["bday"], t["cid"], force_update=False)
+                
+                if not ok and "đã tồn tại" in msg:
+                    # User already exists
+                    if skip_all:
+                        continue
+                    if update_all:
+                        ok, msg = mongo_db.save_employee(t["id"], t["name"], t["bday"], t["cid"], force_update=True)
+                    else:
+                        # Ask the user what to do
+                        # Since we might have many, we offer "Update All" or "Skip All" via a custom or multiple choice
+                        # For simplicity with basic messagebox, we'll ask Yes/No/Cancel
+                        # Yes -> Update this one, No -> Skip this one, Cancel -> Stop
+                        
+                        confirm_msg = f"Nhân viên ID '{t['id']}' ({t['name']}) đã tồn tại.\n\nBạn có muốn CẬP NHẬT thông tin mới nhất không?"
+                        
+                        # Use a more flexible dialog if possible, or just ask yes/no
+                        # To support "Update All", we can use askyesnocancel or a custom dialog.
+                        # Let's try a simple approach with a count-save pop-up
+                        
+                        res = messagebox.askyesnocancel("Phát hiện trùng lặp", confirm_msg)
+                        
+                        if res is True: # Yes: Update
+                            ok, msg = mongo_db.save_employee(t["id"], t["name"], t["bday"], t["cid"], force_update=True)
+                        elif res is False: # No: Skip
+                            continue
+                        else: # None: Cancel Batch
+                            logger.info("Batch save cancelled by user.")
+                            break
+                
+                if ok:
+                    saved_count += 1
+                else:
+                    errors.append(f"ID {t['id']}: {msg}")
+            
+            if errors:
+                error_msg = "\n".join(errors[:10])
+                if len(errors) > 10: error_msg += f"\n... và {len(errors)-10} lỗi khác"
+                messagebox.showwarning("Kết quả lưu", f"Đã lưu/cập nhật {saved_count}/{len(targets)} nhân viên.\n\nCác lỗi:\n{error_msg}")
+            else:
+                messagebox.showinfo("Thành công", f"Đã lưu/cập nhật thành công {saved_count}/{len(targets)} nhân viên vào công ty {target_company_id}")
+            
             if saved_count > 0:
                 root.destroy()
 
@@ -1323,14 +1393,21 @@ class AttendanceUI:
         tree.heading("role", text="Quyền")
         tree.heading("company", text="Phân quyền Công ty")
         
+        # Helper for display names in the list
+        all_companies = mongo_db.get_all_companies()
+        company_id_to_name = {c.get("company_id"): c.get("name", c.get("company_id")) for c in all_companies}
+        company_id_to_name["admin"] = "Admin (Cổng Tổng)"
+
         def refresh():
             for i in tree.get_children(): tree.delete(i)
             for u in mongo_db.get_all_cloud_users():
-                tree.insert("", tk.END, values=(u.get('username'), u.get('role'), u.get('company_id')))
+                cid = u.get('company_id', 'admin')
+                cname = company_id_to_name.get(cid, cid)
+                tree.insert("", tk.END, values=(u.get('username'), u.get('role'), cname))
 
         def on_add():
             from tkinter import ttk
-            add_win = tk.Toplevel(root); add_win.title("Thêm User Mới"); add_win.geometry("300x400")
+            add_win = tk.Toplevel(root); add_win.title("Thêm User Mới"); add_win.geometry("300x420")
             
             tk.Label(add_win, text="Username:").pack(pady=5)
             e_user = tk.Entry(add_win); e_user.pack()
@@ -1339,19 +1416,30 @@ class AttendanceUI:
             e_pwd = tk.Entry(add_win, show="*"); e_pwd.pack()
             
             tk.Label(add_win, text="Quyền hạn:").pack(pady=5)
-            e_role = ttk.Combobox(add_win, values=["admin", "company", "user"])
+            e_role = ttk.Combobox(add_win, values=["admin", "company"])
             e_role.set("company"); e_role.pack()
             
             tk.Label(add_win, text="Phân quyền Công ty:").pack(pady=5)
-            # Fetch all companies to show in dropdown
-            companies = mongo_db.get_all_companies()
-            company_list = ["admin"] + [c.get("company_id") for c in companies]
             
-            e_cid = ttk.Combobox(add_win, values=company_list)
-            e_cid.set("admin"); e_cid.pack()
+            # Map display names to IDs
+            company_map = {"Admin (Cổng Tổng)": "admin"}
+            company_display_list = ["Admin (Cổng Tổng)"]
+            
+            for c in all_companies:
+                cid = c.get("company_id")
+                cname = c.get("name", cid)
+                display_text = f"{cname} ({cid})"
+                company_map[display_text] = cid
+                company_display_list.append(display_text)
+            
+            e_cid = ttk.Combobox(add_win, values=company_display_list, state="readonly")
+            e_cid.set("Admin (Cổng Tổng)"); e_cid.pack()
             
             def submit():
-                u, p, r, cid = e_user.get(), e_pwd.get(), e_role.get(), e_cid.get()
+                u, p, r = e_user.get(), e_pwd.get(), e_role.get()
+                display_cid = e_cid.get()
+                cid = company_map.get(display_cid, "admin")
+                
                 if not u or not p or not cid: return messagebox.showwarning("!", "Vui lòng nhập đầy đủ thông tin")
                 
                 success, msg = mongo_db.create_user(u, p, r, cid)
@@ -1437,8 +1525,8 @@ class AttendanceUI:
         return login_status["authenticated"]
 
     @staticmethod
-    def show_system_settings_ui(mongo_db):
-        """UI to manage system-wide settings like Group Keys and Camera."""
+    def show_system_settings_ui(mongo_db, session_username="GLOBAL"):
+        """UI to manage settings like Group Keys and Camera (user-specific)."""
         import tkinter as tk
         from tkinter import messagebox
 
@@ -1461,25 +1549,25 @@ class AttendanceUI:
         # Grid for camera fields
         tk.Label(cam_frame, text="IP Camera:").grid(row=0, column=0, sticky="e", pady=2)
         e_ip = tk.Entry(cam_frame, width=25)
-        e_ip.grid(row=0, column=1, padx=5); e_ip.insert(0, mongo_db.get_setting("camera_ip", "192.168.1.1"))
+        e_ip.grid(row=0, column=1, padx=5); e_ip.insert(0, mongo_db.get_setting("camera_ip", "192.168.1.1", username=session_username))
         
         tk.Label(cam_frame, text="Port (RTSP):").grid(row=0, column=2, sticky="e", pady=2)
         e_port = tk.Entry(cam_frame, width=10)
-        e_port.grid(row=0, column=3, padx=5); e_port.insert(0, mongo_db.get_setting("camera_port", "554"))
+        e_port.grid(row=0, column=3, padx=5); e_port.insert(0, mongo_db.get_setting("camera_port", "554", username=session_username))
         
         tk.Label(cam_frame, text="Username:").grid(row=1, column=0, sticky="e", pady=2)
         e_user = tk.Entry(cam_frame, width=25)
-        e_user.grid(row=1, column=1, padx=5); e_user.insert(0, mongo_db.get_setting("camera_user", "admin"))
+        e_user.grid(row=1, column=1, padx=5); e_user.insert(0, mongo_db.get_setting("camera_user", "admin", username=session_username))
         
         tk.Label(cam_frame, text="Password:").grid(row=1, column=2, sticky="e", pady=2)
         e_pass = tk.Entry(cam_frame, width=25, show="*")
-        e_pass.grid(row=1, column=3, padx=5); e_pass.insert(0, mongo_db.get_setting("camera_pass", "password"))
+        e_pass.grid(row=1, column=3, padx=5); e_pass.insert(0, mongo_db.get_setting("camera_pass", "password", username=session_username))
 
         tk.Label(main_frame, text="----------------------------------------------------------", fg="gray").pack(pady=10)
 
         # --- B. GROUP KEYS ---
         tk.Label(main_frame, text="Group Keys (Các key cách nhau bởi dấu phẩy):", font=("Arial", 10, "bold"), fg="blue").pack(anchor="w", pady=(0, 5))
-        current_keys = mongo_db.get_setting("group_keys", "")
+        current_keys = mongo_db.get_setting("group_keys", "", username=session_username)
         text_keys = tk.Text(main_frame, height=4, width=65)
         text_keys.pack(pady=5)
         text_keys.insert("1.0", current_keys)
@@ -1494,11 +1582,11 @@ class AttendanceUI:
             
             # Save all to DB
             success = True
-            success &= mongo_db.set_setting("group_keys", new_keys)
-            success &= mongo_db.set_setting("camera_ip", ip)
-            success &= mongo_db.set_setting("camera_port", port)
-            success &= mongo_db.set_setting("camera_user", user)
-            success &= mongo_db.set_setting("camera_pass", pwd)
+            success &= mongo_db.set_setting("group_keys", new_keys, username=session_username)
+            success &= mongo_db.set_setting("camera_ip", ip, username=session_username)
+            success &= mongo_db.set_setting("camera_port", port, username=session_username)
+            success &= mongo_db.set_setting("camera_user", user, username=session_username)
+            success &= mongo_db.set_setting("camera_pass", pwd, username=session_username)
             
             if success:
                 messagebox.showinfo("Thành công", "Đã lưu cài đặt hệ thống!\nBạn cần khởi động lại dịch vụ Camera để áp dụng thay đổi IP/Pass.")

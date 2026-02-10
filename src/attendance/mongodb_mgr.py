@@ -27,7 +27,14 @@ class MongoDBManager:
             self.logs.create_index([("user_id", 1)])
             self.users.create_index([("username", 1)], unique=True)
             self.auth_services.create_index([("uuid", 1)], unique=True)
-            self.settings.create_index([("key", 1)], unique=True)
+            
+            # Remove old unique index on key if exists, and create compound index (key, username)
+            try:
+                self.settings.drop_index("key_1")
+            except:
+                pass
+            self.settings.create_index([("key", 1), ("username", 1)], unique=True)
+            
             self.employees.create_index([("company_id", 1), ("user_id", 1)], unique=True)
             
             logger.info("Connected to MongoDB Cloud successfully")
@@ -35,26 +42,36 @@ class MongoDBManager:
             logger.error(f"Failed to connect to MongoDB: {e}")
 
     # --- Settings Methods ---
-    def get_setting(self, key, default=None):
-        """Retrieve a system setting."""
+    def get_setting(self, key, default=None, username="GLOBAL"):
+        """Retrieve a system setting, optionally user-specific."""
         try:
-            setting = self.settings.find_one({"key": key})
-            return setting.get("value", default) if setting else default
+            # 1. Try to find user-specific setting
+            setting = self.settings.find_one({"key": key, "username": username})
+            if setting:
+                return setting.get("value", default)
+            
+            # 2. Fallback to GLOBAL if not found and we were looking for a specific user
+            if username != "GLOBAL":
+                setting = self.settings.find_one({"key": key, "username": "GLOBAL"})
+                if setting:
+                    return setting.get("value", default)
+                    
+            return default
         except Exception as e:
-            logger.error(f"Failed to get setting {key}: {e}")
+            logger.error(f"Failed to get setting {key} for user {username}: {e}")
             return default
 
-    def set_setting(self, key, value):
-        """Save/Update a system setting."""
+    def set_setting(self, key, value, username="GLOBAL"):
+        """Save/Update a system setting, optionally user-specific."""
         try:
             self.settings.update_one(
-                {"key": key},
+                {"key": key, "username": username},
                 {"$set": {"value": value, "updated_at": datetime.utcnow()}},
                 upsert=True
             )
             return True
         except Exception as e:
-            logger.error(f"Failed to set setting {key}: {e}")
+            logger.error(f"Failed to set setting {key} for user {username}: {e}")
             return False
 
     def log_attendance(self, user_id, user_name, status=None, frame=None, company_id=None):
@@ -204,15 +221,29 @@ class MongoDBManager:
             }
         return None
 
-    def save_employee(self, user_id, name, birthday, company_id):
+    def save_employee(self, user_id, name, birthday, company_id, force_update=True):
         """
         Store or update employee metadata in MongoDB.
+        Args:
+            force_update: If False, will fail if user_id already exists in company.
+        Returns: (success, message)
         """
         try:
-            # Ensure user_id is string for consistency
-            user_id = str(user_id)
-            company_id = str(company_id)
+            # 1. Validation for Null/Empty
+            if not user_id or str(user_id).strip().lower() in ["none", "null", "n/a", ""]:
+                return False, "Mã nhân viên không hợp lệ (Null/Empty)"
+            if not name or str(name).strip().lower() in ["none", "null", "unknown", ""]:
+                return False, "Tên nhân viên không được để trống"
+                
+            user_id = str(user_id).strip()
+            company_id = str(company_id).strip()
             
+            # 2. Check for duplicates if force_update is False
+            if not force_update:
+                exists = self.employees.find_one({"user_id": user_id, "company_id": company_id})
+                if exists:
+                    return False, f"Mã nhân viên {user_id} đã tồn tại trong hệ thống"
+
             employee_data = {
                 "user_id": user_id,
                 "name": name,
@@ -225,11 +256,11 @@ class MongoDBManager:
                 {"$set": employee_data, "$setOnInsert": {"created_at": datetime.utcnow()}},
                 upsert=True
             )
-            logger.info(f"MongoDB: Saved employee metadata for {name} (ID: {user_id})")
-            return True
+            # logger.info(f"MongoDB: Saved employee metadata for {name} (ID: {user_id})")
+            return True, "Thành công"
         except Exception as e:
             logger.error(f"MongoDB: Failed to save employee: {e}")
-            return False
+            return False, str(e)
 
     def get_all_employees(self, company_id=None):
         """
@@ -243,10 +274,14 @@ class MongoDBManager:
         """
         try:
             query = {}
-            if company_id:
-                query["company_id"] = str(company_id)  # Ensure string for consistency
+            if company_id and company_id != "ALL":
+                if isinstance(company_id, list):
+                    query["company_id"] = {"$in": [str(c) for c in company_id]}
+                else:
+                    query["company_id"] = str(company_id)
             
-            employees = list(self.employees.find(query, {"_id": 0, "user_id": 1, "name": 1, "birthday": 1}))
+            employees = list(self.employees.find(query, {"_id": 0}))
+            logger.info(f"MongoDB: Found {len(employees)} employees for company_id={company_id}")
             return employees
         except Exception as e:
             logger.error(f"MongoDB: Failed to get employees: {e}")

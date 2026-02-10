@@ -59,13 +59,18 @@ class QdrantAttendanceManager:
             logger.error(f"Failed to ensure Qdrant collection/indexes: {e}")
             raise e
 
-    def upsert_user(self, user_name: str, user_id: str, birthday: str, embeddings: List[np.ndarray], **kwargs) -> bool:
+    def upsert_user(self, user_name: str, user_id: str, birthday: str, embeddings: List[np.ndarray], clear_old: bool = False, **kwargs) -> bool:
         """
         Save/Update user embeddings in Qdrant with metadata.
         """
         try:
-            points = []
             user_id_str = str(user_id)
+            
+            # If specified, remove existing vectors for this user first
+            if clear_old:
+                self.delete_user(user_id_str)
+
+            points = []
             for emb in embeddings:
                 vector = emb.tolist() if isinstance(emb, np.ndarray) else list(emb)
                 points.append(models.PointStruct(
@@ -159,10 +164,15 @@ class QdrantAttendanceManager:
             offset = None
             
             scroll_filter = None
-            if company_id:
-                scroll_filter = models.Filter(
-                    must=[models.FieldCondition(key="company_id", match=models.MatchValue(value=str(company_id)))]
-                )
+            if company_id and company_id != "ALL":
+                if isinstance(company_id, list):
+                    scroll_filter = models.Filter(
+                        must=[models.FieldCondition(key="company_id", match=models.MatchAny(any=[str(c) for c in company_id]))]
+                    )
+                else:
+                    scroll_filter = models.Filter(
+                        must=[models.FieldCondition(key="company_id", match=models.MatchValue(value=str(company_id)))]
+                    )
             
             while True:
                 results, offset = self.client.scroll(

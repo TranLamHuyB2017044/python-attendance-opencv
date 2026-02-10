@@ -34,8 +34,9 @@ def get_target_company(ui, mongo_db, allow_selection=True):
     """
     # Company users can ONLY access their own company
     if str(ui.session_role).lower() == "company":
-        logger.info(f"Company user accessing their company: {ui.session_company_id}")
-        return ui.session_company_id
+        cid = ui.session_company_id or ""
+        logger.info(f"Company user '{ui.session_username}' accessing their company: '{cid}'")
+        return cid
     
     # Admin can select company (if allowed) or use their session company
     if str(ui.session_role).lower() == "admin":
@@ -70,10 +71,9 @@ def enroll_from_camera(camera, face_rec, attendance, ui):
     from src.config import MongoDbConfig
     mongo_db = MongoDbManager()
     
-    user_info = ui.get_user_info_form(
+    user_info = ui.get_user_form(
         include_upload=False, 
         session_role=ui.session_role,
-        session_company_id=ui.session_company_id,
         mongo_db=mongo_db
     )
     
@@ -143,8 +143,32 @@ def enroll_from_camera(camera, face_rec, attendance, ui):
             target_company = ui.session_company_id
 
         if len(samples) >= 1:
-            attendance.upsert_user(user_name, user_id, birthday, samples, company_id=target_company)
-            mongo_db.save_employee(user_id, user_name, birthday, target_company)
+            # --- Check for existing user to ask before update ---
+            force_upd = False
+            existing = mongo_db.employees.find_one({"user_id": str(user_id), "company_id": target_company})
+            if existing:
+                from tkinter import messagebox
+                import tkinter as tk
+                root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
+                if messagebox.askyesno("Xác nhận", f"Mã nhân viên '{user_id}' đã tồn tại trong hệ thống.\n\nBạn có muốn CẬP NHẬT dữ liệu mới nhất cho nhân viên này không?"):
+                    force_upd = True
+                else:
+                    logger.info("User cancelled update.")
+                    root.destroy()
+                    return
+                root.destroy()
+
+            # Try to save to MongoDB
+            ok, msg = mongo_db.save_employee(user_id, user_name, birthday, target_company, force_update=force_upd)
+            if not ok:
+                from tkinter import messagebox
+                import tkinter as tk
+                root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
+                messagebox.showerror("Lỗi đăng ký", f"Không thể lưu nhân viên: {msg}")
+                root.destroy()
+                return
+
+            attendance.upsert_user(user_name, user_id, birthday, samples, clear_old=force_upd, company_id=target_company)
             logger.success(f"Da dang ky: {user_name} (ID: {user_id}) cho cong ty: {target_company}")
             
             # Show success message
@@ -209,8 +233,33 @@ def enroll_by_upload(face_rec, attendance, ui):
                 
             # Update databases
             logger.info(f"Saving to Qdrant and MongoDB for company: {target_company}")
-            attendance.upsert_user(u_name, u_id, u_bday, samples, company_id=target_company)
-            mongo_db.save_employee(u_id, u_name, u_bday, target_company)
+            
+            # --- Check for existing user to ask before update ---
+            force_upd = False
+            existing = mongo_db.employees.find_one({"user_id": str(u_id), "company_id": target_company})
+            if existing:
+                from tkinter import messagebox
+                import tkinter as tk
+                root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
+                if messagebox.askyesno("Xác nhận", f"Mã nhân viên '{u_id}' đã tồn tại trong hệ thống.\n\nBạn có muốn CẬP NHẬT dữ liệu mới nhất cho nhân viên này không?"):
+                    force_upd = True
+                else:
+                    logger.info("User cancelled update.")
+                    root.destroy()
+                    return
+                root.destroy()
+
+            # Validation via MongoDB
+            ok, msg = mongo_db.save_employee(u_id, u_name, u_bday, target_company, force_update=force_upd)
+            if not ok:
+                from tkinter import messagebox
+                import tkinter as tk
+                root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
+                messagebox.showerror("Lỗi đăng ký", f"Không thể lưu nhân viên: {msg}")
+                root.destroy()
+                return
+
+            attendance.upsert_user(u_name, u_id, u_bday, samples, clear_old=force_upd, company_id=target_company)
             logger.success(f"Successfully enrolled {u_name} via upload.")
             
             # Show success message using a robust method
@@ -345,11 +394,11 @@ def main():
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
 
             elif ui.current_state == STATE_TEST_CAM:
-                # 1. Refresh camera config from DB before connecting
-                cam_ip = mongo_db.get_setting("camera_ip", CameraConfig.IP)
-                cam_port = mongo_db.get_setting("camera_port", CameraConfig.PORT)
-                cam_user = mongo_db.get_setting("camera_user", CameraConfig.USER)
-                cam_pass = mongo_db.get_setting("camera_pass", CameraConfig.PASS)
+                # 1. Refresh camera config from DB before connecting (User-specific)
+                cam_ip = mongo_db.get_setting("camera_ip", CameraConfig.IP, username=ui.session_username)
+                cam_port = mongo_db.get_setting("camera_port", CameraConfig.PORT, username=ui.session_username)
+                cam_user = mongo_db.get_setting("camera_user", CameraConfig.USER, username=ui.session_username)
+                cam_pass = mongo_db.get_setting("camera_pass", CameraConfig.PASS, username=ui.session_username)
                 new_url = f"rtsp://{cam_user}:{cam_pass}@{cam_ip}:{cam_port}/ch1/main"
                 if cam_ip.isdigit(): new_url = cam_ip # Keep as string for comparison
                 
@@ -429,9 +478,20 @@ def main():
                     ui.current_state = STATE_MENU
                     continue
                 
+                # For company users, we also want to see employees from their connected HKB systems
+                filter_company = target_company
+                if str(ui.session_role).lower() == "company":
+                    conns = list(mongo_db.auth_services.find({"user_id": ui.session_user_id}))
+                    if conns:
+                        filter_company = [target_company] if target_company else []
+                        for c in conns:
+                            if c["uuid"] not in filter_company:
+                                filter_company.append(c["uuid"])
+                        logger.info(f"Company user '{ui.session_username}' editing merged list for IDs: {filter_company}")
+
                 # 2. Get merged employee list (MongoDB + Qdrant) for this company ONLY
-                mongo_employees = mongo_db.get_all_employees(company_id=target_company)
-                qdrant_employees = attendance.get_all_users(company_id=target_company)
+                mongo_employees = mongo_db.get_all_employees(company_id=filter_company)
+                qdrant_employees = attendance.get_all_users(company_id=filter_company)
                 
                 # Merge employee lists
                 all_employees = []
@@ -491,7 +551,8 @@ def main():
                         edit_res = AttendanceUI.get_edit_user_form(
                             user_info["user_id"], 
                             user_info["user_name"], 
-                            user_info["birthday"]
+                            user_info["birthday"],
+                            session_role=ui.session_role
                         )
                         if edit_res:
                             if edit_res["delete"]:
@@ -503,7 +564,7 @@ def main():
                             elif edit_res["enroll_camera"]:
                                 # Update info first, then enroll via camera
                                 attendance.update_user_info(u_id, edit_res["name"], edit_res["bday"])
-                                mongo_db.save_employee(str(u_id), edit_res["name"], edit_res["bday"], target_company)
+                                mongo_db.save_employee(str(u_id), edit_res["name"], edit_res["bday"], target_company, force_update=True)
                                 logger.info(f"Updated info for {u_id}, starting camera enrollment...")
                                 
                                 # Trigger camera enrollment
@@ -561,7 +622,7 @@ def main():
                                             break
 
                                     if len(samples) >= 1:
-                                        attendance.upsert_user(edit_res["name"], u_id, edit_res["bday"], samples, company_id=target_company)
+                                        attendance.upsert_user(edit_res["name"], u_id, edit_res["bday"], samples, clear_old=True, company_id=target_company)
                                         logger.success(f"Da dang ky khuon mat cho: {edit_res['name']} (ID: {u_id})")
                                         
                                         from tkinter import messagebox
@@ -581,7 +642,7 @@ def main():
                             elif edit_res["enroll_upload"]:
                                 # Update info first, then enroll via file upload
                                 attendance.update_user_info(u_id, edit_res["name"], edit_res["bday"])
-                                mongo_db.save_employee(str(u_id), edit_res["name"], edit_res["bday"], target_company)
+                                mongo_db.save_employee(str(u_id), edit_res["name"], edit_res["bday"], target_company, force_update=True)
                                 logger.info(f"Updated info for {u_id}, starting file upload enrollment...")
                                 
                                 # Trigger file upload enrollment
@@ -607,7 +668,7 @@ def main():
                                                 logger.info(f"Extracted face from {fpath}")
                                     
                                     if len(samples) >= 1:
-                                        attendance.upsert_user(edit_res["name"], u_id, edit_res["bday"], samples, company_id=target_company)
+                                        attendance.upsert_user(edit_res["name"], u_id, edit_res["bday"], samples, clear_old=True, company_id=target_company)
                                         logger.success(f"Da dang ky khuon mat cho: {edit_res['name']} (ID: {u_id})")
                                         
                                         from tkinter import messagebox
@@ -625,9 +686,9 @@ def main():
                                         msg_root.destroy()
                             
                             else:
-                                # Just update info, no enrollment
+                                # Just update info, no enrollment (Force update)
+                                mongo_db.save_employee(str(u_id), edit_res["name"], edit_res["bday"], target_company, force_update=True)
                                 attendance.update_user_info(u_id, edit_res["name"], edit_res["bday"])
-                                mongo_db.save_employee(str(u_id), edit_res["name"], edit_res["bday"], target_company)
                                 logger.success(f"Da cap nhat thong tin nhan vien ID: {u_id}")
                     else:
                         logger.error(f"Could not find user info for {u_id}")
@@ -646,11 +707,22 @@ def main():
                     ui.current_state = STATE_MENU
                     continue
                 
-                # Get employees from MongoDB (includes all employees, even without face data) for this company ONLY
-                mongo_employees = mongo_db.get_all_employees(company_id=target_company)
+                # For company users, we also want to see employees from their connected HKB systems
+                filter_company = target_company
+                if str(ui.session_role).lower() == "company":
+                    conns = list(mongo_db.auth_services.find({"user_id": ui.session_user_id}))
+                    if conns:
+                        filter_company = [target_company] if target_company else []
+                        for c in conns:
+                            if c["uuid"] not in filter_company:
+                                filter_company.append(c["uuid"])
+                        logger.info(f"Company user '{ui.session_username}' viewing merged list for IDs: {filter_company}")
+
+                # Get employees from MongoDB (includes all employees, even without face data) for this filter
+                mongo_employees = mongo_db.get_all_employees(company_id=filter_company)
                 
-                # Get employees from Qdrant (only those with face embeddings) for this company ONLY
-                qdrant_employees = attendance.get_all_users(company_id=target_company)
+                # Get employees from Qdrant (only those with face embeddings) for this filter
+                qdrant_employees = attendance.get_all_users(company_id=filter_company)
                 
                 # Merge: prioritize Qdrant data, add MongoDB-only employees
                 all_employees = []
@@ -680,6 +752,7 @@ def main():
                         })
                         seen_ids.add(str(emp['user_id']))
                 
+                logger.info(f"Merged employee list: {len(all_employees)} records found.")
                 ui.show_user_list_ui(all_employees)
                 ui.current_state = STATE_MENU
                 continue
@@ -716,7 +789,8 @@ def main():
                     display_logs, 
                     title=f"Lịch sử ngày {target_date}",
                     session_role=ui.session_role,
-                    session_user_id=ui.session_user_id
+                    session_user_id=ui.session_user_id,
+                    session_username=ui.session_username
                 )
                 ui.current_state = STATE_MENU
                 continue
@@ -737,7 +811,7 @@ def main():
                 continue
 
             elif ui.current_state == STATE_SETTINGS:
-                ui.show_system_settings_ui(mongo_db)
+                ui.show_system_settings_ui(mongo_db, session_username=ui.session_username)
                 ui.current_state = STATE_MENU
                 continue
 

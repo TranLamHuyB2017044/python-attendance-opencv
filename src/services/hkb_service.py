@@ -147,13 +147,13 @@ class HKBService:
             logger.error(f"HKB Service: Revoke connection failed: {e}")
             return None
 
-    def get_connections(self, user_id: int = 1):
+    def get_connections(self, user_id: int = 1, username: str = "GLOBAL"):
         """
         Get list of connections for the current API Key.
         """
         try:
-            # Lấy danh sách Group Keys từ settings (nếu có)
-            custom_keys = mongo_db.get_setting("group_keys", "")
+            # Lấy danh sách Group Keys từ settings (nếu có, theo user)
+            custom_keys = mongo_db.get_setting("group_keys", "", username=username)
             if custom_keys:
                 # Tách chuỗi comma-separated thành list và loại bỏ khoảng trắng
                 group_keys = [k.strip() for k in custom_keys.split(",") if k.strip()]

@@ -162,11 +162,11 @@ def main():
                 continue
 
             elif ui.current_state == STATE_TEST_CAM:
-                # 1. Refresh camera config from DB before connecting
-                cam_ip = mongo_db.get_setting("camera_ip", CameraConfig.IP)
-                cam_port = mongo_db.get_setting("camera_port", CameraConfig.PORT)
-                cam_user = mongo_db.get_setting("camera_user", CameraConfig.USER)
-                cam_pass = mongo_db.get_setting("camera_pass", CameraConfig.PASS)
+                # 1. Refresh camera config from DB before connecting (User-specific)
+                cam_ip = mongo_db.get_setting("camera_ip", CameraConfig.IP, username=ui.session_username)
+                cam_port = mongo_db.get_setting("camera_port", CameraConfig.PORT, username=ui.session_username)
+                cam_user = mongo_db.get_setting("camera_user", CameraConfig.USER, username=ui.session_username)
+                cam_pass = mongo_db.get_setting("camera_pass", CameraConfig.PASS, username=ui.session_username)
                 
                 # Build fresh URL
                 new_url = f"rtsp://{cam_user}:{cam_pass}@{cam_ip}:{cam_port}/ch1/main"
