@@ -1,7 +1,29 @@
 import cv2
 import time
 import warnings
+import sys
+import os
 from loguru import logger
+
+# --- CẤU HÌNH ĐƯỜNG DẪN CHO PYINSTALLER ---
+# Thêm thư mục gốc vào danh sách tìm kiếm module
+# --- FIX FOR WINDOWED MODE (NoneType.write error) ---
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, 'w', encoding='utf-8')
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, 'w', encoding='utf-8')
+
+if getattr(sys, 'frozen', False):
+    # Nếu chạy từ file .exe
+    base_dir = sys._MEIPASS
+else:
+    # Nếu chạy từ code python
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+if base_dir not in sys.path:
+    sys.path.append(base_dir)
+# ------------------------------------------
+
 from src.utils.logger import setup_logger
 from src.camera.rtsp_camera import RTSPCamera
 from src.recognition.face_recognition import FaceRecognition
@@ -59,11 +81,13 @@ def main():
                     upsert=True
                 )
                 
-                # 2. Save a small preview frame (every ~1 second or every frame)
-                # To save CPU/Disk, we can resize it down
-                small_frame = cv2.resize(frame, (640, 360))
-                # Draw a timestamp or status on preview
-                cv2.putText(small_frame, f"LIVE: {time.strftime('%H:%M:%S')}", (10, 30), 
+                # 2. Draw results for preview
+                annotated_preview = face_rec.draw_faces(frame, faces)
+                
+                # 3. Save a small preview frame
+                small_frame = cv2.resize(annotated_preview, (640, 360))
+                # Add a "LIVE" indicator
+                cv2.putText(small_frame, f"LIVE MONITOR: {time.strftime('%H:%M:%S')}", (10, 30), 
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                 cv2.imwrite(str(preview_path), small_frame, [cv2.IMWRITE_JPEG_QUALITY, 50])
             except Exception as e:

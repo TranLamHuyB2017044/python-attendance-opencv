@@ -124,9 +124,9 @@ class AttendanceUI:
         col2_x = cX + gap_x
 
         # --- Column 1 ---
-        # Button 1: Start System (All)
+        # Button 1: Start System / Monitor (All)
         cv2.rectangle(frame, (col1_x, cY - btn_h - gap_y), (col1_x + btn_w, cY - gap_y), (40, 180, 40), -1)
-        cv2.putText(frame, "BAT DAU", (col1_x + int(90 * (w/800)), cY - gap_y - int(18 * (h/600))),
+        cv2.putText(frame, "XEM CAMERA (LIVE)", (col1_x + int(45 * (w/800)), cY - gap_y - int(18 * (h/600))),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8 * (w/800), (255, 255, 255), 2)
         
         # Enrollment Buttons (Available to Admin and Company Managers)

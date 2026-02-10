@@ -23,13 +23,14 @@ def setup_logger() -> None:
     # Remove default logger
     logger.remove()
     
-    # Add console logger if enabled
-    if LogConfig.ENABLE_CONSOLE:
+    # Add console logger if enabled and available (sys.stdout is None in Windowed mode)
+    if LogConfig.ENABLE_CONSOLE and sys.stdout is not None:
         logger.add(
             sys.stdout,
             format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
             level=LogConfig.LEVEL,
             colorize=True,
+            catch=True, # Prevent app crash if console logging fails
         )
     
     # Add file logger with rotation
@@ -37,10 +38,11 @@ def setup_logger() -> None:
         LogConfig.FILE,
         format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}",
         level=LogConfig.LEVEL,
-        rotation="10 MB",  # Rotate when file reaches 10MB
-        retention="30 days",  # Keep logs for 30 days
-        compression="zip",  # Compress rotated logs
+        rotation="10 MB",
+        retention="30 days",
+        compression="zip",
         encoding="utf-8",
+        catch=True, # Prevent app crash if file logging fails
     )
     
     logger.info("Logger initialized successfully")

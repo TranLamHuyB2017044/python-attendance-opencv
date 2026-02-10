@@ -67,8 +67,9 @@ class RecognitionConfig:
     THRESHOLD: float = float(os.getenv("RECOGNITION_THRESHOLD", "0.4"))
     EMBEDDING_DIM: int = int(os.getenv("EMBEDDING_DIM", "512"))
     TEST_MODE: bool = os.getenv("TEST_MODE", "false").lower() == "true"
-    COOLDOWN_SECONDS: int = int(os.getenv("DETECTION_COOLDOWN", "3600")) # 1 hour
-    MAX_FACES: int = int(os.getenv("MAX_FACES", "100")) # Default allow multiple, can be set to 1
+    COOLDOWN_SECONDS: int = int(os.getenv("DETECTION_COOLDOWN", "900")) # Default 15 minutes
+    MAX_FACES: int = int(os.getenv("MAX_FACES", "100")) 
+    CAPTURE_MAX_WIDTH: int = int(os.getenv("CAPTURE_MAX_WIDTH", "640"))
 
 
 class QdrantConfig:

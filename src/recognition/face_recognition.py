@@ -90,13 +90,20 @@ class FaceRecognition:
             cv2.rectangle(res_frame, (bbox[0], bbox[1]), (bbox[2], bbox[3]), color, 2)
             
             if hasattr(face, 'name'):
+                # Main Label: Name (Score)
                 y_offset = bbox[1] - 10
                 score = getattr(face, 'score', 0.0) or 0.0
                 label = f"{face.name} ({score:.2f})"
-                
-                # Draw label text
                 cv2.putText(res_frame, label, (bbox[0], y_offset), 
                             cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2)
+                
+                # Second Label: Camera Name & Time (displayed ABOVE the name to avoid overlap)
+                from src.config import CameraConfig
+                import time
+                cam_time_label = f"{CameraConfig.CAMERA_NAME} | {time.strftime('%H:%M:%S')}"
+                # Move it up by 20 pixels instead of down
+                cv2.putText(res_frame, cam_time_label, (bbox[0], y_offset - 20), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
                 
                 if is_known:
                     gender_map = {0: "Nu", 1: "Nam"}

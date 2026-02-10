@@ -19,7 +19,7 @@ ntplib==0.4.0
 pytz==2024.1
 pymongo==4.6.1
 # git+https://github.com/TranLamHuyB2017044/bittech-auth-sdk.git@develop
--e D:/WorkSpace/Bittech_Project/bittech-auth-sdk
+git+https://github.com/TranLamHuyB2017044/bittech-auth-sdk.git@v1.0.2
 fastapi==0.110.0
 uvicorn==0.27.1
 requests==2.32.3
@@ -27,3 +27,4 @@ requests==2.32.3
 # Build Tools
 pyinstaller==6.10.0
 auto-py-to-exe==2.44.1
+scipy==1.11.4

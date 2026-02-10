@@ -107,10 +107,23 @@ class FaceTracker:
         cv2.putText(annotated_frame, overlay_text, (tx, ty),
                     cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), thickness)
 
+        # --- RESIZE CAPTURE BEFORE SAVING ---
+        max_w = RecognitionConfig.CAPTURE_MAX_WIDTH
+        h, w = annotated_frame.shape[:2]
+        if w > max_w:
+            scale = max_w / w
+            target_h = int(h * scale)
+            annotated_frame = cv2.resize(annotated_frame, (max_w, target_h))
+            logger.debug(f"Image resized from {w}x{h} to {max_w}x{target_h} for sync.")
+
         # Save to local captures
         current_time = time.time()
-        img_prefix = user_id if is_known else "unknown"
-        img_name = f"{img_prefix}_{int(current_time)}.webp"
+        if is_known:
+            safe_name = remove_accents(user_name).replace(" ", "_")
+            img_name = f"{safe_name}_{user_id}_{int(current_time)}.webp"
+        else:
+            img_name = f"unknown_{int(current_time)}.webp"
+        
         img_path = str(CAPTURES_DIR / img_name)
         # Use WebP with quality 75 for balance between size and quality
         cv2.imwrite(img_path, annotated_frame, [int(cv2.IMWRITE_WEBP_QUALITY), 75])
@@ -134,16 +147,26 @@ class FaceTracker:
         # Use provided company_id or fallback
         active_company = company_id
         
+        # Keep track of IDs used in THIS frame to avoid double matching
+        used_ids_in_frame = set()
+
         for face in detected_faces:
             center = self._get_center(face.bbox)
             matched_id = None
             
+            # Sort active faces by distance to current center to find the best match first
+            potential_matches = []
             for f_id, f_data in self.active_faces.items():
+                if f_id in used_ids_in_frame: continue
                 prev_center = f_data['center']
                 dist = np.sqrt((center[0] - prev_center[0])**2 + (center[1] - prev_center[1])**2)
-                if dist < 50:
-                    matched_id = f_id
-                    break
+                if dist < 80: # Increased radius slightly for better tracking
+                    potential_matches.append((dist, f_id))
+            
+            if potential_matches:
+                potential_matches.sort() # Closest first
+                matched_id = potential_matches[0][1]
+                used_ids_in_frame.add(matched_id)
             
             if matched_id is None:
                 matched_id = self.face_id_counter
@@ -170,8 +193,8 @@ class FaceTracker:
                 can_attempt = False
                 
                 if f_data['status'] == 'STABILIZING':
-                    # Người mới: Cần đủ thời gian ổn định (2.0s)
-                    if time_stayed >= self.threshold_seconds:
+                    # Người mới: Cần đủ thời gian ổn định (0.5s cho nhanh)
+                    if time_stayed >= 0.5:
                         can_attempt = True
                 elif f_data['status'] == 'RETRY_WAIT' or f_data['status'] == 'UNAUTHORIZED':
                     if f_data['unknown_attempts'] < 5:
@@ -284,3 +307,4 @@ class FaceTracker:
                     face.score = 0.0
 
         self.active_faces = {k: v for k, v in updated_faces_map.items() if current_time - v['last_seen'] < 1.0}
+

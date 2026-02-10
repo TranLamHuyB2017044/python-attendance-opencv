@@ -6,8 +6,21 @@ import sys
 import os
 from loguru import logger
 
-# Add root directory to sys.path
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# --- CẤU HÌNH ĐƯỜNG DẪN CHO PYINSTALLER ---
+# --- FIX FOR WINDOWED MODE (NoneType.write error) ---
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, 'w', encoding='utf-8')
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, 'w', encoding='utf-8')
+
+if getattr(sys, 'frozen', False):
+    base_dir = sys._MEIPASS
+else:
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+if base_dir not in sys.path:
+    sys.path.append(base_dir)
+# ------------------------------------------
 
 from src.utils.logger import setup_logger
 from src.camera.rtsp_camera import RTSPCamera
@@ -20,6 +33,7 @@ from src.ui.app_ui import (
     STATE_HKB_LIST, STATE_COMPANY, STATE_CLOUD_USER, STATE_LOGOUT, STATE_SETTINGS
 )
 from src.main import enroll_from_camera, enroll_by_upload, get_target_company
+from src.config import DATA_DIR, MongoDbConfig
 
 def main():
     setup_logger()
@@ -55,38 +69,51 @@ def main():
                 cv2.setMouseCallback(win_name, ui.handle_menu_click, param=(cur_w, cur_h))
                 
             elif ui.current_state == STATE_DETECT:
-                # --- NEW: SHOW LIVE PREVIEW FROM BACKGROUND SERVICE ---
-                from src.config import DATA_DIR, MongoDbConfig
-                import os
-                
+                # --- LIVE PREVIEW FROM BACKGROUND SERVICE ---
                 preview_path = DATA_DIR / "camera_preview.jpg"
                 
-                # 1. Check Heartbeat Status
+                # 1. Check Heartbeat Status from MongoDB
                 status_doc = mongo_db.db.system_status.find_one({"type": "camera_service", "company_id": MongoDbConfig.COMPANY_ID})
                 is_active = False
                 if status_doc:
                     last_seen = status_doc.get("last_seen", 0)
-                    if time.time() - last_seen < 10: # Active in last 10 seconds
+                    if time.time() - last_seen < 15: # Active in last 15 seconds
                         is_active = True
                 
-                # 2. Draw Preview UI
+                # 2. Prepare Display Frame
                 display_frame = np.zeros((cur_h, cur_w, 3), dtype=np.uint8)
                 
                 if os.path.exists(preview_path) and is_active:
                     preview_img = cv2.imread(str(preview_path))
                     if preview_img is not None:
-                        # Resize preview to fit a portion of screen or full screen
-                        preview_img = cv2.resize(preview_img, (cur_w - 40, cur_h - 150))
-                        display_frame[100:100+preview_img.shape[0], 20:20+preview_img.shape[1]] = preview_img
+                        # Resize preview to fit nicely in the management window
+                        p_h, p_w = preview_img.shape[:2]
+                        # Scale to fit (cur_w - 40) width, keeping aspect ratio
+                        scale = (cur_w - 60) / p_w
+                        target_w = int(p_w * scale)
+                        target_h = int(p_h * scale)
+                        
+                        # If height is too large, scale by height
+                        if target_h > cur_h - 200:
+                            scale = (cur_h - 220) / p_h
+                            target_w = int(p_w * scale)
+                            target_h = int(p_h * scale)
+                            
+                        preview_img = cv2.resize(preview_img, (target_w, target_h))
+                        y_off = 100
+                        x_off = (cur_w - target_w) // 2
+                        display_frame[y_off:y_off+target_h, x_off:x_off+target_w] = preview_img
                 else:
-                    msg = "DICH VU CAMERA DANG TAT" if not is_active else "DANG DOI ANH PREVIEW..."
-                    cv2.putText(display_frame, msg, (cur_w//2 - 200, cur_h//2), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                    msg = "DICH VU CAMERA DANG TAT (SERVICE IS OFF)" if not is_active else "DANG DOI ANH PREVIEW (WAITING FOR PREVIEW...)"
+                    cv2.putText(display_frame, msg, (cur_w//2 - 350, cur_h//2), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    cv2.putText(display_frame, f"Company: {MongoDbConfig.COMPANY_ID}", (cur_w//2 - 150, cur_h//2 + 40),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (150, 150, 150), 1)
                 
-                # Top Status Bar
+                # Status Bar inside the monitor view
                 status_color = (0, 255, 0) if is_active else (0, 0, 255)
                 cv2.rectangle(display_frame, (0, 0), (cur_w, 80), (30, 30, 30), -1)
-                cv2.putText(display_frame, "GIAM SAT CAMERA CHAY NGEN", (20, 50), 
+                cv2.putText(display_frame, "GIAM SAT DICH VU CAMERA (SERVICE MONITOR)", (20, 50), 
                             cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
                 cv2.circle(display_frame, (cur_w - 50, 45), 10, status_color, -1)
                 
@@ -150,8 +177,10 @@ def main():
                 ui.current_state = STATE_MENU
                 continue
             
-            display_frame = ui.frame
-            cv2.imshow(win_name, display_frame)
+            # Final display: If we generated a custom display_frame (like in STATE_DETECT), use it.
+            # Otherwise fallback to the standard UI frame.
+            final_show = display_frame if ui.current_state == STATE_DETECT else ui.frame
+            cv2.imshow(win_name, final_show)
             if cv2.waitKey(1) & 0xFF == ord('q'): break
 
     finally:
