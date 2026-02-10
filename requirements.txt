@@ -28,3 +28,4 @@ requests==2.32.3
 pyinstaller==6.10.0
 auto-py-to-exe==2.44.1
 scipy==1.11.4
+plyer==2.1.0

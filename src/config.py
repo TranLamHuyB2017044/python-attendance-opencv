@@ -32,9 +32,22 @@ CAPTURES_DIR.mkdir(parents=True, exist_ok=True)
 class CameraConfig:
     """Camera configuration settings."""
     
-    # Auto-detect: Use webcam if RTSP_URL is not set
-    _rtsp_url_env = os.getenv("RTSP_URL", "")
-    RTSP_URL: str = _rtsp_url_env if _rtsp_url_env else "0"  # Default to webcam index 0
+    # Detailed components for RTSP
+    IP: str = os.getenv("CAMERA_IP", "192.168.1.1")
+    PORT: int = int(os.getenv("CAMERA_PORT", "554"))
+    USER: str = os.getenv("CAMERA_USER", "admin")
+    PASS: str = os.getenv("CAMERA_PASS", "password")
+    
+    # Default RTSP template (Ezviz/Imou/Hikvision standard or custom)
+    # If RTSP_URL is already defined in .env, use it directly.
+    # Otherwise, build it from components if they exist.
+    _raw_url = os.getenv("RTSP_URL", "")
+    if _raw_url:
+        RTSP_URL: str = _raw_url
+    elif os.getenv("CAMERA_IP"): # Only build if at least IP is provided
+        RTSP_URL: str = f"rtsp://{USER}:{PASS}@{IP}:{PORT}/ch1/main"
+    else:
+        RTSP_URL: str = "0" # Default to webcam 0
     
     WIDTH: int = int(os.getenv("CAMERA_WIDTH", "1280"))
     HEIGHT: int = int(os.getenv("CAMERA_HEIGHT", "720"))
@@ -45,7 +58,7 @@ class CameraConfig:
     @classmethod
     def validate(cls) -> bool:
         """Validate camera configuration."""
-        if not cls.RTSP_URL:
+        if not cls.RTSP_URL or cls.RTSP_URL == "":
             logger.warning("RTSP_URL is not set, using default webcam (index 0)")
             cls.RTSP_URL = "0"
         return True

@@ -84,6 +84,11 @@ class AttendanceUI:
                     if cX - int(380*(w/800)) < x < cX - int(140*(w/800)):
                         self.current_state = STATE_HKB_LIST
 
+            # --- SYSTEM-WIDE ACTIONS (Available to all logged-in users) ---
+            # 4. CAI DAT (Icon/Small button next to Logout) - TOP LEFT
+            if 20 < x < 150 and 15 < y < 65:
+                self.current_state = STATE_SETTINGS
+
             # --- ADMIN ONLY SYSTEM MANAGEMENT ---
             if str(self.session_role).lower() == 'admin':
                 # --- ADMIN ONLY BOTTOM BAR ---
@@ -94,10 +99,6 @@ class AttendanceUI:
                     # 3. QUAN LY CONG TY (Bottom Right)
                     elif cX + int(140*(w/800)) < x < cX + int(380*(w/800)): 
                         self.current_state = STATE_COMPANY
-                
-                # 4. CAI DAT (Icon/Small button next to Logout or elsewhere) - TOP LEFT
-                if 20 < x < 150 and 15 < y < 65:
-                    self.current_state = STATE_SETTINGS
 
     def draw_main_menu(self, w=1280, h=720):
         """Draw a professional menu responsive to window size."""
@@ -195,11 +196,11 @@ class AttendanceUI:
             cv2.putText(frame, "QUAN LY CONG TY", (cX + 160, h - 40),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
             
-            # 4. Settings Button (Top Left)
-            cv2.rectangle(frame, (20, 15), (150, 65), (80, 80, 80), -1)
-            cv2.rectangle(frame, (20, 15), (150, 65), (255, 255, 255), 1)
-            cv2.putText(frame, "CAI DAT", (45, 48),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6 * (w/800), (255, 255, 255), 2)
+        # 4. Settings Button (Top Left) - Available to all logged-in users
+        cv2.rectangle(frame, (20, 15), (150, 65), (80, 80, 80), -1)
+        cv2.rectangle(frame, (20, 15), (150, 65), (255, 255, 255), 1)
+        cv2.putText(frame, "CAI DAT", (45, 48),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6 * (w/800), (255, 255, 255), 2)
         
         # User Info Display
         user_label = f"User: {self.session_username} ({self.session_role})"
@@ -1400,39 +1401,78 @@ class AttendanceUI:
 
     @staticmethod
     def show_system_settings_ui(mongo_db):
-        """UI to manage system-wide settings like Group Keys."""
+        """UI to manage system-wide settings like Group Keys and Camera."""
         import tkinter as tk
         from tkinter import messagebox
 
         root = tk.Tk()
         root.title("Cài đặt Hệ thống")
-        root.geometry("500x350")
+        root.geometry("600x550")
         root.attributes('-topmost', True)
 
         tk.Label(root, text="CẤU HÌNH HỆ THỐNG", font=("Arial", 14, "bold")).pack(pady=20)
 
-        # 1. Group Keys Setting
-        tk.Label(root, text="Group Keys (Cung cấp nhiều key, ngăn cách bởi dấu phẩy):", font=("Arial", 10)).pack(anchor="w", padx=20)
+        main_frame = tk.Frame(root)
+        main_frame.pack(fill="both", expand=True, padx=20)
+
+        # --- A. CAMERA CONFIG (New) ---
+        tk.Label(main_frame, text="CẤU HÌNH CAMERA (RTSP)", font=("Arial", 10, "bold"), fg="blue").pack(anchor="w", pady=(0, 5))
         
-        # Lấy giá trị hiện tại từ DB
+        cam_frame = tk.Frame(main_frame)
+        cam_frame.pack(fill="x", pady=5)
+        
+        # Grid for camera fields
+        tk.Label(cam_frame, text="IP Camera:").grid(row=0, column=0, sticky="e", pady=2)
+        e_ip = tk.Entry(cam_frame, width=25)
+        e_ip.grid(row=0, column=1, padx=5); e_ip.insert(0, mongo_db.get_setting("camera_ip", "192.168.1.1"))
+        
+        tk.Label(cam_frame, text="Port (RTSP):").grid(row=0, column=2, sticky="e", pady=2)
+        e_port = tk.Entry(cam_frame, width=10)
+        e_port.grid(row=0, column=3, padx=5); e_port.insert(0, mongo_db.get_setting("camera_port", "554"))
+        
+        tk.Label(cam_frame, text="Username:").grid(row=1, column=0, sticky="e", pady=2)
+        e_user = tk.Entry(cam_frame, width=25)
+        e_user.grid(row=1, column=1, padx=5); e_user.insert(0, mongo_db.get_setting("camera_user", "admin"))
+        
+        tk.Label(cam_frame, text="Password:").grid(row=1, column=2, sticky="e", pady=2)
+        e_pass = tk.Entry(cam_frame, width=25, show="*")
+        e_pass.grid(row=1, column=3, padx=5); e_pass.insert(0, mongo_db.get_setting("camera_pass", "password"))
+
+        tk.Label(main_frame, text="----------------------------------------------------------", fg="gray").pack(pady=10)
+
+        # --- B. GROUP KEYS ---
+        tk.Label(main_frame, text="Group Keys (Các key cách nhau bởi dấu phẩy):", font=("Arial", 10, "bold"), fg="blue").pack(anchor="w", pady=(0, 5))
         current_keys = mongo_db.get_setting("group_keys", "")
-        
-        text_keys = tk.Text(root, height=5, width=55)
-        text_keys.pack(pady=10, padx=20)
+        text_keys = tk.Text(main_frame, height=4, width=65)
+        text_keys.pack(pady=5)
         text_keys.insert("1.0", current_keys)
 
         def save_settings():
+            # Get values
             new_keys = text_keys.get("1.0", "end-1c").strip()
-            if mongo_db.set_setting("group_keys", new_keys):
-                messagebox.showinfo("Thành công", "Đã lưu cài đặt hệ thống!")
+            ip = e_ip.get().strip()
+            port = e_port.get().strip()
+            user = e_user.get().strip()
+            pwd = e_pass.get().strip()
+            
+            # Save all to DB
+            success = True
+            success &= mongo_db.set_setting("group_keys", new_keys)
+            success &= mongo_db.set_setting("camera_ip", ip)
+            success &= mongo_db.set_setting("camera_port", port)
+            success &= mongo_db.set_setting("camera_user", user)
+            success &= mongo_db.set_setting("camera_pass", pwd)
+            
+            if success:
+                messagebox.showinfo("Thành công", "Đã lưu cài đặt hệ thống!\nBạn cần khởi động lại dịch vụ Camera để áp dụng thay đổi IP/Pass.")
                 root.destroy()
             else:
                 messagebox.showerror("Lỗi", "Không thể lưu cài đặt!")
 
         btn_frame = tk.Frame(root)
-        btn_frame.pack(pady=20)
+        btn_frame.pack(pady=20, side=tk.BOTTOM)
         
-        tk.Button(btn_frame, text="LƯU CÀI ĐẶT", command=save_settings, bg="#28a745", fg="white", width=15, font=("Arial", 10, "bold")).pack(side=tk.LEFT, padx=10)
+        tk.Button(btn_frame, text="LƯU CÀI ĐẶT", command=save_settings, bg="#28a745", fg="white", width=20, font=("Arial", 10, "bold")).pack(side=tk.LEFT, padx=10)
         tk.Button(btn_frame, text="HỦY", command=root.destroy, width=15).pack(side=tk.LEFT, padx=10)
 
         root.mainloop()

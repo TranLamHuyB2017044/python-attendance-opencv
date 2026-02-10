@@ -30,6 +30,8 @@ from src.recognition.face_recognition import FaceRecognition
 from src.attendance.qdrant_db import QdrantAttendanceManager
 from src.recognition.tracker import FaceTracker
 
+from src.utils.notification import send_notification, show_error_message
+
 def main():
     """
     Headless background service for face recognition and attendance logging.
@@ -43,8 +45,14 @@ def main():
         attendance = QdrantAttendanceManager()
         camera = RTSPCamera()
         tracker = FaceTracker(threshold_seconds=2.0)
+        
+        # Notify about successful startup (Toast)
+        send_notification("Camera Service AI", "Dịch vụ điểm danh AI đã khởi động thành công!")
+        
     except Exception as e:
-        logger.error(f"Initialization failure: {e}")
+        error_msg = f"Lỗi khởi tạo: {str(e)}"
+        logger.error(error_msg)
+        show_error_message("Lỗi Dịch Vụ AI", f"Không thể khởi động dịch vụ AI:\n{error_msg}")
         return
 
     logger.info("System initialized. Processing camera feed...")
@@ -54,6 +62,11 @@ def main():
     import os
     
     preview_path = DATA_DIR / "camera_preview.jpg"
+
+    # --- FRAME SKIPPING LOGIC ---
+    frame_count = 0
+    process_every_n_frames = 3 # Only run AI every 3 frames
+    faces = []
 
     try:
         while True:
@@ -66,8 +79,13 @@ def main():
             if not success or frame is None:
                 continue
 
-            # Process frame
-            faces = face_rec.detect_and_extract(frame)
+            frame_count += 1
+            
+            # 1. AI Detection (Run only every N frames to save CPU)
+            if frame_count % process_every_n_frames == 0:
+                faces = face_rec.detect_and_extract(frame)
+            
+            # 2. Logic & Tracking (Always run)
             tracker.update(faces, attendance, frame)
             
             # --- NEW: UPDATE HEARTBEAT & PREVIEW ---

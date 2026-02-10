@@ -150,21 +150,25 @@ class FaceTracker:
         # Keep track of IDs used in THIS frame to avoid double matching
         used_ids_in_frame = set()
 
+        # Sequential Processing: Only allow 1 recognition attempt per frame to save CPU
+        recognition_done_this_frame = False
+
         for face in detected_faces:
             center = self._get_center(face.bbox)
             matched_id = None
             
+            # ... (matching logic remains the same)
             # Sort active faces by distance to current center to find the best match first
             potential_matches = []
             for f_id, f_data in self.active_faces.items():
                 if f_id in used_ids_in_frame: continue
                 prev_center = f_data['center']
                 dist = np.sqrt((center[0] - prev_center[0])**2 + (center[1] - prev_center[1])**2)
-                if dist < 80: # Increased radius slightly for better tracking
+                if dist < 80: 
                     potential_matches.append((dist, f_id))
             
             if potential_matches:
-                potential_matches.sort() # Closest first
+                potential_matches.sort()
                 matched_id = potential_matches[0][1]
                 used_ids_in_frame.add(matched_id)
             
@@ -187,25 +191,20 @@ class FaceTracker:
                 f_data['center'] = center
                 
                 time_stayed = current_time - f_data['start_time']
-                
-                # Logic xác định khi nào được phép nhận diện
                 wait_time = current_time - f_data['last_attempt_time']
                 can_attempt = False
                 
-                if f_data['status'] == 'STABILIZING':
-                    # Người mới: Cần đủ thời gian ổn định (0.5s cho nhanh)
-                    if time_stayed >= 0.5:
-                        can_attempt = True
-                elif f_data['status'] == 'RETRY_WAIT' or f_data['status'] == 'UNAUTHORIZED':
-                    if f_data['unknown_attempts'] < 5:
-                        # Chu kỳ 1: Thử lại liên tục 5 lần đầu (không delay)
-                        can_attempt = True
-                    else:
-                        # Chu kỳ 2: Sau 5 lần, cứ mỗi 5 giây cho phép nhận diện lại để gửi webhook liên tục
-                        if wait_time >= 5.0:
+                # Check if we can attempt recognition, but ONLY if none done this frame yet
+                if not recognition_done_this_frame:
+                    if f_data['status'] == 'STABILIZING':
+                        if time_stayed >= 0.5:
+                            can_attempt = True
+                    elif f_data['status'] in ['RETRY_WAIT', 'UNAUTHORIZED']:
+                        if f_data['unknown_attempts'] < 5 or wait_time >= 5.0:
                             can_attempt = True
 
                 if can_attempt:
+                    recognition_done_this_frame = True # Mark as done to defer others to next frame
                     user_data = attendance_mgr.recognize(face.normed_embedding)
                     user_id = user_data.get('user_id', 'Unknown')
                     user_name = user_data.get('name', 'Unknown')

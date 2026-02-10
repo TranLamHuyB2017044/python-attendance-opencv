@@ -35,6 +35,8 @@ from src.ui.app_ui import (
 from src.main import enroll_from_camera, enroll_by_upload, get_target_company
 from src.config import DATA_DIR, MongoDbConfig
 
+from src.utils.notification import show_error_message, send_notification
+
 def main():
     setup_logger()
     logger.info("Starting Management Interface...")
@@ -46,7 +48,9 @@ def main():
         camera = RTSPCamera()
         ui = AttendanceUI()
     except Exception as e:
-        logger.critical(f"Khoi tao that bai: {e}")
+        error_msg = f"Lỗi khởi tạo: {str(e)}"
+        logger.critical(error_msg)
+        show_error_message("Lỗi Ứng Dụng Quản Lý", f"Không thể khởi động ứng dụng:\n{error_msg}")
         return
 
     win_name = "QUAN LY DIEM DANH AI"
@@ -166,8 +170,9 @@ def main():
                 cv2.setMouseCallback(win_name, ui.handle_hkb_click, param=(cur_w, cur_h))
 
             elif ui.current_state == STATE_SETTINGS:
-                ui.draw_settings_menu(w=cur_w, h=cur_h)
-                cv2.setMouseCallback(win_name, ui.handle_settings_click, param=(cur_w, cur_h))
+                ui.show_system_settings_ui(mongo_db)
+                ui.current_state = STATE_MENU
+                continue
 
             elif ui.current_state == STATE_LOGOUT:
                 ui.session_role = None
