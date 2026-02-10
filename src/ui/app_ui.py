@@ -1282,6 +1282,16 @@ class AttendanceUI:
                 
                 if ok:
                     saved_count += 1
+                    # Also sync to Qdrant if user exists there
+                    try:
+                        from src.attendance.qdrant_db import attendance
+                        user_info = attendance.get_user_info(t["id"])
+                        if user_info:
+                            # User exists in Qdrant, update their info
+                            attendance.update_user_info(t["id"], t["name"], t["bday"])
+                            logger.info(f"Synced info to Qdrant for user {t['id']}")
+                    except Exception as e:
+                        logger.warning(f"Could not sync to Qdrant for {t['id']}: {e}")
                 else:
                     errors.append(f"ID {t['id']}: {msg}")
             

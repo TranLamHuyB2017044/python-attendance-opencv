@@ -155,8 +155,16 @@ class MongoDBManager:
                     logger.info("Sync: Stranger detected! Broadcasting to all connected HKB systems...")
                     services = list(self.auth_services.find({}))
                 else:
-                    # 2. Nếu là nhân viên, chỉ gửi tới dịch vụ của công ty đó
-                    services = list(self.auth_services.find({"uuid": cid}))
+                    # 2. Nếu là nhân viên, tìm tất cả các công ty mà nhân viên này thuộc về
+                    user_companies = self.get_user_company_ids(user_id)
+                    
+                    # Đảm bảo cid hiện tại (từ log) cũng nằm trong danh sách đồng bộ
+                    if cid and cid not in user_companies:
+                        user_companies.append(str(cid))
+                    
+                    logger.debug(f"Sync: Fetching HKB services for company IDs: {user_companies}")
+                    # Tìm tất cả các dịch vụ HKB tương ứng với danh sách công ty này
+                    services = list(self.auth_services.find({"uuid": {"$in": user_companies}}))
                 
                 if not services:
                     logger.debug(f"Sync: No HKB services found for sync (User: {user_id}, Company: {cid})")
@@ -265,12 +273,6 @@ class MongoDBManager:
     def get_all_employees(self, company_id=None):
         """
         Get all employees from MongoDB (includes employees without face embeddings).
-        
-        Args:
-            company_id: Optional company filter
-            
-        Returns:
-            List of employee dicts with user_id, name, birthday
         """
         try:
             query = {}
@@ -285,6 +287,17 @@ class MongoDBManager:
             return employees
         except Exception as e:
             logger.error(f"MongoDB: Failed to get employees: {e}")
+            return []
+
+    def get_user_company_ids(self, user_id):
+        """Find all company IDs associated with this user_id from employee metadata."""
+        try:
+            user_id_str = str(user_id)
+            cursor = self.employees.find({"user_id": user_id_str}, {"company_id": 1, "_id": 0})
+            cids = list(set(str(doc["company_id"]) for doc in cursor if "company_id" in doc))
+            return cids
+        except Exception as e:
+            logger.error(f"MongoDB: Failed to get user company IDs: {e}")
             return []
 
     # --- Management Methods ---

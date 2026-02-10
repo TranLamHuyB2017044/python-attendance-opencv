@@ -64,7 +64,19 @@ class QdrantAttendanceManager:
         Save/Update user embeddings in Qdrant with metadata.
         """
         try:
+            if not embeddings:
+                logger.warning(f"Upsert: No embeddings provided for user {user_name} (ID: {user_id})")
+                return False
+
             user_id_str = str(user_id)
+            
+            # Use provided company_id or fallback. Handle None/Empty/ALL cases.
+            raw_cid = kwargs.get("company_id")
+            if raw_cid in [None, "", "ALL"]:
+                # If 'ALL' or empty is passed, we fallback to a default since points must have a specific owner
+                cid = "default"
+            else:
+                cid = str(raw_cid)
             
             # If specified, remove existing vectors for this user first
             if clear_old:
@@ -80,7 +92,7 @@ class QdrantAttendanceManager:
                         "user_id": user_id_str,
                         "user_name": user_name,
                         "birthday": birthday,
-                        "company_id": str(kwargs.get("company_id", "default")),
+                        "company_id": cid,
                         "created_at": datetime.now().isoformat()
                     }
                 ))
@@ -89,7 +101,7 @@ class QdrantAttendanceManager:
                 collection_name=self.collection_name,
                 points=points
             )
-            logger.success(f"Upserted {len(points)} samples for {user_name} (ID: {user_id})")
+            logger.success(f"Upserted {len(points)} samples for {user_name} (ID: {user_id}, Company: {cid})")
             return True
         except Exception as e:
             logger.error(f"Failed to upsert user {user_name}: {e}")
@@ -269,4 +281,8 @@ class QdrantAttendanceManager:
             logger.error(f"Failed to delete user {user_id}: {e}")
             return False
 
-__all__ = ["QdrantAttendanceManager"]
+
+# Global instance for shared use
+attendance = QdrantAttendanceManager()
+
+__all__ = ["QdrantAttendanceManager", "attendance"]

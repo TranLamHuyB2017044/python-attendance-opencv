@@ -116,15 +116,19 @@ class FaceTracker:
             annotated_frame = cv2.resize(annotated_frame, (max_w, target_h))
             logger.debug(f"Image resized from {w}x{h} to {max_w}x{target_h} for sync.")
 
-        # Save to local captures
+        # Determine image subdirectory (by company_id)
         current_time = time.time()
+        company_folder = str(company_id) if company_id else "unknown_company"
+        target_dir = CAPTURES_DIR / company_folder
+        target_dir.mkdir(parents=True, exist_ok=True)
+
         if is_known:
             safe_name = remove_accents(user_name).replace(" ", "_")
             img_name = f"{safe_name}_{user_id}_{int(current_time)}.webp"
         else:
             img_name = f"unknown_{int(current_time)}.webp"
         
-        img_path = str(CAPTURES_DIR / img_name)
+        img_path = str(target_dir / img_name)
         # Use WebP with quality 75 for balance between size and quality
         cv2.imwrite(img_path, annotated_frame, [int(cv2.IMWRITE_WEBP_QUALITY), 75])
         
@@ -134,7 +138,8 @@ class FaceTracker:
         if not is_known:
             logger.debug(f"Unknown face log saved. Status: {res_status}, Company: {company_id}")
             
-        url = f"{ApiConfig.BASE_URL}/captures/{img_name}"
+        # The relative URL for the API should now include the company folder
+        url = f"{ApiConfig.BASE_URL}/captures/{company_folder}/{img_name}"
         return url, res_status
 
     def update(self, detected_faces, attendance_mgr, frame=None, company_id=None):

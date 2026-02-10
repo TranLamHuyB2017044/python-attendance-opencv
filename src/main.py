@@ -168,16 +168,24 @@ def enroll_from_camera(camera, face_rec, attendance, ui):
                 root.destroy()
                 return
 
-            attendance.upsert_user(user_name, user_id, birthday, samples, clear_old=force_upd, company_id=target_company)
-            logger.success(f"Da dang ky: {user_name} (ID: {user_id}) cho cong ty: {target_company}")
-            
-            # Show success message
-            from tkinter import messagebox
-            import tkinter as tk
-            root = tk.Tk()
-            root.withdraw()
-            messagebox.showinfo("Thành công", f"Đã đăng ký thành công nhân viên: {user_name} (ID: {user_id})")
-            root.destroy()
+            ok_qdrant = attendance.upsert_user(user_name, user_id, birthday, samples, clear_old=force_upd, company_id=target_company)
+            if ok_qdrant:
+                logger.success(f"Da dang ky: {user_name} (ID: {user_id}) cho cong ty: {target_company}")
+                
+                # Show success message
+                from tkinter import messagebox
+                import tkinter as tk
+                root = tk.Tk()
+                root.withdraw()
+                messagebox.showinfo("Thành công", f"Đã đăng ký thành công nhân viên: {user_name} (ID: {user_id})")
+                root.destroy()
+            else:
+                logger.error(f"Failed to save face data to Qdrant for {user_id}")
+                from tkinter import messagebox
+                import tkinter as tk
+                root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
+                messagebox.showerror("Lỗi", "Đã lưu thông tin nhân viên nhưng thất bại khi đăng ký khuôn mặt.")
+                root.destroy()
     
     finally:
         # Always cleanup window
@@ -622,15 +630,24 @@ def main():
                                             break
 
                                     if len(samples) >= 1:
-                                        attendance.upsert_user(edit_res["name"], u_id, edit_res["bday"], samples, clear_old=True, company_id=target_company)
-                                        logger.success(f"Da dang ky khuon mat cho: {edit_res['name']} (ID: {u_id})")
-                                        
-                                        from tkinter import messagebox
-                                        import tkinter as tk
-                                        msg_root = tk.Tk()
-                                        msg_root.withdraw()
-                                        messagebox.showinfo("Thành công", f"Đã đăng ký khuôn mặt cho {edit_res['name']}")
-                                        msg_root.destroy()
+                                        ok = attendance.upsert_user(edit_res["name"], u_id, edit_res["bday"], samples, clear_old=True, company_id=target_company)
+                                        if ok:
+                                            logger.success(f"Da dang ky khuon mat cho: {edit_res['name']} (ID: {u_id})")
+                                            
+                                            from tkinter import messagebox
+                                            import tkinter as tk
+                                            msg_root = tk.Tk()
+                                            msg_root.withdraw()
+                                            messagebox.showinfo("Thành công", f"Đã đăng ký khuôn mặt cho {edit_res['name']}")
+                                            msg_root.destroy()
+                                        else:
+                                            logger.error(f"Lỗi khi lưu dữ liệu vào Qdrant cho {u_id}")
+                                            from tkinter import messagebox
+                                            import tkinter as tk
+                                            msg_root = tk.Tk()
+                                            msg_root.withdraw()
+                                            messagebox.showerror("Lỗi", "Không thể lưu dữ liệu khuôn mặt vào hệ thống nhận diện.")
+                                            msg_root.destroy()
                                 
                                 finally:
                                     # Always cleanup window
@@ -668,15 +685,24 @@ def main():
                                                 logger.info(f"Extracted face from {fpath}")
                                     
                                     if len(samples) >= 1:
-                                        attendance.upsert_user(edit_res["name"], u_id, edit_res["bday"], samples, clear_old=True, company_id=target_company)
-                                        logger.success(f"Da dang ky khuon mat cho: {edit_res['name']} (ID: {u_id})")
-                                        
-                                        from tkinter import messagebox
-                                        import tkinter as tk
-                                        msg_root = tk.Tk()
-                                        msg_root.withdraw()
-                                        messagebox.showinfo("Thành công", f"Đã đăng ký {len(samples)} ảnh khuôn mặt cho {edit_res['name']}")
-                                        msg_root.destroy()
+                                        ok = attendance.upsert_user(edit_res["name"], u_id, edit_res["bday"], samples, clear_old=True, company_id=target_company)
+                                        if ok:
+                                            logger.success(f"Da dang ky khuon mat cho: {edit_res['name']} (ID: {u_id})")
+                                            
+                                            from tkinter import messagebox
+                                            import tkinter as tk
+                                            msg_root = tk.Tk()
+                                            msg_root.withdraw()
+                                            messagebox.showinfo("Thành công", f"Đã đăng ký {len(samples)} ảnh khuôn mặt cho {edit_res['name']}")
+                                            msg_root.destroy()
+                                        else:
+                                            logger.error(f"Lỗi khi lưu dữ liệu vào Qdrant cho {u_id}")
+                                            from tkinter import messagebox
+                                            import tkinter as tk
+                                            msg_root = tk.Tk()
+                                            msg_root.withdraw()
+                                            messagebox.showerror("Lỗi", "Không thể lưu dữ liệu khuôn mặt vào hệ thống nhận diện.")
+                                            msg_root.destroy()
                                     else:
                                         from tkinter import messagebox
                                         import tkinter as tk
