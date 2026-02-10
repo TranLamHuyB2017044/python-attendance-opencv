@@ -195,7 +195,10 @@ class FaceTracker:
                 can_attempt = False
                 
                 # Check if we can attempt recognition, but ONLY if none done this frame yet
-                if not recognition_done_this_frame:
+                # Note: Already recognized or cooldown faces do NOT block others
+                if f_data['status'] in ['RECOGNIZED', 'COOLDOWN']:
+                    can_attempt = False
+                elif not recognition_done_this_frame:
                     if f_data['status'] == 'STABILIZING':
                         if time_stayed >= 0.5:
                             can_attempt = True

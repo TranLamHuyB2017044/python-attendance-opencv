@@ -16,6 +16,7 @@ STATE_COMPANY = 8
 STATE_CLOUD_USER = 9
 STATE_LOGOUT = 10
 STATE_SETTINGS = 11
+STATE_TEST_CAM = 12
 
 class AttendanceUI:
     """
@@ -28,6 +29,7 @@ class AttendanceUI:
         self.session_company_id = None
         self.session_username = None
         self.session_user_id = 1 # ID mặc định cho system user
+        self.service_active = False # Track if background service is running
         self.last_w, self.last_h = 1280, 720 # Default
 
     def handle_menu_click(self, event, x, y, flags, param):
@@ -53,28 +55,47 @@ class AttendanceUI:
                     self.current_state = STATE_LOGOUT
                     return
 
-            # 1. BAT DAU detection (Available to all)
-            if col1_L < x < col1_R and cY-btn_h-gap_y < y < cY-gap_y: 
+            # --- COLUMN 1 ACTIONS ---
+            # 1. XEM SERVICE (LIVE)
+            row1_y = cY - int(120 * (h/600))
+            if col1_L < x < col1_R and row1_y < y < row1_y + btn_h: 
+                if not self.service_active:
+                    from tkinter import messagebox
+                    import threading
+                    def show_warn():
+                        messagebox.showwarning("Dịch Vụ Đang Tắt", "Dịch vụ Camera ẩn chưa chạy.\n\nHướng dẫn:\n1. Vui lòng mở file 'service_main.exe' trước khi xem live.")
+                    threading.Thread(target=show_warn, daemon=True).start()
+                    return
                 self.current_state = STATE_DETECT
+            
+            # 1.2 TEST CAMERA (DIRECT)
+            row1_5_y = cY - int(40 * (h/600))
+            if col1_L < x < col1_R and row1_5_y < y < row1_5_y + btn_h:
+                self.current_state = STATE_TEST_CAM
                 
             # --- ADMIN & COMPANY RECOGNITION ACTIONS ---
             if str(self.session_role).lower() in ['admin', 'company']:
-                # DANH SACH
-                if col2_L < x < col2_R and cY+gap_y < y < cY+gap_y+btn_h: 
-                    self.current_state = STATE_LIST
-                
+                # DANG KY CAM (Col 1, Row 2)
+                row2_y = cY + int(40 * (h/600))
+                if col1_L < x < col1_R and row2_y < y < row2_y + btn_h: 
+                    self.current_state = STATE_ENROLL_CAM
+
+                # DANG KY FILE (Col 1, Row 3)
+                row3_y = cY + int(120 * (h/600))
+                if col1_L < x < col1_R and row3_y < y < row3_y + btn_h: 
+                    self.current_state = STATE_ENROLL_UPLOAD
+
+                # --- COLUMN 2 ACTIONS ---
                 # CHINH SUA
-                elif col2_L < x < col2_R and cY-btn_h-gap_y < y < cY-gap_y: 
+                if col2_L < x < col2_R and row1_y < y < row1_y + btn_h: 
                     self.current_state = STATE_EDIT
 
-                # DANG KY CAM (Col 1, Row 2)
-                elif col1_L < x < col1_R and cY+gap_y < y < cY+gap_y+btn_h: 
-                    self.current_state = STATE_ENROLL_CAM
-                # DANG KY FILE (Col 1, Row 3)
-                elif col1_L < x < col1_R and cY+gap_y*2+btn_h < y < cY+gap_y*2+btn_h*2: 
-                    self.current_state = STATE_ENROLL_UPLOAD
-                # LICH SU (Col 2, Row 3)
-                elif col2_L < x < col2_R and cY+gap_y*2+btn_h < y < cY+gap_y*2+btn_h*2: 
+                # DANH SACH
+                elif col2_L < x < col2_R and row2_y < y < row2_y + btn_h: 
+                    self.current_state = STATE_LIST
+                
+                # LICH SU
+                elif col2_L < x < col2_R and row3_y < y < row3_y + btn_h: 
                     self.current_state = STATE_HISTORY
 
             # --- ADMIN & COMPANY MANAGEMENT ---
@@ -100,8 +121,9 @@ class AttendanceUI:
                     elif cX + int(140*(w/800)) < x < cX + int(380*(w/800)): 
                         self.current_state = STATE_COMPANY
 
-    def draw_main_menu(self, w=1280, h=720):
+    def draw_main_menu(self, w=1280, h=720, service_active=False):
         """Draw a professional menu responsive to window size."""
+        self.service_active = service_active # Store state for click handling
         self.last_w, self.last_h = w, h
         frame = np.zeros((h, w, 3), dtype=np.uint8)
         
@@ -126,20 +148,34 @@ class AttendanceUI:
 
         # --- Column 1 ---
         # Button 1: Start System / Monitor (All)
-        cv2.rectangle(frame, (col1_x, cY - btn_h - gap_y), (col1_x + btn_w, cY - gap_y), (40, 180, 40), -1)
-        cv2.putText(frame, "XEM CAMERA (LIVE)", (col1_x + int(45 * (w/800)), cY - gap_y - int(18 * (h/600))),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8 * (w/800), (255, 255, 255), 2)
+        row1_y = cY - int(120 * (h/600))
+        btn_color = (40, 180, 40) if service_active else (60, 60, 60)
+        cv2.rectangle(frame, (col1_x, row1_y), (col1_x + btn_w, row1_y + btn_h), btn_color, -1)
+        cv2.putText(frame, "XEM SERVICE (LIVE)", (col1_x + int(45 * (w/800)), row1_y + int(38 * (h/600))),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7 * (w/800), (255, 255, 255), 2)
+        
+        # Status Dot for Service
+        dot_color = (0, 255, 0) if service_active else (0, 0, 255)
+        cv2.circle(frame, (col1_x + int(20 * (w/800)), row1_y + int(30 * (h/600))), 8, dot_color, -1)
+        
+        # New Button: Direct Test Camera (No Service needed)
+        row1_5_y = cY - int(40 * (h/600))
+        cv2.rectangle(frame, (col1_x, row1_5_y), (col1_x + btn_w, row1_5_y + btn_h), (80, 80, 200), -1)
+        cv2.putText(frame, "TEST CAMERA (TRUC TIEP)", (col1_x + int(30 * (w/800)), row1_5_y + int(38 * (h/600))),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6 * (w/800), (255, 255, 255), 2)
         
         # Enrollment Buttons (Available to Admin and Company Managers)
         if role_lower in ['admin', 'company']:
             # Button 2: Enroll Camera
-            cv2.rectangle(frame, (col1_x, cY + gap_y), (col1_x + btn_w, cY + gap_y + btn_h), (200, 120, 0), -1)
-            cv2.putText(frame, "DANG KY (CAM)", (col1_x + int(50 * (w/800)), cY + gap_y + int(42 * (h/600))),
+            row2_y = cY + int(40 * (h/600))
+            cv2.rectangle(frame, (col1_x, row2_y), (col1_x + btn_w, row2_y + btn_h), (200, 120, 0), -1)
+            cv2.putText(frame, "DANG KY (CAM)", (col1_x + int(50 * (w/800)), row2_y + int(38 * (h/600))),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8 * (w/800), (255, 255, 255), 2)
             
             # Button 3: Enroll Upload
-            cv2.rectangle(frame, (col1_x, cY + gap_y*2 + btn_h), (col1_x + btn_w, cY + gap_y*2 + btn_h*2), (0, 100, 200), -1)
-            cv2.putText(frame, "DANG KY (FILE)", (col1_x + int(50 * (w/800)), cY + gap_y*2 + btn_h + int(42 * (h/600))),
+            row3_y = cY + int(120 * (h/600))
+            cv2.rectangle(frame, (col1_x, row3_y), (col1_x + btn_w, row3_y + btn_h), (0, 100, 200), -1)
+            cv2.putText(frame, "DANG KY (FILE)", (col1_x + int(50 * (w/800)), row3_y + int(38 * (h/600))),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8 * (w/800), (255, 255, 255), 2)
         
         # Management Buttons (Admin & Company Only)
@@ -214,6 +250,7 @@ class AttendanceUI:
         cv2.putText(frame, "DANG XUAT", (w - 150, 48),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6 * (w/800), (255, 255, 255), 2)
         
+        self.frame = frame
         return frame
 
     @staticmethod
