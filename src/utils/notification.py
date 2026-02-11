@@ -30,7 +30,8 @@ def send_notification(title, message):
             timeout=5, # Seconds
         )
         logger.info(f"Notification sent: {title} - {message}")
+    except ImportError:
+        # plyer not installed - silently skip notification
+        logger.debug(f"Notification (no plyer): {title} - {message}")
     except Exception as e:
         logger.warning(f"Could not send notification: {e}")
-        # Fallback to simple print/log
-        print(f"NOTIFY: [{title}] {message}")

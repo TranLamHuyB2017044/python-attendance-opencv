@@ -257,6 +257,14 @@ class FaceTracker:
                             can_attempt = True
 
                 if can_attempt:
+                    # Skip recognition if attendance manager is None (monitor-only mode)
+                    if attendance_mgr is None:
+                        # In monitor mode, just mark as "Monitoring" without logging
+                        f_data['status'] = 'MONITORING'
+                        f_data['user_name'] = 'Monitoring...'
+                        f_data['user_id'] = 'N/A'
+                        continue
+                    
                     recognition_done_this_frame = True # Mark as done to defer others to next frame
                     user_data = attendance_mgr.recognize(face.normed_embedding)
                     user_id = user_data.get('user_id', 'Unknown')

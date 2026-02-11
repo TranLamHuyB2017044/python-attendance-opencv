@@ -59,30 +59,20 @@ class AttendanceUI:
             # --- COLUMN 1 ACTIONS ---
             # 1. XEM SERVICE (LIVE)
             row1_y = cY - int(120 * (h/600))
-            if col1_L < x < col1_R and row1_y < y < row1_y + btn_h: 
-                if not self.service_active:
-                    from tkinter import messagebox
-                    import threading
-                    def show_warn():
-                        messagebox.showwarning("Dịch Vụ Đang Tắt", "Dịch vụ Camera ẩn chưa chạy.\n\nHướng dẫn:\n1. Vui lòng mở file 'service_main.exe' trước khi xem live.")
-                    threading.Thread(target=show_warn, daemon=True).start()
-                    return
-                self.current_state = STATE_DETECT
-            
-            # 1.2 TEST CAMERA (DIRECT)
             row1_5_y = cY - int(40 * (h/600))
-            if col1_L < x < col1_R and row1_5_y < y < row1_5_y + btn_h:
-                self.current_state = STATE_TEST_CAM
+            row2_y = cY + int(40 * (h/600))
+            row3_y = cY + int(120 * (h/600))
+
+            if col1_L < x < col1_R and row1_y < y < row1_y + btn_h: 
+                self.current_state = STATE_DETECT
                 
             # --- ADMIN & COMPANY RECOGNITION ACTIONS ---
             if str(self.session_role).lower() in ['admin', 'company']:
                 # DANG KY CAM (Col 1, Row 2)
-                row2_y = cY + int(40 * (h/600))
                 if col1_L < x < col1_R and row2_y < y < row2_y + btn_h: 
                     self.current_state = STATE_ENROLL_CAM
 
                 # DANG KY FILE (Col 1, Row 3)
-                row3_y = cY + int(120 * (h/600))
                 if col1_L < x < col1_R and row3_y < y < row3_y + btn_h: 
                     self.current_state = STATE_ENROLL_UPLOAD
 
@@ -154,7 +144,7 @@ class AttendanceUI:
         row3_y = cY + int(120 * (h/600))
 
         # --- Column 1 ---
-        # Button 1: Start System / Monitor (All)
+        # Button 1: Monitor Service (All users)
         btn_color = (40, 180, 40) if service_active else (60, 60, 60)
         cv2.rectangle(frame, (col1_x, row1_y), (col1_x + btn_w, row1_y + btn_h), btn_color, -1)
         cv2.putText(frame, "XEM SERVICE (LIVE)", (col1_x + int(45 * (w/800)), row1_y + int(38 * (h/600))),
@@ -163,11 +153,6 @@ class AttendanceUI:
         # Status Dot for Service
         dot_color = (0, 255, 0) if service_active else (0, 0, 255)
         cv2.circle(frame, (col1_x + int(20 * (w/800)), row1_y + int(30 * (h/600))), 8, dot_color, -1)
-        
-        # New Button: Direct Test Camera (No Service needed)
-        cv2.rectangle(frame, (col1_x, row1_5_y), (col1_x + btn_w, row1_5_y + btn_h), (80, 80, 200), -1)
-        cv2.putText(frame, "TEST CAMERA (TRUC TIEP)", (col1_x + int(30 * (w/800)), row1_5_y + int(38 * (h/600))),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6 * (w/800), (255, 255, 255), 2)
         
         # Enrollment Buttons (Available to Admin and Company Managers)
         if role_lower in ['admin', 'company']:

@@ -40,14 +40,22 @@ def main():
     setup_logger()
     logger.info("Starting Background Face Recognition Service...")
 
+    # Chặn mở nhiều service cùng lúc
+    from src.utils.single_instance import force_single_instance
+    force_single_instance("CameraService")
+
     try:
         face_rec = FaceRecognition()
         attendance = QdrantAttendanceManager()
         camera = RTSPCamera()
         tracker = FaceTracker(threshold_seconds=2.0)
         
-        # Notify about successful startup (Toast)
-        send_notification("Camera Service AI", "Dịch vụ điểm danh AI đã khởi động thành công!")
+        # Notify about successful startup
+        from src.utils.notification import show_info_message
+        show_info_message("Bittech Camera Service", "DỊCH VỤ CAMERA ĐÃ BẬT THÀNH CÔNG!\n\nHệ thống đang chạy ẩn và sẽ tự động điểm danh.")
+        
+        # Log version or info
+        logger.info("Service is now running in the background.")
         
     except Exception as e:
         error_msg = f"Lỗi khởi tạo: {str(e)}"
@@ -70,8 +78,46 @@ def main():
 
     try:
         while True:
+            current_time = time.time()
+            
+            # 1. UPDATE HEARTBEAT (Once every loop is fine, or simple interval)
+            try:
+                from src.config import MongoDbConfig
+                from src.attendance.mongodb_mgr import mongo_db
+                
+                # Update heartbeat in MongoDB
+                cam_status = "running" if camera.is_connected else "waiting_camera"
+                mongo_db.db.system_status.update_one(
+                    {"type": "camera_service", "company_id": MongoDbConfig.COMPANY_ID},
+                    {"$set": {
+                        "last_seen": current_time, 
+                        "status": cam_status,
+                        "camera_connected": camera.is_connected
+                    }},
+                    upsert=True
+                )
+            except Exception as e:
+                logger.warning(f"Failed to update status: {e}")
+            
+            # 2. CAMERA CONNECTION LOGIC
             if not camera.is_connected:
                 if not camera.connect():
+                    logger.warning("Camera not connected. Creating waiting preview...")
+                    
+                    # Create a "waiting" preview so management app doesn't freeze
+                    try:
+                        import numpy as np
+                        waiting_frame = np.zeros((360, 640, 3), dtype=np.uint8)
+                        cv2.putText(waiting_frame, "DANG CHO KET NOI CAMERA...", (120, 160), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 165, 255), 2)
+                        cv2.putText(waiting_frame, f"Retrying: {time.strftime('%H:%M:%S')}", (200, 200), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (150, 150, 150), 1)
+                        cv2.putText(waiting_frame, "Service is running but camera offline", (140, 240), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 100, 100), 1)
+                        cv2.imwrite(str(preview_path), waiting_frame, [cv2.IMWRITE_JPEG_QUALITY, 50])
+                    except Exception as e:
+                        logger.error(f"Failed to create waiting preview: {e}")
+                    
                     time.sleep(10) # Wait before retry
                     continue
             
@@ -88,28 +134,19 @@ def main():
             # 2. Logic & Tracking (Always run)
             tracker.update(faces, attendance, frame)
             
-            # --- NEW: UPDATE HEARTBEAT & PREVIEW ---
+            # --- UPDATE PREVIEW WITH ACTUAL CAMERA FEED ---
             try:
-                # 1. Update heartbeat in MongoDB (Company specific)
-                from src.config import MongoDbConfig
-                from src.attendance.mongodb_mgr import mongo_db
-                mongo_db.db.system_status.update_one(
-                    {"type": "camera_service", "company_id": MongoDbConfig.COMPANY_ID},
-                    {"$set": {"last_seen": time.time(), "status": "running"}},
-                    upsert=True
-                )
-                
-                # 2. Draw results for preview
+                # 1. Draw results for preview
                 annotated_preview = face_rec.draw_faces(frame, faces)
                 
-                # 3. Save a small preview frame
+                # 2. Save a small preview frame
                 small_frame = cv2.resize(annotated_preview, (640, 360))
                 # Add a "LIVE" indicator
                 cv2.putText(small_frame, f"LIVE MONITOR: {time.strftime('%H:%M:%S')}", (10, 30), 
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                 cv2.imwrite(str(preview_path), small_frame, [cv2.IMWRITE_JPEG_QUALITY, 50])
             except Exception as e:
-                logger.warning(f"Failed to update service status: {e}")
+                logger.warning(f"Failed to update preview: {e}")
 
             # Small sleep to manage CPU usage
             time.sleep(0.01)

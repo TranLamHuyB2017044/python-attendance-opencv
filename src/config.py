@@ -11,10 +11,26 @@ from dotenv import load_dotenv
 from loguru import logger
 
 # Load environment variables
-load_dotenv()
+import sys
+if getattr(sys, 'frozen', False):
+    # If running as a built .exe, look for .env in the same folder as the .exe
+    env_path = os.path.join(os.path.dirname(sys.executable), '.env')
+    load_dotenv(env_path)
+    # Also fallback to base_dir if not found in exe dir
+    if not os.path.exists(env_path):
+        load_dotenv()
+else:
+    # If running in dev mode
+    load_dotenv()
 
 # Project paths
-PROJECT_ROOT = Path(__file__).parent.parent
+if getattr(sys, 'frozen', False):
+    # If running as a built .exe, PROJECT_ROOT is the folder where .exe is located
+    PROJECT_ROOT = Path(os.path.dirname(sys.executable))
+else:
+    # If running in dev mode
+    PROJECT_ROOT = Path(__file__).parent.parent
+
 LOGS_DIR = PROJECT_ROOT / "logs"
 DATA_DIR = PROJECT_ROOT / "data"
 EMBEDDINGS_DIR = PROJECT_ROOT / "embeddings"

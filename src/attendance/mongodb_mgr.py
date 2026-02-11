@@ -96,14 +96,32 @@ class MongoDBManager:
                     logger.error(f"MongoDB: Failed to compress image: {e}")
 
             # Determine IN/OUT status if not provided (Local logic shifted to Cloud context)
-            if status is None:
-                if user_id == "Unknown":
-                    status = "FAILED"
-                else:
-                    last_record = self.logs.find_one(
-                        {"user_id": user_id, "date": date_str, "company_id": cid},
-                        sort=[("_id", -1)]
-                    )
+            if user_id == "Unknown":
+                status = "FAILED"
+            else:
+                # --- ADDED: 15-MINUTE PERSISTENT COOLDOWN ---
+                # Check directly in DB to see if this user has checked in recently
+                last_record = self.logs.find_one(
+                    {"user_id": user_id, "company_id": cid},
+                    sort=[("_id", -1)]
+                )
+                
+                if last_record:
+                    # Check cooldown (Default 900s = 15 mins)
+                    last_time = last_record.get("created_at")
+                    if last_time:
+                        if isinstance(last_time, str): # Handle legacy string timestamps
+                            try: last_time = datetime.fromisoformat(last_time)
+                            except: last_time = None
+                        
+                        if last_time:
+                            elapsed = (datetime.utcnow() - last_time).total_seconds()
+                            if elapsed < 900: # 15 minutes
+                                logger.warning(f"MongoDB: Cooldown active for {user_name} ({int(elapsed)}s < 900s). Skip saving log.")
+                                return last_record.get("status") # Return existing status without saving
+                
+                # Determine status if not provided
+                if status is None:
                     if not last_record or last_record.get('status') in ['OUT', 'FAILED']:
                         status = 'IN'
                     else:
@@ -145,7 +163,12 @@ class MongoDBManager:
         
         def sync_task():
             try:
-                from src.services.hkb_service import hkb_service
+                # Try to import HKB service - may not be available in all builds
+                try:
+                    from src.services.hkb_service import hkb_service
+                except ImportError as ie:
+                    logger.warning(f"Sync: HKB service not available (missing dependency): {ie}")
+                    return
                 
                 user_id = log_entry.get("user_id")
                 cid = log_entry.get("company_id")

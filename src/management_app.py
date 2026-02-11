@@ -43,15 +43,72 @@ def main():
     logger.info("Starting Management Interface...")
     warnings.filterwarnings("ignore", category=FutureWarning)
 
+    # Chặn mở nhiều app cùng lúc
+    from src.utils.single_instance import force_single_instance
+    force_single_instance("ManagementApp")
+
+    # --- 1. HIỆN MÀN HÌNH LOADING NGAY LẬP TỨC ---
+    # Tạo cửa sổ OpenCV và phóng to ngay
+    win_loading = "QUAN LY DIEM DANH AI"
+    cv2.namedWindow(win_loading, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(win_loading, 1280, 720)
+    
+    loading_frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+    cv2.rectangle(loading_frame, (0, 0), (1280, 720), (30, 30, 30), -1)
+    
+    # Vẽ logo hoặc text loading chuyên nghiệp
+    cv2.putText(loading_frame, "BITTECH AI SYSTEM", (440, 300), 
+                cv2.FONT_HERSHEY_DUPLEX, 1.2, (255, 255, 255), 2)
+    cv2.putText(loading_frame, "DANG KHOI TAO HE THONG... VUI LONG CHO TRONG GIAY LAT", (320, 380), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 1)
+    
+    # Progress bar giả lập
+    cv2.rectangle(loading_frame, (440, 420), (840, 430), (60, 60, 60), -1)
+    cv2.imshow(win_loading, loading_frame)
+    cv2.waitKey(1)
+
     try:
+        logger.info("Step 1: Initializing Face Recognition models...")
+        cv2.rectangle(loading_frame, (440, 420), (540, 430), (0, 255, 0), -1)
+        cv2.imshow(win_loading, loading_frame)
+        cv2.waitKey(1)
         face_rec = FaceRecognition()
+        
+        logger.info("Step 2: Connecting to Vector Database (Qdrant)...")
+        cv2.rectangle(loading_frame, (440, 420), (640, 430), (0, 255, 0), -1)
+        cv2.imshow(win_loading, loading_frame)
+        cv2.waitKey(1)
         attendance = QdrantAttendanceManager()
+        
+        logger.info("Step 3: Initializing Camera system...")
+        cv2.rectangle(loading_frame, (440, 420), (740, 430), (0, 255, 0), -1)
+        cv2.imshow(win_loading, loading_frame)
+        cv2.waitKey(1)
         camera = RTSPCamera()
+        
+        from src.recognition.tracker import FaceTracker
+        tracker = FaceTracker(threshold_seconds=2.0)
         ui = AttendanceUI()
+        
+        logger.info("Step 4: Syncing with Cloud Database...")
+        cv2.rectangle(loading_frame, (440, 420), (840, 430), (0, 255, 0), -1)
+        cv2.imshow(win_loading, loading_frame)
+        cv2.waitKey(1)
+        
+        # Check service status immediately
+        from src.attendance.mongodb_mgr import mongo_db as m_db
+        status_doc = m_db.db.system_status.find_one({"type": "camera_service", "company_id": MongoDbConfig.COMPANY_ID})
+        if status_doc:
+            last_seen = status_doc.get("last_seen", 0)
+            ui.service_active = (time.time() - last_seen < 15)
+            
     except Exception as e:
-        error_msg = f"Lỗi khởi tạo: {str(e)}"
-        logger.critical(error_msg)
-        show_error_message("Lỗi Ứng Dụng Quản Lý", f"Không thể khởi động ứng dụng:\n{error_msg}")
+        logger.critical(f"Khoi tao that bai: {e}")
+        from tkinter import messagebox
+        import tkinter as tk
+        root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
+        messagebox.showerror("Lỗi Khởi Tạo", f"Không thể khởi động hệ thống:\n{e}")
+        root.destroy()
         return
 
     win_name = "QUAN LY DIEM DANH AI"
@@ -68,6 +125,8 @@ def main():
         last_heartbeat_check = 0
         last_w, last_h = 0, 0
         
+        display_frame = ui.draw_main_menu() # Initial frame
+
         while True:
             _, _, cur_w, cur_h = cv2.getWindowImageRect(win_name)
             if cur_w <= 0 or cur_h <= 0: cur_w, cur_h = 1280, 720
@@ -78,72 +137,65 @@ def main():
                 if status_doc:
                     last_seen = status_doc.get("last_seen", 0)
                     service_active = (time.time() - last_seen < 15)
+                    ui.camera_connected = status_doc.get("camera_connected", False)
                 else:
                     service_active = False
+                    ui.camera_connected = False
                 last_heartbeat_check = time.time()
 
             if ui.current_state == STATE_MENU:
                 display_frame = ui.draw_main_menu(w=cur_w, h=cur_h, service_active=service_active)
-                # Update callback only if window was resized to keep coordinates accurate
                 if cur_w != last_w or cur_h != last_h:
                     cv2.setMouseCallback(win_name, ui.handle_menu_click, param=(cur_w, cur_h))
                     last_w, last_h = cur_w, cur_h
                 
             elif ui.current_state == STATE_DETECT:
-                if not service_active:
-                    from tkinter import messagebox
-                    messagebox.showwarning("Dịch Vụ Đang Tắt", 
-                        "Dịch vụ Camera ẩn chưa chạy.\n\nHướng dẫn:\n1. Vui lòng mở file 'service_main.exe' (hoặc chạy lệnh python src/service_main.py) trước khi xem live.")
-                    ui.current_state = STATE_MENU
-                    continue
-
-                # --- LIVE PREVIEW FROM BACKGROUND SERVICE ---
-                preview_path = DATA_DIR / "camera_preview.jpg"
-                is_active = service_active # Use the pre-calculated state
+                # --- CHẾ ĐỘ GIÁM SÁT TRỰC TIẾP (SMOOTH STREAM) ---
+                cam_ip = mongo_db.get_setting("camera_ip", CameraConfig.IP, username=ui.session_username)
+                cam_port = mongo_db.get_setting("camera_port", CameraConfig.PORT, username=ui.session_username)
+                cam_user = mongo_db.get_setting("camera_user", CameraConfig.USER, username=ui.session_username)
+                cam_pass = mongo_db.get_setting("camera_pass", CameraConfig.PASS, username=ui.session_username)
                 
-                # 2. Prepare Display Frame
-                display_frame = np.zeros((cur_h, cur_w, 3), dtype=np.uint8)
+                new_url = f"rtsp://{cam_user}:{cam_pass}@{cam_ip}:{cam_port}/ch1/main"
+                if cam_ip.isdigit(): new_url = int(cam_ip)
                 
-                if os.path.exists(preview_path) and is_active:
-                    preview_img = cv2.imread(str(preview_path))
-                    if preview_img is not None:
-                        # Resize preview to fit nicely in the management window
-                        p_h, p_w = preview_img.shape[:2]
-                        # Scale to fit (cur_w - 40) width, keeping aspect ratio
-                        scale = (cur_w - 60) / p_w
-                        target_w = int(p_w * scale)
-                        target_h = int(p_h * scale)
-                        
-                        # If height is too large, scale by height
-                        if target_h > cur_h - 200:
-                            scale = (cur_h - 220) / p_h
-                            target_w = int(p_w * scale)
-                            target_h = int(p_h * scale)
-                            
-                        preview_img = cv2.resize(preview_img, (target_w, target_h))
-                        y_off = 100
-                        x_off = (cur_w - target_w) // 2
-                        display_frame[y_off:y_off+target_h, x_off:x_off+target_w] = preview_img
-                else:
-                    msg = "DICH VU CAMERA DANG TAT (SERVICE IS OFF)" if not is_active else "DANG DOI ANH PREVIEW (WAITING FOR PREVIEW...)"
-                    cv2.putText(display_frame, msg, (cur_w//2 - 350, cur_h//2), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                    cv2.putText(display_frame, f"Company: {MongoDbConfig.COMPANY_ID}", (cur_w//2 - 150, cur_h//2 + 40),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (150, 150, 150), 1)
+                if not camera.is_connected or str(camera.camera_source) != str(new_url):
+                    camera.disconnect()
+                    camera = RTSPCamera(rtsp_url=str(new_url))
+                    if not camera.connect():
+                        from tkinter import messagebox
+                        messagebox.showerror("Lỗi", f"Không thể kết nối camera tại {cam_ip}!")
+                        ui.current_state = STATE_MENU
+                        continue
                 
-                # Status Bar inside the monitor view
-                status_color = (0, 255, 0) if is_active else (0, 0, 255)
-                cv2.rectangle(display_frame, (0, 0), (cur_w, 80), (30, 30, 30), -1)
-                cv2.putText(display_frame, "GIAM SAT DICH VU CAMERA (SERVICE MONITOR)", (20, 50), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-                cv2.circle(display_frame, (cur_w - 50, 45), 10, status_color, -1)
+                mon_tracker = FaceTracker(threshold_seconds=1.0)
+                f_count = 0
+                mon_faces = []
                 
-                # Instruction
-                cv2.putText(display_frame, "[M] Quay ve Menu", (20, cur_h - 20), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
-
-                if cv2.waitKey(1) & 0xFF == ord('m'):
-                    ui.current_state = STATE_MENU
+                while ui.current_state == STATE_DETECT:
+                    success, frame = camera.read_frame()
+                    if not success or frame is None:
+                        f = np.zeros((cur_h, cur_w, 3), dtype=np.uint8)
+                        cv2.putText(f, "KHONG THE DOC FRAME", (cur_w//2-100, cur_h//2), 0, 0.7, (0,0,255), 2)
+                        cv2.imshow(win_name, f)
+                        if cv2.waitKey(1) & 0xFF == ord('m'): break
+                        continue
+                    
+                    f_count += 1
+                    if f_count % 3 == 0:
+                        mon_faces = face_rec.detect_and_extract(frame)
+                    
+                    mon_tracker.update(mon_faces, None, frame, company_id=ui.session_company_id)
+                    display_frame = face_rec.draw_faces(frame.copy(), mon_faces)
+                    
+                    # Chỉ hiển thị video sạch, không có status bar
+                    cv2.imshow(win_name, display_frame)
+                    if cv2.waitKey(1) & 0xFF == ord('m'):
+                        break
+                
+                camera.disconnect()
+                ui.current_state = STATE_MENU
+                continue
 
             elif ui.current_state == STATE_ENROLL_CAM:
                 if not camera.is_connected:
@@ -161,98 +213,47 @@ def main():
                 ui.current_state = STATE_MENU
                 continue
 
-            elif ui.current_state == STATE_TEST_CAM:
-                # 1. Refresh camera config from DB before connecting (User-specific)
-                cam_ip = mongo_db.get_setting("camera_ip", CameraConfig.IP, username=ui.session_username)
-                cam_port = mongo_db.get_setting("camera_port", CameraConfig.PORT, username=ui.session_username)
-                cam_user = mongo_db.get_setting("camera_user", CameraConfig.USER, username=ui.session_username)
-                cam_pass = mongo_db.get_setting("camera_pass", CameraConfig.PASS, username=ui.session_username)
-                
-                # Build fresh URL
-                new_url = f"rtsp://{cam_user}:{cam_pass}@{cam_ip}:{cam_port}/ch1/main"
-                if cam_ip.isdigit(): new_url = cam_ip # Handle webcam index
-                
-                # If URL changed or not connected, recreate/reconnect
-                if str(camera.camera_source) != str(new_url):
-                    logger.info(f"Updating camera source to {cam_ip}")
-                    camera.disconnect()
-                    camera = RTSPCamera(rtsp_url=str(new_url))
-                
-                # Direct Camera Test Mode
-                if not camera.is_connected:
-                    if not camera.connect():
-                        from tkinter import messagebox
-                        messagebox.showerror("Lỗi", f"Không thể kết nối camera tại {cam_ip}!")
-                        ui.current_state = STATE_MENU
-                        continue
-                
-                logger.info("Entering Direct Test Camera Mode...")
-                from src.recognition.tracker import FaceTracker
-                test_tracker = FaceTracker(threshold_seconds=0.5)
-                f_count = 0
-                test_faces = []
-                
-                while True:
-                    success, frame = camera.read_frame()
-                    if not success or frame is None:
-                        # Fallback to black frame if camera fails
-                        frame = np.zeros((cur_h, cur_w, 3), dtype=np.uint8)
-                        cv2.putText(frame, "KHONG THE DOC FRAME CAMERA", (cur_w//2-200, cur_h//2), 
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                        cv2.imshow(win_name, frame)
-                        if cv2.waitKey(1) & 0xFF == ord('m'): break
-                        continue
-                    
-                    f_count += 1
-                    # Heavy AI every 3 frames
-                    if f_count % 3 == 0:
-                        test_faces = face_rec.detect_and_extract(frame)
-                    
-                    # Always tracking - Pass company_id from session
-                    test_tracker.update(test_faces, attendance, frame, company_id=ui.session_company_id)
-                    
-                    # Draw for UI
-                    display_frame = face_rec.draw_faces(frame, test_faces)
-                    ui.draw_status_bar(display_frame, 0, 0) # Simple HUD
-                    cv2.putText(display_frame, "CHEDO TEST CAMERA (TRUC TIEP)", (10, cur_h-50), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                    cv2.putText(display_frame, "[M] Thoat ra Menu", (10, cur_h-20), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-                    
-                    cv2.imshow(win_name, display_frame)
-                    key = cv2.waitKey(1) & 0xFF
-                    if key == ord('m'):
-                        break
-                
-                logger.info("Exiting Direct Test Camera Mode.")
-                camera.disconnect()
+            elif ui.current_state == STATE_LIST:
+                from src.main import get_target_company
+                target_cid = get_target_company(ui, mongo_db, allow_selection=True)
+                if target_cid:
+                    mongo_employees = mongo_db.get_all_employees(company_id=target_cid)
+                    qdrant_employees = attendance.get_all_users(company_id=target_cid)
+                    all_employees = []
+                    seen_ids = set()
+                    for emp in qdrant_employees:
+                        u_id_str = str(emp['user_id'])
+                        if u_id_str not in seen_ids:
+                            all_employees.append({'user_id': u_id_str, 'user_name': emp['user_name'], 'birthday': emp['birthday'], 'has_face': True})
+                            seen_ids.add(u_id_str)
+                    for emp in mongo_employees:
+                        if str(emp['user_id']) not in seen_ids:
+                            all_employees.append({'user_id': emp['user_id'], 'user_name': emp['name'], 'birthday': emp.get('birthday', 'N/A'), 'has_face': False})
+                            seen_ids.add(str(emp['user_id']))
+                    ui.show_user_list_ui(all_employees)
                 ui.current_state = STATE_MENU
                 continue
-
-            elif ui.current_state == STATE_LIST:
-                users = attendance.get_all_users(company_id=ui.session_company_id if ui.session_role != 'admin' else None)
-                ui.draw_user_list(users, w=cur_w, h=cur_h)
-                cv2.setMouseCallback(win_name, ui.handle_list_click, param=(cur_w, cur_h))
             
-            elif ui.current_state == STATE_HISTORY:
-                # Fetch logs for the current day by default
-                from src.utils.time_manager import time_mgr
-                _, date_str = time_mgr.get_formatted_time()
-                logs = mongo_db.get_logs(company_id=ui.session_company_id if ui.session_role != 'admin' else None, date=date_str)
-                ui.draw_attendance_history(logs, date_str, w=cur_w, h=cur_h)
-                cv2.setMouseCallback(win_name, ui.handle_history_click, param=(cur_w, cur_h))
-
             elif ui.current_state == STATE_EDIT:
                 from src.main import handle_edit_logic
                 handle_edit_logic(attendance, face_rec, ui, camera)
                 ui.current_state = STATE_MENU
                 continue
 
+            elif ui.current_state == STATE_HISTORY:
+                target_cid = get_target_company(ui, mongo_db, allow_selection=True)
+                if target_cid:
+                    target_date = ui.get_date_form(title=f"Lịch sử [{target_cid}]")
+                    if target_date:
+                        logs = mongo_db.get_logs(company_id=target_cid, date=target_date)
+                        ui.show_attendance_logs_ui(logs, title=f"Lịch sử - {target_date}", session_role=ui.session_role, session_username=ui.session_username)
+                ui.current_state = STATE_MENU
+                continue
+
             elif ui.current_state == STATE_HKB_LIST:
-                from src.services.hkb_service import hkb_service
-                connections = hkb_service.get_connections() or []
-                ui.draw_hkb_connections(connections, w=cur_w, h=cur_h)
-                cv2.setMouseCallback(win_name, ui.handle_hkb_click, param=(cur_w, cur_h))
+                ui.show_hkb_connections_ui()
+                ui.current_state = STATE_MENU
+                continue
 
             elif ui.current_state == STATE_SETTINGS:
                 ui.show_system_settings_ui(mongo_db)
@@ -262,14 +263,11 @@ def main():
             elif ui.current_state == STATE_LOGOUT:
                 ui.session_role = None
                 ui.session_company_id = None
-                if not ui.show_login_dialog():
-                    break
+                if not ui.show_login_dialog(): break
                 ui.current_state = STATE_MENU
                 continue
             
-            # Final display: If we generated a custom display_frame (like in STATE_DETECT or STATE_MENU), use it.
-            # Otherwise fallback to the standard UI frame.
-            final_show = display_frame if ui.current_state in [STATE_DETECT, STATE_MENU] else ui.frame
+            final_show = display_frame if ui.current_state in [STATE_DETECT, STATE_MENU, STATE_TEST_CAM] else ui.frame
             cv2.imshow(win_name, final_show)
             if cv2.waitKey(1) & 0xFF == ord('q'): break
 
