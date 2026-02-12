@@ -20,7 +20,7 @@ from src.config import MongoDbConfig, CameraConfig, DATA_DIR
 from src.ui.app_ui import AttendanceUI, STATE_MENU, STATE_DETECT, STATE_ENROLL_CAM, STATE_ENROLL_UPLOAD, STATE_EDIT, STATE_LIST, STATE_HISTORY, STATE_HKB_LIST, STATE_COMPANY, STATE_CLOUD_USER, STATE_LOGOUT, STATE_SETTINGS, STATE_TEST_CAM
 
 
-def get_target_company(ui, mongo_db, allow_selection=True):
+def get_target_company(ui, mongo_db, allow_selection=True, parent=None):
     """
     Determine target company based on user role.
     
@@ -43,7 +43,7 @@ def get_target_company(ui, mongo_db, allow_selection=True):
         if allow_selection:
             companies = mongo_db.get_all_companies()
             if companies:
-                picked = ui.pick_company_ui(companies)
+                picked = ui.pick_company_ui(companies, parent=parent)
                 if picked:
                     logger.info(f"Admin selected company: {picked}")
                     return picked
@@ -192,14 +192,14 @@ def enroll_from_camera(camera, face_rec, attendance, ui):
             pass
 
 
-def enroll_by_upload(face_rec, attendance, ui):
+def enroll_by_upload(face_rec, attendance, ui, parent=None):
     """
     Enroll users by uploading images from disk.
     """
     try:
         # 1. Mở form nhập liệu UI TRƯỚC (có nút chọn ảnh bên trong)
         logger.info("Opening user enrollment form...")
-        user_info = AttendanceUI.get_user_form(include_upload=True, session_role=ui.session_role, mongo_db=mongo_db)
+        user_info = AttendanceUI.get_user_form(include_upload=True, session_role=ui.session_role, mongo_db=mongo_db, parent=parent)
         
         if not user_info:
             logger.warning("Enrollment cancelled: No user information provided.")
@@ -296,12 +296,12 @@ def enroll_by_upload(face_rec, attendance, ui):
         logger.error(traceback.format_exc())
 
 
-def handle_edit_logic(attendance, face_rec, ui, camera):
+def handle_edit_logic(attendance, face_rec, ui, camera, parent=None):
     """
     Handles the sequence for editing a user: Company Selection -> User Picking -> Details Edit -> (Optional) Re-enroll.
     """
     # 1. Determine target company with access control
-    target_company = get_target_company(ui, mongo_db, allow_selection=True)
+    target_company = get_target_company(ui, mongo_db, allow_selection=True, parent=parent)
     
     if target_company is None:
         return
@@ -350,7 +350,7 @@ def handle_edit_logic(attendance, face_rec, ui, camera):
             seen_ids.add(str(emp['user_id']))
     
     # 3. Pick User from merged list
-    u_id = ui.pick_user_ui(all_employees)
+    u_id = ui.pick_user_ui(all_employees, parent=parent)
     
     if u_id:
         logger.info(f"Selected user_id for edit: {u_id}")
@@ -375,7 +375,8 @@ def handle_edit_logic(attendance, face_rec, ui, camera):
                 user_info["user_id"], 
                 user_info["user_name"], 
                 user_info["birthday"],
-                session_role=ui.session_role
+                session_role=ui.session_role,
+                parent=parent
             )
             if edit_res:
                 if edit_res["delete"]:

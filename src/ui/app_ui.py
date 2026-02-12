@@ -1,10 +1,26 @@
 import cv2
 import numpy as np
+import os
+import sys
 from loguru import logger
 from src.attendance.mongodb_mgr import mongo_db
 import customtkinter as ctk
 import tkinter as tk
 from tkinter import ttk, messagebox
+
+def _apply_icon(window):
+    """Utility to apply app icon to any tkinter/customtkinter window."""
+    try:
+        # Check if running as a bundled executable
+        if getattr(sys, 'frozen', False):
+            icon_path = os.path.join(sys._MEIPASS, "app_icon.ico")
+        else:
+            icon_path = "app_icon.ico"
+            
+        if os.path.exists(icon_path):
+            window.iconbitmap(icon_path)
+    except Exception:
+        pass
 
 # Configure CustomTkinter
 ctk.set_appearance_mode("dark")
@@ -126,32 +142,70 @@ class AttendanceUI:
         # We now use show_main_dashboard instead of draw_main_menu
         return np.zeros((h, w, 3), dtype=np.uint8)
 
-    def show_main_dashboard(self, mongo_db, service_active=False):
+    def show_main_dashboard(self, mongo_db, attendance=None, face_rec=None, camera=None, service_active=False):
         """
         Displays a modern Dashboard using CustomTkinter.
         Returns the selected state.
         """
-        
+        import threading
         root = ctk.CTk()
-        try: root.iconbitmap("app_icon.ico")
-        except: pass
+        _apply_icon(root)
         root.title("BITTECH AI - HỆ THỐNG QUẢN LÝ CHẤM CÔNG")
         
         # Window size and position
-        w, h = 1000, 650
+        w, h = 1010, 660 # Slightly larger for padding
         screen_w = root.winfo_screenwidth()
         screen_h = root.winfo_screenheight()
         root.geometry(f"{w}x{h}+{(screen_w-w)//2}+{(screen_h-h)//2}")
-        root.resizable(False, False)
+        root.resizable(True, True) # Allow resize
         root.attributes('-topmost', True)
 
         selected_state = [STATE_MENU]
         role_lower = str(self.session_role).lower()
 
         def set_state(state):
+            """Transitions to a state that needs the main loop (OpenCV windows)."""
             selected_state[0] = state
             self.current_state = state
             root.destroy()
+
+        # --- Popup Actions (Don't close dashboard) ---
+        def open_list():
+            from src.main import get_target_company
+            target_cid = get_target_company(self, mongo_db, allow_selection=True, parent=root)
+            if target_cid and attendance:
+                # Same logic as management_app.py to get merged list
+                mongo_employees = mongo_db.get_all_employees(company_id=target_cid)
+                qdrant_employees = attendance.get_all_users(company_id=target_cid)
+                all_employees = []
+                seen_ids = set()
+                for emp in qdrant_employees:
+                    u_id_str = str(emp['user_id'])
+                    if u_id_str not in seen_ids:
+                        all_employees.append({'user_id': u_id_str, 'user_name': emp['user_name'], 'birthday': emp['birthday'], 'has_face': True})
+                        seen_ids.add(u_id_str)
+                for emp in mongo_employees:
+                    if str(emp['user_id']) not in seen_ids:
+                        all_employees.append({'user_id': emp['user_id'], 'user_name': emp['name'], 'birthday': emp.get('birthday', 'N/A'), 'has_face': False})
+                        seen_ids.add(str(emp['user_id']))
+                self.show_user_list_ui(all_employees, parent=root)
+
+        def open_history():
+            from src.main import get_target_company
+            target_cid = get_target_company(self, mongo_db, allow_selection=True, parent=root)
+            if target_cid:
+                target_date = self.get_date_form(title=f"Lịch sử [{target_cid}]", parent=root)
+                if target_date:
+                    logs = mongo_db.get_logs(company_id=target_cid, date=target_date)
+                    self.show_attendance_logs_ui(logs, title=f"Lịch sử - {target_date}", 
+                                               session_role=self.session_role, 
+                                               session_username=self.session_username, 
+                                               parent=root)
+
+        def open_edit():
+            from src.main import handle_edit_logic
+            if attendance and face_rec and camera:
+                handle_edit_logic(attendance, face_rec, self, camera, parent=root)
 
         # --- Sidebar ---
         sidebar = ctk.CTkFrame(root, width=220, corner_radius=0)
@@ -167,7 +221,8 @@ class AttendanceUI:
         ctk.CTkLabel(user_info_frame, text=f"Quyền: {role_lower.upper()}", font=("Arial", 11), text_color="gray").pack(anchor="w")
 
         # Sidebar Buttons
-        ctk.CTkButton(sidebar, text="CÀI ĐẶT HỆ THỐNG", command=lambda: set_state(STATE_SETTINGS), 
+        ctk.CTkButton(sidebar, text="CÀI ĐẶT HỆ THỐNG", 
+                     command=lambda: self.show_system_settings_ui(mongo_db, session_username=self.session_username, parent=root), 
                      fg_color="transparent", border_width=1, hover_color="#333333").pack(side="bottom", fill="x", padx=20, pady=10)
         
         ctk.CTkButton(sidebar, text="ĐĂNG XUẤT", command=lambda: set_state(STATE_LOGOUT), 
@@ -208,7 +263,6 @@ class AttendanceUI:
                 else:
                     service_active = False
             except Exception as e:
-                logger.error(f"Error checking service status: {e}")
                 service_active = False
             
             dot_color = "#28a745" if service_active else "#dc3545"
@@ -243,7 +297,7 @@ class AttendanceUI:
         if role_lower in ['admin', 'company']:
             # 2. Edit User
             ctk.CTkButton(grid_frame, text="CHỈNH SỬA THÔNG TIN", 
-                         command=lambda: set_state(STATE_EDIT),
+                         command=open_edit,
                          height=90, font=("Arial", 15, "bold"),
                          corner_radius=12, fg_color="#5D6D7E", hover_color="#34495E").grid(row=0, column=1, padx=10, pady=10, sticky="nsew")
 
@@ -255,19 +309,24 @@ class AttendanceUI:
 
             # 4. List
             ctk.CTkButton(grid_frame, text="DANH SÁCH NHÂN VIÊN", 
-                         command=lambda: set_state(STATE_LIST),
+                         command=open_list,
                          height=90, font=("Arial", 15, "bold"),
                          corner_radius=12, fg_color="#8E44AD", hover_color="#732D91").grid(row=1, column=1, padx=10, pady=10, sticky="nsew")
 
             # 5. Enroll File
+            def open_enroll_upload():
+                from src.main import enroll_by_upload
+                if face_rec and attendance:
+                    enroll_by_upload(face_rec, attendance, self, parent=root)
+
             ctk.CTkButton(grid_frame, text="ĐĂNG KÝ (FILE ẢNH)", 
-                         command=lambda: set_state(STATE_ENROLL_UPLOAD),
+                         command=open_enroll_upload,
                          height=90, font=("Arial", 15, "bold"),
                          corner_radius=12, fg_color="#16A085", hover_color="#0E6655").grid(row=2, column=0, padx=10, pady=10, sticky="nsew")
 
             # 6. History
             ctk.CTkButton(grid_frame, text="LỊCH SỬ CHẤM CÔNG", 
-                         command=lambda: set_state(STATE_HISTORY),
+                         command=open_history,
                          height=90, font=("Arial", 15, "bold"),
                          corner_radius=12, fg_color="#2E86C1", hover_color="#21618C").grid(row=2, column=1, padx=10, pady=10, sticky="nsew")
 
@@ -276,21 +335,21 @@ class AttendanceUI:
         bottom_frame.pack(fill="x", pady=(20, 0))
 
         if role_lower in ['admin', 'company']:
-            ctk.CTkButton(bottom_frame, text="KẾT NỐI HKB", command=lambda: set_state(STATE_HKB_LIST),
+            ctk.CTkButton(bottom_frame, text="KẾT NỐI HKB", command=lambda: self.show_hkb_connections_ui(parent=root),
                          height=45, corner_radius=8, fg_color="#28B463", hover_color="#1D8348").pack(side="left", padx=5, expand=True, fill="x")
 
         if role_lower == 'admin':
-            ctk.CTkButton(bottom_frame, text="QUẢN LÝ TÀI KHOẢN", command=lambda: set_state(STATE_CLOUD_USER),
+            ctk.CTkButton(bottom_frame, text="QUẢN LÝ TÀI KHOẢN", command=lambda: self.show_user_management_ui(mongo_db, parent=root),
                          height=45, corner_radius=8, fg_color="#5DADE2", hover_color="#2E86C1").pack(side="left", padx=5, expand=True, fill="x")
             
-            ctk.CTkButton(bottom_frame, text="QUẢN LÝ CÔNG TY", command=lambda: set_state(STATE_COMPANY),
+            ctk.CTkButton(bottom_frame, text="QUẢN LÝ CÔNG TY", command=lambda: self.show_company_management_ui(mongo_db, parent=root),
                          height=45, corner_radius=8, fg_color="#A569BD", hover_color="#884EA0").pack(side="left", padx=5, expand=True, fill="x")
 
         root.mainloop()
         return selected_state[0]
 
     @staticmethod
-    def get_user_form(include_upload=False, session_role=None, mongo_db=None):
+    def get_user_form(include_upload=False, session_role=None, mongo_db=None, parent=None):
         """
         Opens a centered tkinter dialog to collect User ID, Name, Birthday, Company, and optionally Photos.
         Returns: (ID, Name, Birthday, file_paths, company_id) or None if cancelled.
@@ -299,7 +358,13 @@ class AttendanceUI:
         from tkinter import messagebox, filedialog, ttk
         
         logger.info("Initializing enrollment form UI...")
-        root = tk.Tk()
+        if parent:
+            root = tk.Toplevel(parent)
+            _apply_icon(root)
+        else:
+            root = tk.Tk()
+            _apply_icon(root)
+            
         root.title("Form Đăng Ký Người Dùng")
         
         # Center the window
@@ -413,8 +478,10 @@ class AttendanceUI:
         tk.Button(root, text="XÁC NHẬN", command=on_submit, width=15, bg="#28a745", fg="white").pack(pady=15)
         
         root.protocol("WM_DELETE_WINDOW", root.destroy)
-        logger.info("Starting form mainloop...")
-        root.mainloop()
+        if not parent:
+            root.mainloop()
+        else:
+            parent.wait_window(root)
         
         if form_data["id"] is None:
             logger.info("Enrollment form closed without submission.")
@@ -430,20 +497,28 @@ class AttendanceUI:
         import tkinter as tk
         from tkinter import simpledialog, messagebox
         root = tk.Tk()
+        _apply_icon(root)
         root.withdraw()
         u_id = simpledialog.askstring("Chỉnh sửa", "Nhập Mã nhân viên cần chỉnh sửa:", parent=root)
         root.destroy()
         return u_id
 
     @staticmethod
-    def get_edit_user_form(current_id, current_name, current_bday, session_role=None):
+    def get_edit_user_form(current_id, current_name, current_bday, session_role=None, parent=None):
         """
         Dialog to edit Name, Birthday, and optionally enroll face.
         """
         import tkinter as tk
         from tkinter import messagebox
 
-        root = tk.Tk()
+        if parent:
+            root = tk.Toplevel(parent)
+            root.transient(parent)
+            _apply_icon(root)
+        else:
+            root = tk.Tk()
+            _apply_icon(root)
+            
         root.title("Chỉnh sửa thông tin")
         
         window_width, window_height = 400, 420
@@ -541,11 +616,15 @@ class AttendanceUI:
         btn_save.pack(pady=5)
         btn_delete.pack(pady=5)
         
-        root.mainloop()
+        if not parent:
+            root.mainloop()
+        else:
+            parent.wait_window(root)
+            
         return result if result["name"] or result["delete"] or result["enroll_camera"] or result["enroll_upload"] else None
 
     @staticmethod
-    def show_user_list_ui(user_list):
+    def show_user_list_ui(user_list, parent=None):
         """
         Modernized list of users using CustomTkinter.
         """
@@ -553,7 +632,14 @@ class AttendanceUI:
         import tkinter as tk
         from tkinter import ttk
 
-        root = ctk.CTk()
+        if parent:
+            root = ctk.CTkToplevel(parent)
+            root.transient(parent)
+            _apply_icon(root)
+        else:
+            root = ctk.CTk()
+            _apply_icon(root)
+            
         root.title("Bittech AI - Danh sách nhân viên")
         root.geometry("800x600")
         root.attributes('-topmost', True)
@@ -588,10 +674,11 @@ class AttendanceUI:
         
         ctk.CTkButton(root, text="ĐÓNG CỬA SỔ", command=root.destroy, width=150, height=40).pack(pady=20)
 
-        root.mainloop()
+        if not parent:
+            root.mainloop()
 
     @staticmethod
-    def pick_company_ui(companies):
+    def pick_company_ui(companies, parent=None):
         """
         Dialog to select a company from a list.
         Returns company_id or None.
@@ -599,7 +686,14 @@ class AttendanceUI:
         import tkinter as tk
         from tkinter import ttk
 
-        root = tk.Tk()
+        if parent:
+            root = tk.Toplevel(parent)
+            root.transient(parent)
+            _apply_icon(root)
+        else:
+            root = tk.Tk()
+            _apply_icon(root)
+            
         root.title("Chọn Công ty")
         root.geometry("400x350")
         root.attributes('-topmost', True)
@@ -627,11 +721,14 @@ class AttendanceUI:
         tree.pack(padx=10, pady=10, fill="both", expand=True)
         tk.Button(root, text="XÁC NHẬN", command=on_select, bg="#28a745", fg="white", width=15).pack(pady=10)
 
-        root.mainloop()
+        if not parent:
+            root.mainloop()
+        else:
+            parent.wait_window(root)
         return selected["id"]
 
     @staticmethod
-    def pick_user_ui(user_list):
+    def pick_user_ui(user_list, parent=None):
         """
         Dialog to select a user from a list.
         Returns user_id or None.
@@ -639,7 +736,14 @@ class AttendanceUI:
         import tkinter as tk
         from tkinter import ttk
 
-        root = tk.Tk()
+        if parent:
+            root = tk.Toplevel(parent)
+            root.transient(parent)
+            _apply_icon(root)
+        else:
+            root = tk.Tk()
+            _apply_icon(root)
+            
         root.title("Chọn Nhân viên")
         root.geometry("600x400")
         root.attributes('-topmost', True)
@@ -680,18 +784,28 @@ class AttendanceUI:
         tk.Button(btn_frame, text="XÁC NHẬN", command=on_select, bg="green", fg="white", width=15).pack(side=tk.LEFT, padx=5)
         tk.Button(btn_frame, text="HỦY", command=root.destroy, width=15).pack(side=tk.LEFT, padx=5)
 
-        root.mainloop()
+        if not parent:
+            root.mainloop()
+        else:
+            parent.wait_window(root)
         return selected["id"]
 
     @staticmethod
-    def get_date_form(title="Chọn ngày"):
+    def get_date_form(title="Chọn ngày", parent=None):
         """
         Dialog to select a date. Returns string YYYY-MM-DD or None.
         """
         import tkinter as tk
         from datetime import datetime
         
-        root = tk.Tk()
+        if parent:
+            root = tk.Toplevel(parent)
+            root.transient(parent)
+            _apply_icon(root)
+        else:
+            root = tk.Tk()
+            _apply_icon(root)
+            
         root.title(title)
         root.geometry("300x180")
         root.attributes('-topmost', True)
@@ -725,7 +839,10 @@ class AttendanceUI:
         tk.Button(btn_frame, text="XÁC NHẬN", command=on_ok, bg="green", fg="white", width=12).pack(side=tk.LEFT, padx=5)
         tk.Button(btn_frame, text="HỦY", command=on_cancel, width=12).pack(side=tk.LEFT, padx=5)
         
-        root.mainloop()
+        if not parent:
+            root.mainloop()
+        else:
+            parent.wait_window(root)
         return result["date"]
 
     @staticmethod
@@ -739,10 +856,12 @@ class AttendanceUI:
 
         if parent:
             root = tk.Toplevel(parent)
+            _apply_icon(root)
             root.transient(parent)
             root.grab_set()
         else:
             root = tk.Tk()
+            _apply_icon(root)
             
         root.title("Chọn Hệ thống Upload")
         root.geometry("600x450")
@@ -789,13 +908,18 @@ class AttendanceUI:
             
         return selected["system"]
 
-    def show_attendance_logs_ui(self, logs, title="Lịch sử điểm danh", session_role=None, session_username="GLOBAL", session_user_id=1):
+    def show_attendance_logs_ui(self, logs, title="Lịch sử điểm danh", session_role=None, session_username="GLOBAL", session_user_id=1, parent=None):
         """Modernized UI to view attendance logs using CustomTkinter."""
         from src.services.hkb_service import hkb_service
         
-        root = ctk.CTk()
-        try: root.iconbitmap("app_icon.ico")
-        except: pass
+        if parent:
+            root = ctk.CTkToplevel(parent)
+            root.transient(parent)
+            _apply_icon(root)
+        else:
+            root = ctk.CTk()
+            _apply_icon(root)
+            
         root.title(f"Bittech AI - {title}")
         root.geometry("1000x650")
         root.attributes('-topmost', True)
@@ -974,17 +1098,24 @@ class AttendanceUI:
             ctk.CTkButton(btn_frame, text="TẢI LÊN HKB", command=on_batch_upload, width=180, fg_color="#28a745", hover_color="#218838").pack(side="left", padx=10)
         ctk.CTkButton(btn_frame, text="ĐÓNG", command=root.destroy, width=120, fg_color="gray").pack(side="left", padx=10)
 
-        root.mainloop()
+        if not parent:
+            root.mainloop()
 
-    def show_hkb_connections_ui(self):
+    def show_hkb_connections_ui(self, parent=None):
         """Modernized UI to manage HKB connections using CustomTkinter."""
         from src.services.hkb_service import hkb_service
         from src.config import AuthServiceConfig
 
         current_user_id = getattr(self, "session_user_id", 1) or 1
-        root = ctk.CTk()
-        try: root.iconbitmap("app_icon.ico")
-        except: pass
+        
+        if parent:
+            root = ctk.CTkToplevel(parent)
+            root.transient(parent)
+            _apply_icon(root)
+        else:
+            root = ctk.CTk()
+            _apply_icon(root)
+            
         root.title("Bittech AI - Kết nối AuthService")
         root.geometry("1100x650")
         root.attributes('-topmost', True)
@@ -1042,7 +1173,7 @@ class AttendanceUI:
             root.config(cursor="watch"); root.update()
             res = hkb_service.get_employees(endpoint=item[3], system_id=item[2], api_key=auth_data["key"], user_id=auth_data.get("user_id", current_user_id))
             root.config(cursor="")
-            if res and res.success: self.show_remote_employees_ui(item[1], res.data, item[2])
+            if res and res.success: self.show_remote_employees_ui(item[1], res.data, item[2], parent=root)
             else: messagebox.showerror("Lỗi", res.message if res else "Thất bại")
 
         btn_frame = ctk.CTkFrame(root, fg_color="transparent")
@@ -1053,15 +1184,23 @@ class AttendanceUI:
         ctk.CTkButton(btn_frame, text="ĐÓNG", command=root.destroy, width=100, fg_color="gray").pack(side=tk.LEFT, padx=10)
         
         refresh_list()
-        root.mainloop()
+        if not parent:
+            root.mainloop()
 
-    def show_remote_employees_ui(self, system_name, employees, target_company_id):
+    def show_remote_employees_ui(self, system_name, employees, target_company_id, parent=None):
         """Modernized UI to view and save remote employees using CustomTkinter."""
         import tkinter as tk
         from tkinter import ttk, messagebox
         import customtkinter as ctk
 
-        root = ctk.CTk()
+        if parent:
+            root = ctk.CTkToplevel(parent)
+            root.transient(parent)
+            _apply_icon(root)
+        else:
+            root = ctk.CTk()
+            _apply_icon(root)
+            
         root.title(f"Nhân viên từ {system_name}")
         root.geometry("1000x700")
         root.attributes('-topmost', True)
@@ -1107,14 +1246,20 @@ class AttendanceUI:
         ctk.CTkButton(btn_frame, text="LƯU TẤT CẢ", command=lambda: save_to_db(False), width=150, fg_color="#17a2b8").pack(side=tk.LEFT, padx=10)
         ctk.CTkButton(btn_frame, text="HỦY", command=root.destroy, width=100, fg_color="gray").pack(side=tk.LEFT, padx=10)
 
-        root.mainloop()
+        if not parent:
+            root.mainloop()
 
-    def show_company_management_ui(self, mongo_db):
+    def show_company_management_ui(self, mongo_db, parent=None):
         """Modernized UI for Company Management (Admin Only) using CustomTkinter."""
 
-        root = ctk.CTk()
-        try: root.iconbitmap("app_icon.ico")
-        except: pass
+        if parent:
+            root = ctk.CTkToplevel(parent)
+            root.transient(parent)
+            _apply_icon(root)
+        else:
+            root = ctk.CTk()
+            _apply_icon(root)
+            
         root.title("Bittech AI - Quản lý công ty")
         root.geometry("800x600")
         root.attributes('-topmost', True)
@@ -1191,14 +1336,20 @@ class AttendanceUI:
         ctk.CTkButton(btn_frame, text="ĐÓNG", command=root.destroy, width=100, fg_color="gray").pack(side=tk.LEFT, padx=10)
         
         refresh()
-        root.mainloop()
+        if not parent:
+            root.mainloop()
 
-    def show_user_management_ui(self, mongo_db):
+    def show_user_management_ui(self, mongo_db, parent=None):
         """Modernized UI to manage system users (Admin Only) using CustomTkinter."""
 
-        root = ctk.CTk()
-        try: root.iconbitmap("app_icon.ico")
-        except: pass
+        if parent:
+            root = ctk.CTkToplevel(parent)
+            root.transient(parent)
+            _apply_icon(root)
+        else:
+            root = ctk.CTk()
+            _apply_icon(root)
+            
         root.title("Bittech AI - Quản lý tài khoản")
         root.geometry("800x600")
         root.attributes('-topmost', True)
@@ -1294,7 +1445,8 @@ class AttendanceUI:
         ctk.CTkButton(btn_frame, text="ĐÓNG", command=root.destroy, width=100, fg_color="gray").pack(side=tk.LEFT, padx=10)
         
         refresh()
-        root.mainloop()
+        if not parent:
+            root.mainloop()
 
     def show_login_dialog(self):
         """
@@ -1304,8 +1456,7 @@ class AttendanceUI:
         # cv2.destroyAllWindows() 
         
         login_root = ctk.CTk()
-        try: login_root.iconbitmap("app_icon.ico")
-        except: pass
+        _apply_icon(login_root)
         login_root.title("Bittech AI - Đăng nhập")
         window_width, window_height = 400, 450
         
@@ -1368,11 +1519,16 @@ class AttendanceUI:
         return login_status["authenticated"]
 
     @staticmethod
-    def show_system_settings_ui(mongo_db, session_username="GLOBAL"):
+    def show_system_settings_ui(mongo_db, session_username="GLOBAL", parent=None):
         """Modernized UI to manage settings like Group Keys and Camera using CustomTkinter."""
-        root = ctk.CTk()
-        try: root.iconbitmap("app_icon.ico")
-        except: pass
+        if parent:
+            root = ctk.CTkToplevel(parent)
+            root.transient(parent)
+            _apply_icon(root)
+        else:
+            root = ctk.CTk()
+            _apply_icon(root)
+            
         root.title("Bittech AI - Cài đặt hệ thống")
         root.geometry("650x600")
         root.attributes('-topmost', True)
@@ -1449,7 +1605,8 @@ class AttendanceUI:
         ctk.CTkButton(btn_frame, text="LƯU CÀI ĐẶT", command=save_settings, width=180, height=40, font=("Arial", 13, "bold")).pack(side=tk.LEFT, padx=10)
         ctk.CTkButton(btn_frame, text="ĐÓNG", command=root.destroy, width=120, height=40, fg_color="gray", hover_color="#555555").pack(side=tk.LEFT, padx=10)
 
-        root.mainloop()
+        if not parent:
+            root.mainloop()
 
     @staticmethod
     def draw_status_bar(frame, fps, processing_time):

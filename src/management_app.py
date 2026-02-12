@@ -49,7 +49,7 @@ def main():
 
     # --- 1. HIỆN MÀN HÌNH LOADING NGAY LẬP TỨC ---
     # Tạo cửa sổ OpenCV và phóng to ngay
-    win_loading = "Phần Mềm Quản Lý Chấm Công"
+    win_loading = "BITTECH AI SYSTEM"
     cv2.namedWindow(win_loading, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(win_loading, 1280, 720)
     
@@ -114,13 +114,13 @@ def main():
         root.destroy()
         return
 
-    win_name = "Phần Mềm Quản Lý Chấm Công"
+    win_name = "BITTECH AI SYSTEM"
     # Close loading window before showing login dialog to keep UI clean
     try: cv2.destroyAllWindows()
     except: pass
 
     # Initial Login Loop
-    while True:
+    while True:     
         login_res = ui.show_login_dialog()
         if login_res == "EXIT":
             logger.info("Người dùng chọn thoát tại màn hình đăng nhập.")
@@ -164,7 +164,7 @@ def main():
                 except: pass
                 
                 # Show modern dashboard (Blocks until action selected)
-                ui.show_main_dashboard(mongo_db, service_active=service_active)
+                ui.show_main_dashboard(mongo_db, attendance=attendance, face_rec=face_rec, camera=camera, service_active=service_active)
                 
                 # Only recreate window if we are moving to a state that actually needs it
                 # Enrollment (Cam) handles its own window, Detect needs the main win_name
