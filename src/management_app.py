@@ -183,40 +183,43 @@ def main():
                         from multiprocessing import shared_memory
                         # Connect or Reset SHM
                         if not hasattr(main, 'shm_obj') or main.shm_obj is None:
-                            try:
-                                main.shm_obj = shared_memory.SharedMemory(name="bittech_monitor_shm")
-                            except:
-                                main.shm_obj = None
+                            try: main.shm_obj = shared_memory.SharedMemory(name="bittech_monitor_shm")
+                            except: main.shm_obj = None
                         
                         if main.shm_obj is not None:
-                            # 1. READ SEQUENCE START
                             seq1 = int(main.shm_obj.buf[0])
-                            
-                            # Valid data only if sequence is EVEN
-                            if seq1 % 2 == 0:
-                                # 2. Read size
-                                size_bytes = main.shm_obj.buf[1:5]
-                                size = np.frombuffer(size_bytes, dtype=np.uint32)[0]
+                            # Only read if sequence is EVEN and NOT zero (Service has written at least once)
+                            if seq1 % 2 == 0 and seq1 > 0:
+                                fmt = main.shm_obj.buf[1]
+                                seq2 = int(main.shm_obj.buf[0])
                                 
-                                # Safety check for size
-                                if 100 < size < 4.8 * 1024 * 1024:
-                                    # 3. Read JPEG data
-                                    img_data = bytes(main.shm_obj.buf[5:5+size])
-                                    
-                                    # 4. READ SEQUENCE END
-                                    seq2 = int(main.shm_obj.buf[0])
-                                    
-                                    # Confirm data was NOT changed during read
-                                    if seq1 == seq2:
-                                        nparr = np.frombuffer(img_data, dtype=np.uint8)
-                                        # Use high-performance imdecode
-                                        decoded = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                                        if decoded is not None:
-                                            preview_img = decoded
-                                            main.last_valid_frame = preview_img
+                                if seq1 == seq2:
+                                    if fmt == 1: # RAW MODE (Ultra Smooth)
+                                        # Cast to standard int to prevent numpy overflow
+                                        w = int(np.frombuffer(main.shm_obj.buf[2:4], dtype=np.uint16)[0])
+                                        h = int(np.frombuffer(main.shm_obj.buf[4:6], dtype=np.uint16)[0])
+                                        
+                                        # Validate resolution before processing
+                                        if 100 < w < 4000 and 100 < h < 4000:
+                                            size = w * h * 3
+                                            if 0 < size < 4.8 * 1024 * 1024:
+                                                img_data = bytes(main.shm_obj.buf[10:10+size])
+                                                preview_img = np.frombuffer(img_data, dtype=np.uint8).reshape((h, w, 3))
+                                                main.last_valid_frame = preview_img
+                                    else: # JPEG FALLBACK
+                                        size = int(np.frombuffer(main.shm_obj.buf[1:5], dtype=np.uint32)[0])
+                                        if 100 < size < 4.8 * 1024 * 1024:
+                                            img_data = bytes(main.shm_obj.buf[5:5+size])
+                                            nparr = np.frombuffer(img_data, dtype=np.uint8)
+                                            decoded = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                                            if decoded is not None:
+                                                preview_img = decoded
+                                                main.last_valid_frame = preview_img
                     except Exception as e:
-                        # Reset SHM object on any error to self-heal
                         main.shm_obj = None
+                else:
+                    # Cleanup SHM
+                    main.shm_obj = None
 
                 # --- ULTIMATE FLICKER & FREEZE PREVENTION ---
                 if preview_img is None and hasattr(main, 'last_valid_frame'):

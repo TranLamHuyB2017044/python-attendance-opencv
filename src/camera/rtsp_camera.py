@@ -99,8 +99,8 @@ class RTSPCamera:
         try:
             logger.info(f"Attempting to connect to {'webcam' if self.is_webcam else 'RTSP camera'}...")
             
-            # Use timeout connection
-            self.cap = self._connect_with_timeout(timeout_seconds=10)
+            # Use timeout connection (reduced from 10s to 5s to prevent long hangs)
+            self.cap = self._connect_with_timeout(timeout_seconds=5)
             
             if self.cap is None or not self.cap.isOpened():
                 logger.error(f"Failed to open {'webcam' if self.is_webcam else 'RTSP stream'}")
@@ -127,6 +127,14 @@ class RTSPCamera:
             if self.is_connected and self.cap is not None:
                 ret, frame = self.cap.read()
                 if ret:
+                    # Apply Flip if configured
+                    if CameraConfig.FLIP_H and CameraConfig.FLIP_V:
+                        frame = cv2.flip(frame, -1) # Both
+                    elif CameraConfig.FLIP_H:
+                        frame = cv2.flip(frame, 1)  # Horizontal
+                    elif CameraConfig.FLIP_V:
+                        frame = cv2.flip(frame, 0)  # Vertical
+                        
                     with self.lock:
                         self.frame = frame
                 else:

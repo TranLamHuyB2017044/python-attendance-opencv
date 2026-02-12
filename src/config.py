@@ -68,6 +68,8 @@ class CameraConfig:
     WIDTH: int = int(os.getenv("CAMERA_WIDTH", "1280"))
     HEIGHT: int = int(os.getenv("CAMERA_HEIGHT", "720"))
     FPS: int = int(os.getenv("CAMERA_FPS", "30"))
+    FLIP_H: bool = os.getenv("CAMERA_FLIP_H", "false").lower() == "true"
+    FLIP_V: bool = os.getenv("CAMERA_FLIP_V", "false").lower() == "true"
     CAMERA_NAME: str = os.getenv("CAMERA_NAME", "Main Camera")
     ROI_SIZE: Tuple[int, int] = (1280, 720) # Match default resolution, no cropping
     

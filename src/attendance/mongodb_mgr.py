@@ -1,5 +1,5 @@
 import pymongo
-from datetime import datetime
+import datetime
 from loguru import logger
 import cv2
 import numpy as np
@@ -66,7 +66,7 @@ class MongoDBManager:
         try:
             self.settings.update_one(
                 {"key": key, "username": username},
-                {"$set": {"value": value, "updated_at": datetime.utcnow()}},
+                {"$set": {"value": value, "updated_at": datetime.datetime.utcnow()}},
                 upsert=True
             )
             return True
@@ -74,7 +74,39 @@ class MongoDBManager:
             logger.error(f"Failed to set setting {key} for user {username}: {e}")
             return False
 
-    def log_attendance(self, user_id, user_name, status=None, frame=None, company_id=None):
+    def get_attendance_status(self, user_id, company_id=None):
+        """Checks the last log to determine if user should be IN, OUT or COOLDOWN."""
+        try:
+            from src.utils.time_manager import time_mgr
+            _, date_str = time_mgr.get_formatted_time()
+            cid = company_id or MongoDbConfig.COMPANY_ID
+            
+            last_record = self.logs.find_one(
+                {"user_id": user_id, "company_id": cid, "date": date_str},
+                sort=[("_id", -1)]
+            )
+            
+            if last_record:
+                last_time = last_record.get("created_at")
+                if last_time:
+                    if isinstance(last_time, str):
+                        try: last_time = datetime.datetime.fromisoformat(last_time)
+                        except: last_time = None
+                    
+                    if last_time:
+                        elapsed = (datetime.datetime.utcnow() - last_time).total_seconds()
+                        if elapsed < 900: # 15 mins cooldown
+                            return 'COOLDOWN'
+                
+                # Alternate IN/OUT
+                return 'OUT' if last_record.get('status') == 'IN' else 'IN'
+            
+            return 'IN' # First time today
+        except Exception as e:
+            logger.error(f"MongoDB: Error getting status: {e}")
+            return 'IN'
+
+    def log_attendance(self, user_id, user_name, status=None, frame=None, company_id=None, unknown_attempt=0):
         """
         Record a new attendance entry to MongoDB Cloud.
         """
@@ -95,38 +127,37 @@ class MongoDBManager:
                 except Exception as e:
                     logger.error(f"MongoDB: Failed to compress image: {e}")
 
-            # Determine IN/OUT status if not provided (Local logic shifted to Cloud context)
+            # Determine status logic...
             if user_id == "Unknown":
                 status = "FAILED"
             else:
-                # --- ADDED: 15-MINUTE PERSISTENT COOLDOWN ---
-                # Find last record of THIS user in THIS company TODAY
+                # --- COOLDOWN & IN/OUT LOGIC ---
                 last_record = self.logs.find_one(
                     {"user_id": user_id, "company_id": cid, "date": date_str},
                     sort=[("_id", -1)]
                 )
                 
                 if last_record:
-                    # Check cooldown (Default 900s = 15 mins)
+                    # Check cooldown
                     last_time = last_record.get("created_at")
                     if last_time:
-                        if isinstance(last_time, str): # Handle legacy string timestamps
-                            try: last_time = datetime.fromisoformat(last_time)
+                        if isinstance(last_time, str):
+                            try: last_time = datetime.datetime.fromisoformat(last_time)
                             except: last_time = None
                         
                         if last_time:
-                            elapsed = (datetime.utcnow() - last_time).total_seconds()
-                            if elapsed < 900: # 15 minutes
+                            elapsed = (datetime.datetime.utcnow() - last_time).total_seconds()
+                            if elapsed < 900: # 15 mins
                                 logger.warning(f"MongoDB: Cooldown active for {user_name} ({int(elapsed)}s < 900s). Skip saving log.")
-                                return last_record.get("status") # Return existing status without saving
+                                return last_record.get("status")
                 
-                # Determine status if not provided
+                # Determine IN/OUT if not provided
                 if status is None:
                     if not last_record or last_record.get('status') in ['OUT', 'FAILED']:
                         status = 'IN'
                     else:
                         status = 'OUT'
-
+            
             import uuid
             log_entry = {
                 "user_id": user_id,
@@ -136,9 +167,10 @@ class MongoDBManager:
                 "status": status,
                 "company_id": cid,
                 "image_webp": image_blob,
-                "session_id": str(uuid.uuid4()),  # Unique ID for this attendance record
-                "uploaded_to": [],  # List of system_ids this has been uploaded to
-                "created_at": datetime.utcnow()
+                "unknown_attempt": unknown_attempt,
+                "session_id": str(uuid.uuid4()),
+                "uploaded_to": [],
+                "created_at": datetime.datetime.utcnow()
             }
             
             self.logs.insert_one(log_entry)
@@ -157,36 +189,28 @@ class MongoDBManager:
         """
         Triggers a background thread to upload the log to HKB services.
         - Employees: Synchronized to their respective company's HKB services.
-        - Strangers (Unknown): Synchronized to ALL connected HKB services (Global alert).
+        - Strangers (Unknown): Synchronized ONLY on 5th and 10th attempt.
         """
         import threading
         
         def sync_task():
             try:
-                # Try to import HKB service - may not be available in all builds
-                try:
-                    from src.services.hkb_service import hkb_service
-                except ImportError as ie:
-                    logger.warning(f"Sync: HKB service not available (missing dependency): {ie}")
-                    return
+                try: from src.services.hkb_service import hkb_service
+                except ImportError: return
                 
                 user_id = log_entry.get("user_id")
                 cid = log_entry.get("company_id")
+                attempt = log_entry.get("unknown_attempt", 0)
                 
                 if user_id == "Unknown":
-                    # 1. Nếu là người lạ, lấy tất cả các dịch vụ HKB đã kết nối trong hệ thống
-                    logger.info("Sync: Stranger detected! Broadcasting to all connected HKB systems...")
-                    services = list(self.auth_services.find({}))
+                    # STRANGER SYNC POLICY: LOCAL ONLY (Do not sync to cloud)
+                    logger.debug(f"Sync: Stranger detected (Attempt {attempt}). Saving locally only, skipping cloud sync.")
+                    return
                 else:
-                    # 2. Nếu là nhân viên, tìm tất cả các công ty mà nhân viên này thuộc về
+                    # Known User Sync
                     user_companies = self.get_user_company_ids(user_id)
-                    
-                    # Đảm bảo cid hiện tại (từ log) cũng nằm trong danh sách đồng bộ
                     if cid and cid not in user_companies:
                         user_companies.append(str(cid))
-                    
-                    logger.debug(f"Sync: Fetching HKB services for company IDs: {user_companies}")
-                    # Tìm tất cả các dịch vụ HKB tương ứng với danh sách công ty này
                     services = list(self.auth_services.find({"uuid": {"$in": user_companies}}))
                 
                 if not services:
@@ -282,11 +306,11 @@ class MongoDBManager:
                 "name": name,
                 "birthday": birthday,
                 "company_id": company_id,
-                "updated_at": datetime.utcnow()
+                "updated_at": datetime.datetime.utcnow()
             }
             self.employees.update_one(
                 {"user_id": user_id, "company_id": company_id},
-                {"$set": employee_data, "$setOnInsert": {"created_at": datetime.utcnow()}},
+                {"$set": employee_data, "$setOnInsert": {"created_at": datetime.datetime.utcnow()}},
                 upsert=True
             )
             # logger.info(f"MongoDB: Saved employee metadata for {name} (ID: {user_id})")
@@ -336,9 +360,9 @@ class MongoDBManager:
                     "$set": {
                         "name": name,
                         "description": description,
-                        "updated_at": datetime.utcnow()
+                        "updated_at": datetime.datetime.utcnow()
                     },
-                    "$setOnInsert": {"created_at": datetime.utcnow()}
+                    "$setOnInsert": {"created_at": datetime.datetime.utcnow()}
                 },
                 upsert=True
             )
@@ -358,7 +382,7 @@ class MongoDBManager:
                 "password": password,
                 "role": role,
                 "company_id": company_id,
-                "created_at": datetime.utcnow()
+                "created_at": datetime.datetime.utcnow()
             })
             return True, "Success"
         except Exception as e:
@@ -369,13 +393,23 @@ class MongoDBManager:
         return list(self.companies.find().sort("name", 1))
 
     def get_company_name(self, company_id):
-        """Retrieve company name from its ID."""
+        """Retrieve company name from its ID (with cache)."""
+        if not hasattr(self, '_company_name_cache'):
+            self._company_name_cache = {}
+            
         try:
             if not company_id or company_id == "admin":
                 return "Admin"
+            
+            # Use Cache
+            if company_id in self._company_name_cache:
+                return self._company_name_cache[company_id]
+                
             company = self.companies.find_one({"company_id": str(company_id)})
             if company:
-                return company.get("name", str(company_id))
+                name = company.get("name", str(company_id))
+                self._company_name_cache[company_id] = name
+                return name
             return str(company_id)
         except Exception:
             return str(company_id)
@@ -405,11 +439,11 @@ class MongoDBManager:
         try:
             # data should follow src.models.auth_services.AuthService structure
             query = {"uuid": data["uuid"]}
-            data["updated_at"] = datetime.utcnow()
+            data["updated_at"] = datetime.datetime.utcnow()
             
             self.auth_services.update_one(
                 query, 
-                {"$set": data, "$setOnInsert": {"created_at": datetime.utcnow()}}, 
+                {"$set": data, "$setOnInsert": {"created_at": datetime.datetime.utcnow()}}, 
                 upsert=True
             )
             logger.success(f"Saved auth service connection: {data.get('app_name')} ({data['uuid']})")
@@ -431,7 +465,7 @@ class MongoDBManager:
             if details:
                 # Store full history if needed, or just last status
                 details["system_id"] = system_id
-                details["timestamp"] = datetime.utcnow()
+                details["timestamp"] = datetime.datetime.utcnow()
                 update_data["$push"] = {"upload_history": details}
 
             result = self.logs.update_many(

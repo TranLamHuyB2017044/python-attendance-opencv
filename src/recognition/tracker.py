@@ -57,7 +57,11 @@ class FaceTracker:
                     self.unknown_webhook_count += 1
                     logger.warning(f"Sending unknown webhook #{self.unknown_webhook_count}/{self.unknown_webhook_limit}")
                 else:
-                    # Known user - check 15 minute cooldown
+                    # Known user - check 15 minute cooldown (Database Persistent + Local Memory)
+                    if status == 'COOLDOWN':
+                        logger.debug(f"Webhook blocked for {user_name} (Database Cooldown active)")
+                        return
+
                     if user_id in self.webhook_sent_time:
                         last_sent = self.webhook_sent_time[user_id]
                         elapsed = current_time - last_sent
@@ -118,78 +122,68 @@ class FaceTracker:
     def _get_center(self, bbox):
         return (int((bbox[0] + bbox[2]) / 2), int((bbox[1] + bbox[3]) / 2))
 
-    def _save_log_with_bbox(self, frame, face, user_id, user_name, score, is_known=True, status=None, company_id=None):
-        """
-        Draws a bounding box and saves/logs the frame.
-        """
-        if frame is None:
-            return None, None
-
-        # Draw box on a copy
-        annotated_frame = frame.copy()
+    def _save_log_with_bbox(self, frame, face, user_id, user_name, score, is_known=True, status=None, company_id=None, unknown_attempt=0):
+        """Sync state check + Async heavy saving."""
+        if frame is None: return None, None
+        
+        from src.attendance.mongodb_mgr import mongo_db
+        # 1. IMMEDIATE SYNC CHECK (Fast)
+        final_status = status
+        if is_known and status is None:
+            # Important: pass company_id to check the correct log collection
+            final_status = mongo_db.get_attendance_status(user_id, company_id=company_id) 
+        
+        # 2. Visual Prep
+        log_frame = frame.copy()
         bbox = face.bbox.astype(int)
-        color = (0, 255, 0) if is_known else (0, 255, 255) # Green for known, Yellow for unknown
-        cv2.rectangle(annotated_frame, (bbox[0], bbox[1]), (bbox[2], bbox[3]), color, 2)
+        color = (0, 255, 0) if is_known else (0, 255, 255)
+        cv2.rectangle(log_frame, (bbox[0], bbox[1]), (bbox[2], bbox[3]), color, 2)
         
-        # Add label
-        user_name_no_accents = remove_accents(user_name)
-        label = f"{user_name_no_accents} ({score:.2f})"
-        cv2.putText(annotated_frame, label, (bbox[0], bbox[1] - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+        def async_save_task():
+            try:
+                from src.config import RecognitionConfig, CAPTURES_DIR, ApiConfig, CameraConfig
+                # Add overlays to the copy
+                ts, _ = time_mgr.get_formatted_time()
+                label = f"{remove_accents(user_name)} ({score:.2f})"
+                if not is_known and unknown_attempt > 0:
+                    label = f"Nguoi la #{unknown_attempt} ({score:.2f})"
+                
+                cv2.putText(log_frame, label, (bbox[0], bbox[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                cv2.putText(log_frame, f"{CameraConfig.CAMERA_NAME} | {ts}", (20, log_frame.shape[0]-20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1)
 
-        # Add timestamp and camera name overlay
-        ts, _ = time_mgr.get_formatted_time()
-        overlay_text = f"{CameraConfig.CAMERA_NAME} | {ts}"
-        # Draw at bottom right
-        font_scale = 0.5
-        thickness = 1
-        (tw, th), baseline = cv2.getTextSize(overlay_text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
-        tx = annotated_frame.shape[1] - tw - 10
-        ty = annotated_frame.shape[0] - 10
-        
-        # Draw background for better visibility
-        cv2.rectangle(annotated_frame, (tx - 5, ty - th - 5), (tx + tw + 5, ty + 5), (0, 0, 0), -1)
-        cv2.putText(annotated_frame, overlay_text, (tx, ty),
-                    cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), thickness)
+                # Heavy Resize & Path Setup
+                max_w = RecognitionConfig.CAPTURE_MAX_WIDTH
+                h, w = log_frame.shape[:2]
+                save_frame = cv2.resize(log_frame, (max_w, int(h * (max_w/w)))) if w > max_w else log_frame
+                
+                raw_company_name = mongo_db.get_company_name(company_id) if company_id else "unknown_company"
+                company_folder = remove_accents(raw_company_name).replace(" ", "_")
+                
+                # Tạo thư mục con theo tên người (thư mục tên)
+                if is_known:
+                    user_folder = f"{remove_accents(user_name).replace(' ','_')}_{user_id}"
+                    target_dir = CAPTURES_DIR / company_folder / user_folder
+                else:
+                    target_dir = CAPTURES_DIR / company_folder / "Nguoi_La"
+                
+                target_dir.mkdir(parents=True, exist_ok=True)
 
-        # --- RESIZE CAPTURE BEFORE SAVING ---
-        max_w = RecognitionConfig.CAPTURE_MAX_WIDTH
-        h, w = annotated_frame.shape[:2]
-        if w > max_w:
-            scale = max_w / w
-            target_h = int(h * scale)
-            annotated_frame = cv2.resize(annotated_frame, (max_w, target_h))
-            logger.debug(f"Image resized from {w}x{h} to {max_w}x{target_h} for sync.")
+                # Tên ảnh chỉ cần timestamp vì đã nằm trong thư mục tên
+                img_name = f"{int(time.time())}.webp"
+                img_path = str(target_dir / img_name)
+                
+                # Heavy Disk Write
+                cv2.imwrite(img_path, save_frame, [int(cv2.IMWRITE_WEBP_QUALITY), 70])
+                # Actual DB Commit
+                mongo_db.log_attendance(user_id, user_name, status=status, frame=save_frame, company_id=company_id, unknown_attempt=unknown_attempt)
+            except Exception as e:
+                logger.error(f"Async log error: {e}")
 
-        # Determine image subdirectory (by company name instead of uuid)
-        current_time = time.time()
+        # Start background saving
+        threading.Thread(target=async_save_task, daemon=True).start()
         
-        raw_company_name = mongo_db.get_company_name(company_id) if company_id else "unknown_company"
-        # Make folder name safe (remove accents, spaces to underscores)
-        company_folder = remove_accents(raw_company_name).replace(" ", "_")
-        
-        target_dir = CAPTURES_DIR / company_folder
-        target_dir.mkdir(parents=True, exist_ok=True)
-
-        if is_known:
-            safe_name = remove_accents(user_name).replace(" ", "_")
-            img_name = f"{safe_name}_{user_id}_{int(current_time)}.webp"
-        else:
-            img_name = f"unknown_{int(current_time)}.webp"
-        
-        img_path = str(target_dir / img_name)
-        # Use WebP with quality 75 for balance between size and quality
-        cv2.imwrite(img_path, annotated_frame, [int(cv2.IMWRITE_WEBP_QUALITY), 75])
-        
-        # Log to MongoDB with the annotated frame
-        res_status = mongo_db.log_attendance(user_id, user_name, status=status, frame=annotated_frame, company_id=company_id)
-        
-        if not is_known:
-            logger.debug(f"Unknown face log saved. Status: {res_status}, Company: {company_id}")
-            
-        # The relative URL for the API should now include the company folder
-        url = f"{ApiConfig.BASE_URL}/captures/{company_folder}/{img_name}"
-        return url, res_status
+        # Return the actual REAL status so Voice says it right
+        return "processing_url", final_status
 
     def update(self, detected_faces, attendance_mgr, frame=None, company_id=None, only_recognize=False):
         """
@@ -339,7 +333,10 @@ class FaceTracker:
                         # Gửi Webhook và ghi log DB cho người lạ (max 10 lần, reset khi có người checkin)
                         logger.warning(f"Unknown face detected (Attempt {f_data['unknown_attempts']}).")
                         self._send_user_webhook("Unknown", f"Nguoi la {f_data['unknown_attempts']}", "unknown", is_unknown=True)
-                        self._save_log_with_bbox(frame, face, "Unknown", "Người lạ", user_data.get('score', 0.0), is_known=False, status="FAILED", company_id=active_company)
+                        self._save_log_with_bbox(frame, face, "Unknown", "Người lạ", 
+                                                score=0.0, is_known=False, 
+                                                status="FAILED", company_id=active_company,
+                                                unknown_attempt=f_data['unknown_attempts'])
                         
                         if f_data['unknown_attempts'] >= 10:
                             f_data['status'] = 'UNAUTHORIZED'

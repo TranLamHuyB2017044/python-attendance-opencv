@@ -576,9 +576,7 @@ class AttendanceUI:
         tree.column("id", width=100)
         tree.column("name", width=250)
 
-        # Add "ALL" option for convenience
-        tree.insert("", tk.END, values=("ALL", "--- TẤT CẢ CÔNG TY ---"))
-        
+        # companies list contains company objects
         for c in companies:
             tree.insert("", tk.END, values=(c.get('company_id'), c.get('name')))
 

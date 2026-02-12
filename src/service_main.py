@@ -52,29 +52,32 @@ except Exception as e:
     shm = None
 
 def write_frame_to_shm(frame):
-    """Writes JPEG bytes into the Shared Memory buffer with a sequence counter."""
+    """Writes RAW pixels into Shared Memory for zero-CPU display (Ultra smooth)."""
     global shm
     if shm is None or frame is None: return
     try:
-        # 1. Encode to JPEG
-        ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
-        if not ret: return
-        
-        data = buffer.tobytes()
+        # 1. Prepare Metadata
+        h, w = frame.shape[:2]
+        data = frame.tobytes()
         size = len(data)
         
-        if size > SHM_SIZE - 10:
+        if size > SHM_SIZE - 20: # Safety margin
             return
             
-        # 2. Get current sequence and increment to ODD (Signals "Work in Progress")
+        # 2. Update sequence (ODD = Writing)
         current_seq = shm.buf[0]
         shm.buf[0] = (current_seq + 1) % 255
         
-        # 3. Write Size (offset 1) and Data (offset 5)
-        shm.buf[1:5] = np.array([size], dtype=np.uint32).tobytes()
-        shm.buf[5:5+size] = data
+        # 3. Write Format (Offset 1): 1 = RAW
+        shm.buf[1] = 1
+        # Write W, H (Offset 2, 4)
+        shm.buf[2:4] = np.array([w], dtype=np.uint16).tobytes()
+        shm.buf[4:6] = np.array([h], dtype=np.uint16).tobytes()
         
-        # 4. Increment to EVEN (Signals "Done / Valid Data")
+        # 4. Write Pixel Data (Offset 10)
+        shm.buf[10:10+size] = data
+        
+        # 5. Done (EVEN = Valid)
         shm.buf[0] = (current_seq + 2) % 255
     except Exception as e:
         logger.debug(f"SHM Write error: {e}")
@@ -95,6 +98,22 @@ def main():
     from src.utils.single_instance import force_single_instance
     force_single_instance("CameraService")
 
+    # --- INITIALIZE VARIABLES ---
+    from src.config import DATA_DIR, CameraConfig
+    import cv2
+    import os
+    import threading
+    
+    preview_path = DATA_DIR / "camera_preview.jpg"
+    frame_count = 0
+    process_every_n_frames = 3
+    faces = []
+    ai_busy = False
+    last_preview_time = 0
+    # Match camera FPS for preview (limit to 15-25 for stability)
+    preview_fps = max(15, min(25, CameraConfig.FPS))
+    preview_interval = 1.0 / preview_fps 
+
     try:
         face_rec = FaceRecognition()
         attendance = QdrantAttendanceManager()
@@ -105,7 +124,6 @@ def main():
         from src.utils.notification import show_info_message
         show_info_message("Bittech Camera Service", "DỊCH VỤ CAMERA ĐÃ BẬT THÀNH CÔNG!\n\nHệ thống đang chạy ẩn và sẽ tự động điểm danh.")
         
-        # Log version or info
         logger.info("Service is now running in the background.")
         
     except Exception as e:
@@ -114,94 +132,91 @@ def main():
         show_error_message("Lỗi Dịch Vụ AI", f"Không thể khởi động dịch vụ AI:\n{error_msg}")
         return
 
-    logger.info("System initialized. Processing camera feed...")
-    
-    from src.config import DATA_DIR
-    import cv2
-    import os
-    
-    preview_path = DATA_DIR / "camera_preview.jpg"
-
-    # --- FRAME SKIPPING LOGIC ---
-    frame_count = 0
-    process_every_n_frames = 3 # Only run AI every 3 frames
-    faces = []
-
-    try:
+    # --- NON-BLOCKING HEARTBEAT THREAD ---
+    def heartbeat_loop():
+        from src.attendance.mongodb_mgr import mongo_db
+        from src.config import MongoDbConfig
         while True:
-            current_time = time.time()
-            
-            # 1. UPDATE HEARTBEAT (Once every loop is fine, or simple interval)
             try:
-                from src.config import MongoDbConfig
-                from src.attendance.mongodb_mgr import mongo_db
-                
-                # Update heartbeat in MongoDB
                 cam_status = "running" if camera.is_connected else "waiting_camera"
                 mongo_db.db.system_status.update_one(
                     {"type": "camera_service", "company_id": MongoDbConfig.COMPANY_ID},
                     {"$set": {
-                        "last_seen": current_time, 
+                        "last_seen": time.time(), 
                         "status": cam_status,
                         "camera_connected": camera.is_connected
                     }},
                     upsert=True
                 )
             except Exception as e:
-                logger.warning(f"Failed to update status: {e}")
+                logger.warning(f"Heartbeat error: {e}")
+            time.sleep(5)
+
+    threading.Thread(target=heartbeat_loop, daemon=True).start()
+
+    # --- PERSISTENT AI WORKER ---
+    import queue
+    ai_queue = queue.Queue(maxsize=1) 
+    
+    def ai_worker_persistent():
+        while True:
+            try:
+                ai_frame = ai_queue.get()
+                if ai_frame is None: break
+                
+                # Heavy AI Tasks
+                detected = face_rec.detect_and_extract(ai_frame)
+                tracker.update(detected, attendance, ai_frame)
+                
+                # Update shared list
+                faces[:] = detected 
+            except Exception as e:
+                logger.error(f"AI Worker error: {e}")
+            finally:
+                ai_queue.task_done()
+
+    threading.Thread(target=ai_worker_persistent, daemon=True).start()
+    logger.info("System initialized. Processing camera at high speed...")
+
+    try:
+        while True:
+            current_time = time.time()
             
-            # 2. CAMERA CONNECTION LOGIC
+            # 1. CAMERA CHECK
             if not camera.is_connected:
-                if not camera.connect():
-                    logger.warning("Camera not connected. Creating waiting preview...")
-                    try:
-                        import numpy as np
-                        waiting_frame = np.zeros((720, 1280, 3), dtype=np.uint8)
-                        cv2.putText(waiting_frame, "MAT KET NOI CAMERA (RTSP ERROR)", (350, 320), 
-                                    cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
-                        cv2.putText(waiting_frame, f"Dang thu lai: {time.strftime('%H:%M:%S')}", (480, 380), 
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (200, 200, 200), 2)
-                        
-                        # Ghi vào cả File và RAM để App quản lý nhận được
-                        write_frame_to_shm(waiting_frame)
-                        cv2.imwrite(str(preview_path), waiting_frame, [cv2.IMWRITE_JPEG_QUALITY, 50])
-                    except Exception as e:
-                        logger.error(f"Failed to create waiting preview: {e}")
-                    
-                    time.sleep(5) # Giảm xuống 5s để phản hồi nhanh hơn
+                camera.connect() 
+                if not camera.is_connected:
+                    time.sleep(1)
                     continue
-            
+
+            # 2. READ FRAME
             success, frame = camera.read_frame()
             if not success or frame is None:
                 continue
 
-            frame_count += 1
-            
-            # 1. AI Detection (Run only every N frames to save CPU)
-            if frame_count % process_every_n_frames == 0:
-                faces = face_rec.detect_and_extract(frame)
-            
-            # 2. Logic & Tracking (Always run)
-            tracker.update(faces, attendance, frame)
-            
-            # --- UPDATE PREVIEW WITH ACTUAL CAMERA FEED ---
-            try:
-                # 1. Draw results for preview
-                annotated_preview = face_rec.draw_faces(frame, faces)
-                
-                # 2. Prepare high-quality preview (1280x720 for Full Screen)
-                preview_frame = cv2.resize(annotated_preview, (1280, 720))
-                
-                # Update Shared Memory for Monitoring (Ultra stable local IPC)
-                write_frame_to_shm(preview_frame.copy())
-                
-                # Still write to file as fallback for some parts of the system
-                cv2.imwrite(str(preview_path), preview_frame, [cv2.IMWRITE_JPEG_QUALITY, 50])
-            except Exception as e:
-                logger.warning(f"Failed to update preview: {e}")
+            # 3. PRIORITY PREVIEW (Syncing boxes with correct resolution)
+            if current_time - last_preview_time >= preview_interval:
+                try:
+                    # DRAW FIRST on original resolution to keep boxes correct
+                    if faces:
+                        annotated_full = face_rec.draw_faces(frame.copy(), faces)
+                    else:
+                        annotated_full = frame
+                    
+                    # THEN RESIZE for monitor performance
+                    preview_frame = cv2.resize(annotated_full, (960, 540))
+                    
+                    write_frame_to_shm(preview_frame)
+                    last_preview_time = current_time
+                except: pass
 
-            # Small sleep to manage CPU usage
-            time.sleep(0.01)
+            # 4. ASYNC AI TRIGGER (Queue based)
+            if ai_queue.empty():
+                try:
+                    ai_queue.put_nowait(frame.copy())
+                except: pass
+
+            time.sleep(0.001) 
 
     except KeyboardInterrupt:
         logger.info("Service stopping...")
