@@ -50,7 +50,11 @@ class FaceRecognition:
                 providers=['CPUExecutionProvider'] # Forcing CPU as requested
             )
             self.app.prepare(ctx_id=ctx_id, det_size=self.det_size, det_thresh=self.det_thresh)
-            logger.success(f"InsightFace model '{self.model_name}' loaded successfully.")
+            # Anti-Spoofing Setup (Simple Non-AI Version)
+            from src.recognition.antispoofing import AntiSpoofing
+            self.anti_spoof = AntiSpoofing()
+            logger.info("Anti-Spoofing (Texture Analysis) enabled.")
+                
         except Exception as e:
             logger.error(f"Failed to load InsightFace model: {e}")
             raise e
@@ -70,6 +74,17 @@ class FaceRecognition:
                 # Limit number of faces if specified
                 if max_faces is not None:
                     faces = faces[:max_faces]
+                
+                # Run Anti-Spoofing if model is available
+                for face in faces:
+                    if self.anti_spoof:
+                        is_real, as_score = self.anti_spoof.predict(frame, face.bbox)
+                        face.is_real = bool(is_real)
+                        face.as_score = float(as_score)
+                    else:
+                        # Fallback to True if no model
+                        face.is_real = True
+                        face.as_score = 1.0
                     
             return faces
         except Exception as e:
@@ -84,28 +99,40 @@ class FaceRecognition:
         for face in faces:
             bbox = face.bbox.astype(int)
             is_known = getattr(face, 'name', 'Unknown') != "Unknown"
-            color = (0, 255, 0) if is_known else (0, 255, 255)
+            is_real = getattr(face, 'is_real', True)
+            
+            # Color logic: Red if Fake, Green if Known, Yellow if Unknown
+            if not is_real:
+                color = (0, 0, 255) # RED for spoof
+            else:
+                color = (0, 255, 0) if is_known else (0, 255, 255)
             
             # Draw Box
             cv2.rectangle(res_frame, (bbox[0], bbox[1]), (bbox[2], bbox[3]), color, 2)
             
+            # Main Label: Real/Fake status
+            liveness_label = "REAL" if is_real else "SPOOF / FAKE"
+            as_score = getattr(face, 'as_score', 0.0)
+            y_offset = bbox[1] - 10
+            
+            cv2.putText(res_frame, f"{liveness_label} ({as_score:.2f})", (bbox[0], y_offset - 40), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+
             if hasattr(face, 'name'):
                 # Main Label: Name (Score)
-                y_offset = bbox[1] - 10
                 score = getattr(face, 'score', 0.0) or 0.0
                 label = f"{face.name} ({score:.2f})"
                 cv2.putText(res_frame, label, (bbox[0], y_offset), 
                             cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2)
                 
-                # Second Label: Camera Name & Time (displayed ABOVE the name to avoid overlap)
+                # Second Label: Camera Name & Time
                 from src.config import CameraConfig
                 import time
                 cam_time_label = f"{CameraConfig.CAMERA_NAME} | {time.strftime('%H:%M:%S')}"
-                # Move it up by 20 pixels instead of down
                 cv2.putText(res_frame, cam_time_label, (bbox[0], y_offset - 20), 
                             cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
                 
-                if is_known:
+                if is_known and is_real:
                     gender_map = {0: "Nu", 1: "Nam"}
                     gender_val = "N/A"
                     if hasattr(face, 'gender') and face.gender is not None:
@@ -127,6 +154,11 @@ class FaceRecognition:
                         pos = (bbox[0], bbox[3] + 25 + (i * 22))
                         cv2.putText(res_frame, text, pos, 
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
+            
+            # If SPOOF, add a big warning
+            if not is_real:
+                cv2.putText(res_frame, "WARNING: ANTI-SPOOFING TRIGGERED!", (bbox[0], bbox[3] + 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
                 
         return res_frame
                 

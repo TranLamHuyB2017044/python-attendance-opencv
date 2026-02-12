@@ -31,7 +31,7 @@ from src.ui.app_ui import (
     AttendanceUI, STATE_MENU, STATE_DETECT, STATE_ENROLL_CAM, 
     STATE_ENROLL_UPLOAD, STATE_EDIT, STATE_LIST, STATE_HISTORY, 
     STATE_HKB_LIST, STATE_COMPANY, STATE_CLOUD_USER, STATE_LOGOUT, STATE_SETTINGS,
-    STATE_TEST_CAM
+    STATE_TEST_CAM, STATE_EXIT
 )
 from src.main import enroll_from_camera, enroll_by_upload, get_target_company, handle_edit_logic
 from src.config import DATA_DIR, MongoDbConfig, CameraConfig
@@ -49,7 +49,7 @@ def main():
 
     # --- 1. HIỆN MÀN HÌNH LOADING NGAY LẬP TỨC ---
     # Tạo cửa sổ OpenCV và phóng to ngay
-    win_loading = "QUAN LY DIEM DANH AI"
+    win_loading = "Phần Mềm Quản Lý Chấm Công"
     cv2.namedWindow(win_loading, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(win_loading, 1280, 720)
     
@@ -84,6 +84,9 @@ def main():
         cv2.rectangle(loading_frame, (440, 420), (740, 430), (0, 255, 0), -1)
         cv2.imshow(win_loading, loading_frame)
         cv2.waitKey(1)
+        
+        from src.attendance.mongodb_mgr import mongo_db as m_db
+        CameraConfig.load_from_mongodb(m_db)
         camera = RTSPCamera()
         
         from src.recognition.tracker import FaceTracker
@@ -111,14 +114,20 @@ def main():
         root.destroy()
         return
 
-    win_name = "QUAN LY DIEM DANH AI"
-    cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(win_name, 1280, 720)
+    win_name = "Phần Mềm Quản Lý Chấm Công"
+    # Close loading window before showing login dialog to keep UI clean
+    try: cv2.destroyAllWindows()
+    except: pass
 
-    # Initial Login
-    if not ui.show_login_dialog():
-        logger.warning("Truy cap bi tu choi.")
-        return
+    # Initial Login Loop
+    while True:
+        login_res = ui.show_login_dialog()
+        if login_res == "EXIT":
+            logger.info("Người dùng chọn thoát tại màn hình đăng nhập.")
+            return
+        if login_res is True:
+            break
+        logger.warning("Cửa sổ đăng nhập bị đóng. Vui lòng đăng nhập để tiếp tục.")
 
     try:
         service_active = False
@@ -128,8 +137,14 @@ def main():
         display_frame = ui.draw_main_menu() # Initial frame
 
         while True:
-            _, _, cur_w, cur_h = cv2.getWindowImageRect(win_name)
-            if cur_w <= 0 or cur_h <= 0: cur_w, cur_h = 1280, 720
+            # Check window size only if it exists
+            try:
+                # This call fails if win_name does not exist (e.g., when Dashboard is active)
+                # We catch it gracefully to avoid app crash
+                _, _, cur_w, cur_h = cv2.getWindowImageRect(win_name)
+                if cur_w <= 0 or cur_h <= 0: cur_w, cur_h = 1280, 720
+            except:
+                cur_w, cur_h = 1280, 720
             
             # Periodically check service heartbeat (every 2 seconds)
             if time.time() - last_heartbeat_check > 2:
@@ -144,21 +159,26 @@ def main():
                 last_heartbeat_check = time.time()
 
             if ui.current_state == STATE_MENU:
-                display_frame = ui.draw_main_menu(w=cur_w, h=cur_h, service_active=service_active)
-                if cur_w != last_w or cur_h != last_h:
-                    cv2.setMouseCallback(win_name, ui.handle_menu_click, param=(cur_w, cur_h))
-                    last_w, last_h = cur_w, cur_h
+                # hide main opencv window while dashboard is active
+                try: cv2.destroyWindow(win_name)
+                except: pass
+                
+                # Show modern dashboard (Blocks until action selected)
+                ui.show_main_dashboard(mongo_db, service_active=service_active)
+                
+                # Only recreate window if we are moving to a state that actually needs it
+                # Enrollment (Cam) handles its own window, Detect needs the main win_name
+                if ui.current_state in [STATE_DETECT, STATE_TEST_CAM]:
+                    cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
+                    cv2.resizeWindow(win_name, 1280, 720)
+                
+                last_w, last_h = 0, 0 # Force resize update next time
+                continue
                 
             elif ui.current_state == STATE_DETECT:
                 if not service_active:
-                    from tkinter import messagebox
-                    import threading
-                    def show_warn():
-                        import tkinter as tk
-                        msg_root = tk.Tk(); msg_root.withdraw(); msg_root.attributes('-topmost', True)
-                        messagebox.showwarning("Dịch Vụ Đang Tắt", "Dịch vụ Camera ẩn chưa chạy.\n\nHướng dẫn:\n1. Vui lòng mở file 'service_main.exe' trước khi xem live.")
-                        msg_root.destroy()
-                    threading.Thread(target=show_warn, daemon=True).start()
+                    from src.utils.notification import show_info_message
+                    show_info_message("Thông báo", "Dịch vụ Camera ẩn đã dừng hoặc chưa chạy.\nQuay lại Menu chính.")
                     ui.current_state = STATE_MENU
                     continue
 
@@ -251,8 +271,8 @@ def main():
             elif ui.current_state == STATE_ENROLL_CAM:
                 if not camera.is_connected:
                     if not camera.connect():
-                        from tkinter import messagebox
-                        messagebox.showerror("Lỗi", "Không thể kết nối camera để đăng ký!")
+                        from src.utils.notification import show_error_message
+                        show_error_message("Lỗi kết nối", "Không thể kết nối với camera vật lý để thực hiện đăng ký!")
                         ui.current_state = STATE_MENU
                         continue
                 enroll_from_camera(camera, face_rec, attendance, ui)
@@ -312,7 +332,20 @@ def main():
             elif ui.current_state == STATE_LOGOUT:
                 ui.session_role = None
                 ui.session_company_id = None
-                if not ui.show_login_dialog(): break
+                
+                # Re-login loop
+                logged_in = False
+                while True:
+                    login_res = ui.show_login_dialog()
+                    if login_res == "EXIT":
+                        break
+                    if login_res is True:
+                        logged_in = True
+                        break
+                
+                if not logged_in: # User exited via "EXIT"
+                    break
+                    
                 ui.current_state = STATE_MENU
                 continue
             
@@ -321,15 +354,37 @@ def main():
                 ui.current_state = STATE_MENU
                 continue
             
+            elif ui.current_state == STATE_EXIT:
+                logger.info("Thoát ứng dụng theo yêu cầu người dùng.")
+                break
+
             elif ui.current_state == STATE_COMPANY:
                 ui.show_company_management_ui(mongo_db)
                 ui.current_state = STATE_MENU
                 continue
             
             final_show = display_frame if ui.current_state in [STATE_DETECT, STATE_MENU, STATE_TEST_CAM] else ui.frame
+            
+            # Check if window was closed via 'X' button
+            if cv2.getWindowProperty(win_name, cv2.WND_PROP_VISIBLE) < 1:
+                # If window was closed but we are in a state that needs it, go back to menu
+                if ui.current_state in [STATE_DETECT, STATE_TEST_CAM]:
+                    ui.current_state = STATE_MENU
+                    camera.disconnect()
+                    continue
+
             cv2.imshow(win_name, final_show)
             key = cv2.waitKey(1) & 0xFF
-            if key == ord('q'): break
+            if key == ord('q'): 
+                # If in Live Monitor, 'q' goes back to menu, NOT exit app (as per user request: "mới tắt app" usually means from main screen)
+                # Wait, user said "nên ấn nút close hoặc q mới tắt app".
+                # If they are in Live Monitor, maybe 'q' should exit? No, usually 'q' is back to menu.
+                # Let's make 'q' in Live Monitor go back to menu, but if in MENU/DASHBOARD (where OpenCV window is hidden), this waitKey isn't even reached.
+                if ui.current_state in [STATE_DETECT, STATE_TEST_CAM]:
+                    ui.current_state = STATE_MENU
+                    camera.disconnect()
+                else:
+                    break
             elif key == ord('m'):
                 ui.current_state = STATE_MENU
                 camera.disconnect()

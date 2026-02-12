@@ -2,7 +2,13 @@ import cv2
 import numpy as np
 from loguru import logger
 from src.attendance.mongodb_mgr import mongo_db
-from tkinter import messagebox
+import customtkinter as ctk
+import tkinter as tk
+from tkinter import ttk, messagebox
+
+# Configure CustomTkinter
+ctk.set_appearance_mode("dark")
+ctk.set_default_color_theme("blue")
 
 # State Management Constants
 STATE_MENU = 0
@@ -18,6 +24,7 @@ STATE_CLOUD_USER = 9
 STATE_LOGOUT = 10
 STATE_SETTINGS = 11
 STATE_TEST_CAM = 12
+STATE_EXIT = 99
 
 class AttendanceUI:
     """
@@ -115,132 +122,172 @@ class AttendanceUI:
                         self.current_state = STATE_COMPANY
 
     def draw_main_menu(self, w=1280, h=720, service_active=False):
-        """Draw a professional menu responsive to window size."""
-        self.service_active = service_active # Store state for click handling
-        self.last_w, self.last_h = w, h
-        frame = np.zeros((h, w, 3), dtype=np.uint8)
-        
-        # Background
-        cv2.rectangle(frame, (0, 0), (w, h), (40, 40, 40), -1) 
-        
-        cX, cY = w // 2, h // 2
-        
-        # Title
-        title_font_scale = w / 800 * 1.2
-        cv2.putText(frame, "HE THONG DIEM DANH AI", (cX - int(240 * (w/800)), cY - int(150 * (h/600))),
-                    cv2.FONT_HERSHEY_DUPLEX, title_font_scale, (255, 255, 255), 2)
+        """Legacy OpenCV menu (Redirection to Dashboard)."""
+        # We now use show_main_dashboard instead of draw_main_menu
+        return np.zeros((h, w, 3), dtype=np.uint8)
 
-        # Draw Columns Layout
-        btn_w, btn_h = int(300 * (w/800)), int(60 * (h/600))
-        gap_x = int(10 * (w/800))
-        gap_y = int(20 * (h/600))
+    def show_main_dashboard(self, mongo_db, service_active=False):
+        """
+        Displays a modern Dashboard using CustomTkinter.
+        Returns the selected state.
+        """
+        
+        root = ctk.CTk()
+        try: root.iconbitmap("app_icon.ico")
+        except: pass
+        root.title("BITTECH AI - HỆ THỐNG QUẢN LÝ CHẤM CÔNG")
+        
+        # Window size and position
+        w, h = 1000, 650
+        screen_w = root.winfo_screenwidth()
+        screen_h = root.winfo_screenheight()
+        root.geometry(f"{w}x{h}+{(screen_w-w)//2}+{(screen_h-h)//2}")
+        root.resizable(False, False)
+        root.attributes('-topmost', True)
+
+        selected_state = [STATE_MENU]
         role_lower = str(self.session_role).lower()
-        
-        col1_x = cX - btn_w - gap_x
-        col2_x = cX + gap_x
 
-        # Define Rows (Symmetrical 3x2 Layout)
-        row1_y = cY - int(100 * (h/600))
-        row2_y = cY + int(0 * (h/600))
-        row3_y = cY + int(100 * (h/600))
+        def set_state(state):
+            selected_state[0] = state
+            self.current_state = state
+            root.destroy()
 
-        # --- Column 1 ---
-        # Button 1: Monitor Service (All users)
-        btn_color = (40, 180, 40) if service_active else (60, 60, 60)
-        cv2.rectangle(frame, (col1_x, row1_y), (col1_x + btn_w, row1_y + btn_h), btn_color, -1)
-        cv2.putText(frame, "XEM SERVICE (LIVE)", (col1_x + int(45 * (w/800)), row1_y + int(38 * (h/600))),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7 * (w/800), (255, 255, 255), 2)
+        # --- Sidebar ---
+        sidebar = ctk.CTkFrame(root, width=220, corner_radius=0)
+        sidebar.pack(side="left", fill="y")
         
-        # Status Dot for Service
-        dot_color = (0, 255, 0) if service_active else (0, 0, 255)
-        cv2.circle(frame, (col1_x + int(20 * (w/800)), row1_y + int(30 * (h/600))), 8, dot_color, -1)
+        logo_label = ctk.CTkLabel(sidebar, text="BITTECH AI", font=("Arial", 24, "bold"), text_color="#1f6aa5")
+        logo_label.pack(pady=(30, 40))
+
+        user_info_frame = ctk.CTkFrame(sidebar, fg_color="transparent")
+        user_info_frame.pack(fill="x", padx=20, pady=10)
         
-        # Enrollment Buttons (Available to Admin and Company Managers)
-        if role_lower in ['admin', 'company']:
-            # Button 2: Enroll Camera
-            cv2.rectangle(frame, (col1_x, row2_y), (col1_x + btn_w, row2_y + btn_h), (200, 120, 0), -1)
-            cv2.putText(frame, "DANG KY (CAM)", (col1_x + int(50 * (w/800)), row2_y + int(38 * (h/600))),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8 * (w/800), (255, 255, 255), 2)
+        ctk.CTkLabel(user_info_frame, text=f"Chào, {self.session_username}", font=("Arial", 13, "bold")).pack(anchor="w")
+        ctk.CTkLabel(user_info_frame, text=f"Quyền: {role_lower.upper()}", font=("Arial", 11), text_color="gray").pack(anchor="w")
+
+        # Sidebar Buttons
+        ctk.CTkButton(sidebar, text="CÀI ĐẶT HỆ THỐNG", command=lambda: set_state(STATE_SETTINGS), 
+                     fg_color="transparent", border_width=1, hover_color="#333333").pack(side="bottom", fill="x", padx=20, pady=10)
+        
+        ctk.CTkButton(sidebar, text="ĐĂNG XUẤT", command=lambda: set_state(STATE_LOGOUT), 
+                     fg_color="#a12c2c", hover_color="#802020").pack(side="bottom", fill="x", padx=20, pady=(10, 0))
+
+        ctk.CTkButton(sidebar, text="THOÁT ỨNG DỤNG", command=lambda: set_state(STATE_EXIT), 
+                     fg_color="#444444", hover_color="#222222").pack(side="bottom", fill="x", padx=20, pady=(10, 0))
+
+        # --- Main View ---
+        main_view = ctk.CTkFrame(root, corner_radius=0, fg_color="transparent")
+        main_view.pack(side="left", fill="both", expand=True, padx=40, pady=30)
+
+        header_label = ctk.CTkLabel(main_view, text="BẢNG ĐIỀU KHIỂN QUẢN TRỊ", font=("Arial", 22, "bold"))
+        header_label.pack(pady=(0, 30), anchor="w")
+
+        # Service Status Card
+        status_frame = ctk.CTkFrame(main_view, height=80)
+        status_frame.pack(fill="x", pady=(0, 30))
+        
+        dot = ctk.CTkLabel(status_frame, text="", width=15, height=15, corner_radius=8)
+        dot.pack(side="left", padx=(20, 10))
+        
+        status_label = ctk.CTkLabel(status_frame, text="", font=("Arial", 14, "bold"))
+        status_label.pack(side="left")
+
+        def update_service_status():
+            from src.config import MongoDbConfig
+            import time
+            nonlocal service_active
+            try:
+                status_doc = mongo_db.db.system_status.find_one({
+                    "type": "camera_service", 
+                    "company_id": MongoDbConfig.COMPANY_ID
+                })
+                if status_doc:
+                    last_seen = status_doc.get("last_seen", 0)
+                    service_active = (time.time() - last_seen < 15)
+                else:
+                    service_active = False
+            except Exception as e:
+                logger.error(f"Error checking service status: {e}")
+                service_active = False
             
-            # Button 3: Enroll Upload
-            cv2.rectangle(frame, (col1_x, row3_y), (col1_x + btn_w, row3_y + btn_h), (0, 100, 200), -1)
-            cv2.putText(frame, "DANG KY (FILE)", (col1_x + int(50 * (w/800)), row3_y + int(38 * (h/600))),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8 * (w/800), (255, 255, 255), 2)
-        
-        # Management Buttons (Admin & Company Only)
-        if role_lower in ['admin', 'company']:
-            # Button 4: Edit (Col 2, Row 1)
-            cv2.rectangle(frame, (col2_x, row1_y), (col2_x + btn_w, row1_y + btn_h), (100, 100, 100), -1)
-            cv2.putText(frame, "CHINH SUA", (col2_x + int(75 * (w/800)), row1_y + int(38 * (h/600))),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8 * (w/800), (255, 255, 255), 2)
+            dot_color = "#28a745" if service_active else "#dc3545"
+            status_text = "DỊCH VỤ ĐANG HOẠT ĐỘNG" if service_active else "DỊCH VỤ ĐANG TẮT (Vui lòng mở file service_main.exe)"
+            
+            dot.configure(fg_color=dot_color)
+            status_label.configure(text=status_text)
+            root.after(3000, update_service_status)
 
-            # Button 5: List (Col 2, Row 2)
-            cv2.rectangle(frame, (col2_x, row2_y), (col2_x + btn_w, row2_y + btn_h), (150, 50, 150), -1)
-            cv2.putText(frame, "DANH SACH", (col2_x + int(75 * (w/800)), row2_y + int(38 * (h/600))),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8 * (w/800), (255, 255, 255), 2)
+        # Initial update
+        update_service_status()
 
-            # Button 6: History (Col 2, Row 3)
-            cv2.rectangle(frame, (col2_x, row3_y), (col2_x + btn_w, row3_y + btn_h), (100, 50, 0), -1)
-            cv2.putText(frame, "LICH SU", (col2_x + int(90 * (w/800)), row3_y + int(38 * (h/600))),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8 * (w/800), (255, 255, 255), 2)
-        
-        # --- Instruction Table (Compact) ---
-        table_x, table_y = int(30 * (w/800)), int(480 * (h/600))
-        table_width, table_height = int(200 * (w/800)), int(90 * (h/600))
-        cv2.rectangle(frame, (table_x, table_y), (table_x + table_width, table_y + table_height), (60, 60, 60), -1)
-        cv2.rectangle(frame, (table_x, table_y), (table_x + table_width, table_y + table_height), (100, 100, 100), 1)
-        
-        instruction_font_scale = 0.5 * (w/800)
-        instruction_line_height = int(15 * (h/600))
-        cv2.putText(frame, "PHIM TAT:", (table_x + int(10 * (w/800)), table_y + int(20 * (h/600))),
-                    cv2.FONT_HERSHEY_SIMPLEX, instruction_font_scale, (255, 255, 0), 1)
-        
-        instructions = ["Q: Thoat", "M: Menu", "S: Chup anh", "C: Huy bỏ"]
-        for i, text in enumerate(instructions):
-            cv2.putText(frame, text, (table_x + int(10 * (w/800)), table_y + int(40 * (h/600)) + (i * instruction_line_height)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4 * (w/800), (200, 200, 200), 1)
-        
-        cv2.putText(frame, "Phat trien boi Biitech", (w - int(180 * (w/800)), h - int(20 * (h/600))),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4 * (w/800), (100, 100, 100), 1)
-        
-        # Management Buttons
+        # --- Button Grid ---
+        grid_frame = ctk.CTkFrame(main_view, fg_color="transparent")
+        grid_frame.pack(fill="both", expand=True)
+        grid_frame.grid_columnconfigure((0, 1), weight=1)
+        grid_frame.grid_rowconfigure((0, 1, 2), weight=1)
+
+        # 1. Monitor (All users)
+        def handle_monitor_click():
+            if not service_active:
+                messagebox.showwarning("Dịch Vụ Đang Tắt", "Dịch vụ Camera ẩn chưa chạy.\n\nHướng dẫn:\n1. Vui lòng mở file 'service_main.exe' trước khi xem live.")
+                return
+            set_state(STATE_DETECT)
+
+        btn_monitor = ctk.CTkButton(grid_frame, text="XEM CAMERA TRỰC TIẾP", 
+                                   command=handle_monitor_click,
+                                   height=90, font=("Arial", 15, "bold"),
+                                   corner_radius=12, fg_color="#1f6aa5", hover_color="#154c75")
+        btn_monitor.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
+
         if role_lower in ['admin', 'company']:
-            # 1. Connect HKB (Left) - Available for both Admin and Company
-            cv2.rectangle(frame, (cX - int(380*(w/800)), h - int(84*(h/600))), (cX - int(140*(w/800)), h - int(20*(h/600))), (50, 100, 50), -1) 
-            cv2.putText(frame, "KET NOI HKB", (cX - int(355*(w/800)), h - int(40*(h/600))),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6 * (w/800), (255, 255, 255), 2)
+            # 2. Edit User
+            ctk.CTkButton(grid_frame, text="CHỈNH SỬA THÔNG TIN", 
+                         command=lambda: set_state(STATE_EDIT),
+                         height=90, font=("Arial", 15, "bold"),
+                         corner_radius=12, fg_color="#5D6D7E", hover_color="#34495E").grid(row=0, column=1, padx=10, pady=10, sticky="nsew")
+
+            # 3. Enroll Camera
+            ctk.CTkButton(grid_frame, text="ĐĂNG KÝ (CAMERA)", 
+                         command=lambda: set_state(STATE_ENROLL_CAM),
+                         height=90, font=("Arial", 15, "bold"),
+                         corner_radius=12, fg_color="#E67E22", hover_color="#D35400").grid(row=1, column=0, padx=10, pady=10, sticky="nsew")
+
+            # 4. List
+            ctk.CTkButton(grid_frame, text="DANH SÁCH NHÂN VIÊN", 
+                         command=lambda: set_state(STATE_LIST),
+                         height=90, font=("Arial", 15, "bold"),
+                         corner_radius=12, fg_color="#8E44AD", hover_color="#732D91").grid(row=1, column=1, padx=10, pady=10, sticky="nsew")
+
+            # 5. Enroll File
+            ctk.CTkButton(grid_frame, text="ĐĂNG KÝ (FILE ẢNH)", 
+                         command=lambda: set_state(STATE_ENROLL_UPLOAD),
+                         height=90, font=("Arial", 15, "bold"),
+                         corner_radius=12, fg_color="#16A085", hover_color="#0E6655").grid(row=2, column=0, padx=10, pady=10, sticky="nsew")
+
+            # 6. History
+            ctk.CTkButton(grid_frame, text="LỊCH SỬ CHẤM CÔNG", 
+                         command=lambda: set_state(STATE_HISTORY),
+                         height=90, font=("Arial", 15, "bold"),
+                         corner_radius=12, fg_color="#2E86C1", hover_color="#21618C").grid(row=2, column=1, padx=10, pady=10, sticky="nsew")
+
+        # Bottom Buttons
+        bottom_frame = ctk.CTkFrame(main_view, fg_color="transparent")
+        bottom_frame.pack(fill="x", pady=(20, 0))
+
+        if role_lower in ['admin', 'company']:
+            ctk.CTkButton(bottom_frame, text="KẾT NỐI HKB", command=lambda: set_state(STATE_HKB_LIST),
+                         height=45, corner_radius=8, fg_color="#28B463", hover_color="#1D8348").pack(side="left", padx=5, expand=True, fill="x")
 
         if role_lower == 'admin':
-            # 2. Manage Users (Center) - Admin Only
-            cv2.rectangle(frame, (cX - int(120*(w/800)), h - int(84*(h/600))), (cX + int(120*(w/800)), h - int(20*(h/600))), (60, 60, 180), -1)
-            cv2.putText(frame, "QUAN LY USER", (cX - int(95*(w/800)), h - int(40*(h/600))),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6 * (w/800), (255, 255, 255), 2)
-
-            # 3. Manage Company (Right) - Admin Only
-            cv2.rectangle(frame, (cX + int(140*(w/800)), h - int(84*(h/600))), (cX + int(380*(w/800)), h - int(20*(h/600))), (100, 50, 150), -1)
-            cv2.putText(frame, "QUAN LY CONG TY", (cX + int(160*(w/800)), h - int(40*(h/600))),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6 * (w/800), (255, 255, 255), 2)
+            ctk.CTkButton(bottom_frame, text="QUẢN LÝ TÀI KHOẢN", command=lambda: set_state(STATE_CLOUD_USER),
+                         height=45, corner_radius=8, fg_color="#5DADE2", hover_color="#2E86C1").pack(side="left", padx=5, expand=True, fill="x")
             
-        # 4. Settings Button (Top Left) - Available to all logged-in users
-        cv2.rectangle(frame, (20, 15), (150, 65), (80, 80, 80), -1)
-        cv2.rectangle(frame, (20, 15), (150, 65), (255, 255, 255), 1)
-        cv2.putText(frame, "CAI DAT", (45, 48),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6 * (w/800), (255, 255, 255), 2)
-        
-        # User Info Display
-        user_label = f"User: {self.session_username} ({self.session_role})"
-        cv2.putText(frame, user_label, (20, h - 20),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4 * (w/800), (200, 200, 200), 1)
+            ctk.CTkButton(bottom_frame, text="QUẢN LÝ CÔNG TY", command=lambda: set_state(STATE_COMPANY),
+                         height=45, corner_radius=8, fg_color="#A569BD", hover_color="#884EA0").pack(side="left", padx=5, expand=True, fill="x")
 
-        # Logout Button (Top Right)
-        logout_bg = (50, 50, 200) # Reddish-blue
-        cv2.rectangle(frame, (w - 160, 15), (w - 20, 65), logout_bg, -1)
-        cv2.rectangle(frame, (w - 160, 15), (w - 20, 65), (255, 255, 255), 1)
-        cv2.putText(frame, "DANG XUAT", (w - 150, 48),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6 * (w/800), (255, 255, 255), 2)
-        
-        self.frame = frame
-        return frame
+        root.mainloop()
+        return selected_state[0]
 
     @staticmethod
     def get_user_form(include_upload=False, session_role=None, mongo_db=None):
@@ -500,55 +547,46 @@ class AttendanceUI:
     @staticmethod
     def show_user_list_ui(user_list):
         """
-        Displays a table of all enrolled users using tkinter.
+        Modernized list of users using CustomTkinter.
         """
+        import customtkinter as ctk
         import tkinter as tk
         from tkinter import ttk
 
-        root = tk.Tk()
-        root.title("Danh sách nhân viên đã đăng ký")
-        
-        window_width, window_height = 500, 400
-        screen_width = root.winfo_screenwidth()
-        screen_height = root.winfo_screenheight()
-        pos_x = (screen_width // 2) - (window_width // 2)
-        pos_y = (screen_height // 2) - (window_height // 2)
-        root.geometry(f"{window_width}x{window_height}+{pos_x}+{pos_y}")
-        
+        root = ctk.CTk()
+        root.title("Bittech AI - Danh sách nhân viên")
+        root.geometry("800x600")
         root.attributes('-topmost', True)
 
-        label = tk.Label(root, text=f"Tổng cộng: {len(user_list)} nhân viên", font=("Arial", 11, "bold"))
-        label.pack(pady=10)
+        ctk.CTkLabel(root, text=f"DANH SÁCH NHÂN VIÊN ({len(user_list)})", font=("Arial", 20, "bold"), text_color="#1f6aa5").pack(pady=20)
 
-        # Create Treeview
+        tree_frame = ctk.CTkFrame(root)
+        tree_frame.pack(fill="both", expand=True, padx=20, pady=10)
+
         columns = ("id", "name", "birthday", "face_status")
-        tree = ttk.Treeview(root, columns=columns, show="headings")
+        tree = ttk.Treeview(tree_frame, columns=columns, show="headings")
         
         tree.heading("id", text="Mã nhân viên")
         tree.heading("name", text="Họ và tên")
         tree.heading("birthday", text="Ngày sinh")
         tree.heading("face_status", text="Khuôn mặt")
         
-        tree.column("id", width=120)
-        tree.column("name", width=200)
-        tree.column("birthday", width=120)
-        tree.column("face_status", width=100, anchor="center")
+        tree.column("id", width=150)
+        tree.column("name", width=250)
+        tree.column("birthday", width=150)
+        tree.column("face_status", width=150, anchor="center")
 
         for user in user_list:
-            # Handle both old format (dict with user_id, user_name, birthday) 
-            # and new format (dict with user_id, user_name, birthday, has_face)
             u_id = user.get("user_id", "N/A")
             u_name = user.get("user_name") or user.get("name", "Unknown")
             u_bday = user.get("birthday", "N/A")
-            has_face = user.get("has_face", True)  # Default True for backward compatibility
+            has_face = user.get("has_face", True)
             face_status = "✓ Đã đăng ký" if has_face else "⚠ Chưa có"
-            
             tree.insert("", tk.END, values=(u_id, u_name, u_bday, face_status))
 
-        tree.pack(expand=True, fill="both", padx=10, pady=10)
+        tree.pack(expand=True, fill="both")
         
-        btn_close = tk.Button(root, text="ĐÓNG", command=root.destroy, width=15, bg="#007bff", fg="white")
-        btn_close.pack(pady=10)
+        ctk.CTkButton(root, text="ĐÓNG CỬA SỔ", command=root.destroy, width=150, height=40).pack(pady=20)
 
         root.mainloop()
 
@@ -751,298 +789,213 @@ class AttendanceUI:
             
         return selected["system"]
 
-    @staticmethod
-    def show_attendance_logs_ui(logs, title="Lịch sử điểm danh", session_role=None, session_user_id=None, session_username="GLOBAL"):
-        """
-        Displays a table of attendance logs using tkinter.
-        """
-        import tkinter as tk
-        from tkinter import ttk, messagebox
-
-        root = tk.Tk()
-        root.title(title)
+    def show_attendance_logs_ui(self, logs, title="Lịch sử điểm danh", session_role=None, session_username="GLOBAL", session_user_id=1):
+        """Modernized UI to view attendance logs using CustomTkinter."""
+        from src.services.hkb_service import hkb_service
         
-        window_width, window_height = 800, 550
-        screen_width = root.winfo_screenwidth()
-        screen_height = root.winfo_screenheight()
-        pos_x = (screen_width // 2) - (window_width // 2)
-        pos_y = (screen_height // 2) - (window_height // 2)
-        root.geometry(f"{window_width}x{window_height}+{pos_x}+{pos_y}")
-        
+        root = ctk.CTk()
+        try: root.iconbitmap("app_icon.ico")
+        except: pass
+        root.title(f"Bittech AI - {title}")
+        root.geometry("1000x650")
         root.attributes('-topmost', True)
 
-        label = tk.Label(root, text=f"{title} ({len(logs)} lượt)", font=("Arial", 11, "bold"))
-        label.pack(pady=10)
+        ctk.CTkLabel(root, text=title.upper(), font=("Arial", 22, "bold"), text_color="#1f6aa5").pack(pady=20)
 
-        # Create Treeview with checkboxes via selectmode
-        columns = ("id", "user_id", "name", "time", "status", "uploaded")
-        tree = ttk.Treeview(root, columns=columns, show="headings", selectmode="extended")
+        tree_frame = ctk.CTkFrame(root)
+        tree_frame.pack(fill="both", expand=True, padx=20, pady=10)
+
+        # Columns for modern viewing
+        columns = ("id", "user_id", "user_name", "time", "date", "status", "uploaded")
+        tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="extended")
         
-        tree.heading("id", text="ID")
+        tree.heading("id", text="Mã Log")
         tree.heading("user_id", text="Mã NV")
-        tree.heading("name", text="Họ và tên")
-        tree.heading("time", text="Thời gian")
+        tree.heading("user_name", text="Họ và tên")
+        tree.heading("time", text="Giờ")
+        tree.heading("date", text="Ngày")
         tree.heading("status", text="Trạng thái")
-        tree.heading("uploaded", text="Đã upload")
+        tree.heading("uploaded", text="Đã tải lên")
         
-        tree.column("id", width=50)
-        tree.column("user_id", width=100)
-        tree.column("name", width=150)
-        tree.column("time", width=150)
-        tree.column("status", width=80)
-        tree.column("uploaded", width=100)
+        tree.column("id", width=80, anchor="center")
+        tree.column("user_id", width=100, anchor="center")
+        tree.column("user_name", width=200)
+        tree.column("time", width=100, anchor="center")
+        tree.column("date", width=120, anchor="center")
+        tree.column("status", width=100, anchor="center")
+        tree.column("uploaded", width=100, anchor="center")
+        tree.pack(fill="both", expand=True)
 
-        # logs structure from MongoDB (dictionaries): _id, user_id, user_name, timestamp, date, status, image_path, uploaded_to
+        # To store original data for batch processing
+        log_items_batch = {}
+
         for log in logs:
-            status_val = log.get('status', 'N/A')
-            uploaded_to = log.get('uploaded_to', [])
-            uploaded_str = "✓" if uploaded_to else ""
+            l_id = str(log.get('_id', ''))
+            ts = log.get('timestamp', 'N/A')
+            try:
+                date_part = ts.split(' ')[0]
+                time_part = ts.split(' ')[1]
+            except:
+                date_part, time_part = ts, ts
+            
+            is_up = 1 if log.get('uploaded_to') else 0
+            up_str = "✓" if is_up else "x"
+            
             tree.insert("", tk.END, values=(
-                str(log.get('_id', '')), 
+                l_id, 
                 log.get('user_id', 'N/A'), 
                 log.get('user_name', 'N/A'), 
-                log.get('timestamp', 'N/A'), 
-                status_val, 
-                uploaded_str
+                time_part, 
+                date_part, 
+                log.get('status', 'IN'), 
+                up_str
             ))
+            log_items_batch[l_id] = log
 
-        tree.pack(expand=True, fill="both", padx=10, pady=10)
-        
-        def on_log_double_click(event):
-            selected_item = tree.selection()
-            if not selected_item:
-                return
+        def on_view_image():
+            sel = tree.selection()
+            if not sel: return messagebox.showwarning("!", "Vui lòng chọn ít nhất 1 dòng")
+            l_id = str(tree.item(sel[0])['values'][0])
+            user_name = tree.item(sel[0])['values'][2]
             
-            item_values = tree.item(selected_item[0])['values']
-            log_id = str(item_values[0])
-            
-            # Find the original log dict to get full details
-            from bson.objectid import ObjectId
-            from src.attendance.mongodb_mgr import mongo_db
-            log_data = mongo_db.logs.find_one({"_id": ObjectId(log_id)})
-            
-            if not log_data:
-                return
-            
-            # Create a detail window
-            detail_win = tk.Toplevel(root)
-            detail_win.title(f"Chi tiết Log: {log_id}")
-            detail_win.geometry("500x450")
-            detail_win.attributes('-topmost', True)
-            
-            label_title = tk.Label(detail_win, text="CHI TIẾT ĐIỂM DANH & UPLOAD", font=("Arial", 10, "bold"))
-            label_title.pack(pady=10)
-
-            txt = tk.Text(detail_win, wrap=tk.WORD, padx=10, pady=10, font=("Consolas", 9))
-            txt.pack(expand=True, fill="both", padx=10, pady=5)
-            
-            # Build report
-            report = []
-            report.append(f"Mã Log: {log_id}")
-            report.append(f"Nhân viên: {log_data.get('user_name')} (Mã: {log_data.get('user_id')})")
-            report.append(f"Thời gian: {log_data.get('timestamp')}")
-            report.append(f"Trạng thái: {log_data.get('status')}")
-            report.append("-" * 40)
-            
-            uploaded_to = log_data.get('uploaded_to', [])
-            report.append(f"Đã upload tới: {len(uploaded_to)} hệ thống")
-            for sys_id in uploaded_to:
-                sys_info = mongo_db.auth_services.find_one({"uuid": sys_id})
-                name = sys_info.get('app_name', sys_id) if sys_info else sys_id
-                report.append(f" [OK] {name}")
-            
-            report.append("-" * 40)
-            report.append("Lịch sử Upload (Debug log):")
-            history = log_data.get('upload_history', [])
-            if not history:
-                report.append(" (Dữ liệu cũ hoặc không có lịch sử chi tiết)")
-            else:
-                for h in history:
-                    sys_id = h.get('system_id', '?')
-                    sys_info = mongo_db.auth_services.find_one({"uuid": sys_id})
-                    name = sys_info.get('app_name', sys_id) if sys_info else sys_id
-                    
-                    status = h.get('status', 'N/A')
-                    msg = h.get('message', 'N/A')
-                    time_val = h.get('timestamp', '')
-                    time_str = ""
-                    if hasattr(time_val, 'strftime'):
-                        time_str = time_val.strftime("%H:%M:%S")
-                    
-                    report.append(f"[{time_str}] {name}: {status}")
-                    report.append(f"   > Msg: {msg}\n")
-            
-            txt.insert(tk.END, "\n".join(report))
-            txt.config(state=tk.DISABLED)
-            
-            tk.Button(detail_win, text="ĐÓNG", command=detail_win.destroy, width=10).pack(pady=10)
-
-        tree.bind("<Double-1>", on_log_double_click)
+            img_bytes = mongo_db.get_log_image(l_id)
+            if img_bytes:
+                nparr = np.frombuffer(img_bytes, np.uint8)
+                img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                if img is not None:
+                    win_img = f"Anh Diem Danh: {user_name}"
+                    cv2.namedWindow(win_img, cv2.WINDOW_NORMAL)
+                    cv2.imshow(win_img, img)
+                    cv2.waitKey(1)
+                else: messagebox.showerror("Lỗi", "Không thể giải mã hình ảnh")
+            else: messagebox.showwarning("Thông báo", "Log này không chứa dữ liệu ảnh")
 
         def on_batch_upload():
-            """Upload selected or all attendance logs to a chosen system."""
             from src.services.hkb_service import hkb_service
-            from src.attendance.mongodb_mgr import mongo_db
+            sel_items = tree.selection()
+            if not sel_items: return messagebox.showwarning("!", "Vui lòng chọn các dòng cần upload")
             
-            logger.info("Batch upload button clicked.")
-            
-            # 1. COLLECT ALL DATA FROM TREE IMMEDIATELY before opening any other windows
-            selected_items = tree.selection()
-            if not selected_items:
-                if not messagebox.askyesno("Xác nhận", "Không có dòng nào được chọn. Upload tất cả?"):
-                    return
-                selected_items = tree.get_children()
-            
-            if not selected_items:
-                messagebox.showwarning("!", "Không có dữ liệu để upload")
+            connections = hkb_service.get_connections(user_id=session_user_id, username=session_username)
+            connected_systems = [c for c in connections if c.get("client_register") == 1] if connections else []
+            if not connected_systems: 
+                messagebox.showwarning("!", "Chưa có hệ thống HKB nào được kết nối (Active).")
                 return
             
-            # Map item data while the tree is still valid
-            log_items_batch = []
-            for item in selected_items:
-                log_items_batch.append({
-                    "id_from_tree": str(tree.item(item)['values'][0]),
-                    "item_id": item
-                })
-
-            # 2. Get list of connected systems for this user (user-specific keys)
-            user_id = session_user_id or 1
-            connections = hkb_service.get_connections(user_id=user_id, username=session_username)
-            
-            if not connections or not isinstance(connections, list):
-                messagebox.showerror("Lỗi", "Không tìm thấy hệ thống đã kết nối")
-                return
-            
-            # Filter only connected systems
-            connected_systems = [c for c in connections if c.get("client_register") == 1]
-            if not connected_systems:
-                messagebox.showwarning("!", "Chưa có hệ thống nào được kết nối")
-                return
-            
-            # 3. Show system selection dialog (passing main root for Toplevel use)
             selected_system = AttendanceUI.pick_system_for_upload(connected_systems, parent=root)
-            if not selected_system:
-                return
-            
-            # 4. Prepare logs data for upload using the pre-collected IDs
+            if not selected_system: return
+
             upload_logs = []
             log_ids = []
-            
-            for item_info in log_items_batch:
-                log_id = item_info["id_from_tree"]
-                log_data = next((l for l in logs if str(l[0]) == log_id), None)
-                
+            for item in sel_items:
+                l_id = str(tree.item(item)['values'][0])
+                log_data = log_items_batch.get(l_id)
                 if log_data:
-                    log_ids.append(log_id)
+                    log_ids.append(l_id)
                     upload_logs.append({
-                        "session_id": log_data[6] if len(log_data) > 6 else log_id,
-                        "user_id": log_data[1],
-                        "user_name": log_data[2],
-                        "timestamp": log_data[3],
-                        "status": log_data[5] if len(log_data) > 5 else "IN",
-                        "image_webp": mongo_db.get_log_image(log_id)
+                        "session_id": l_id,
+                        "user_id": log_data.get('user_id'),
+                        "user_name": log_data.get('user_name'),
+                        "timestamp": log_data.get('timestamp'),
+                        "status": log_data.get('status', 'IN'),
+                        "image_webp": mongo_db.get_log_image(l_id)
                     })
-            
-            if not upload_logs:
-                messagebox.showwarning("!", "Không có dữ liệu hợp lệ để upload")
-                return
-            
-            # Get auth info for selected system
+
             auth_data = mongo_db.auth_services.find_one({"uuid": selected_system["system_id"]})
-            if not auth_data:
-                messagebox.showerror("Lỗi", "Không tìm thấy thông tin xác thực cho hệ thống này")
-                return
-            
-            # Upload
-            root.config(cursor="watch")
-            root.update()
-            
-            result = hkb_service.upload_timekeepers(
+            if not auth_data: return messagebox.showerror("Lỗi", "Không tìm thấy Auth Key cho hệ thống này")
+
+            root.config(cursor="watch"); root.update()
+            res = hkb_service.upload_timekeepers(
                 endpoint=selected_system["endpoint"],
                 system_id=selected_system["system_id"],
                 api_key=auth_data["key"],
-                user_id=auth_data.get("user_id", user_id),
+                user_id=auth_data.get("user_id", session_user_id),
                 attendance_logs=upload_logs
             )
-            
             root.config(cursor="")
             
-            if result and result.success:
-                # Mark as uploaded
+            if res and res.success:
                 mongo_db.mark_logs_uploaded(log_ids, selected_system["system_id"])
-                messagebox.showinfo("Thành công", f"Đã upload {len(upload_logs)} lượt chấm công lên {selected_system['name']}")
+                messagebox.showinfo("Hoàn tất", f"Đã tải {len(upload_logs)} dữ liệu lên {selected_system['name']}")
                 root.destroy()
-            else:
-                err_msg = result.message if result and result.message else "Upload thất bại"
-                messagebox.showerror("Lỗi", err_msg)
+            else: messagebox.showerror("Lỗi Upload", res.message if res else "Không phản hồi từ server")
 
-        def on_view_image():
-            selected_item = tree.selection()
-            if not selected_item:
-                messagebox.showwarning("Cảnh báo", "Vui lòng chọn một lượt điểm danh để xem ảnh!")
-                return
+        def on_double_click(event):
+            sel = tree.selection()
+            if not sel: return
+            l_id = str(tree.item(sel[0])['values'][0])
+            log_data = log_items_batch.get(l_id)
+            if not log_data: return
             
-            from src.attendance.mongodb_mgr import mongo_db
-            import cv2
-            import numpy as np
-
-            item_values = tree.item(selected_item[0])['values']
-            log_id = str(item_values[0])
-            user_name = item_values[2]
+            detail_win = ctk.CTkToplevel(root)
+            detail_win.title(f"Chi tiết Log: {l_id}")
+            detail_win.geometry("500x550")
+            detail_win.attributes('-topmost', True)
             
-            # Fetch image from MongoDB
-            img_bytes = mongo_db.get_log_image(log_id)
-            if img_bytes:
-                # Decode WebP/Image from bytes
-                nparr = np.frombuffer(img_bytes, np.uint8)
-                img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                
-                if img is not None:
-                    # Show image in a new OpenCV window
-                    win_title = f"Anh diem danh: {user_name} ({log_id})"
-                    cv2.imshow(win_title, img)
-                    cv2.waitKey(1) # Keep window responsive
-                else:
-                    messagebox.showerror("Lỗi", "Không thể hiển thị dữ liệu ảnh.")
+            ctk.CTkLabel(detail_win, text="CHI TIẾT ĐIỂM DANH", font=("Arial", 16, "bold")).pack(pady=15)
+            
+            info_frame = ctk.CTkFrame(detail_win)
+            info_frame.pack(fill="both", expand=True, padx=20, pady=10)
+            
+            details = [
+                ("Mã Log", l_id),
+                ("Nhân viên", f"{log_data.get('user_name')} ({log_data.get('user_id')})"),
+                ("Thời gian", log_data.get('timestamp')),
+                ("Trạng thái", log_data.get('status')),
+                ("Công ty", log_data.get('company_id'))
+            ]
+            
+            for i, (k, v) in enumerate(details):
+                ctk.CTkLabel(info_frame, text=f"{k}:", font=("Arial", 12, "bold")).grid(row=i, column=0, padx=10, pady=5, sticky="w")
+                ctk.CTkLabel(info_frame, text=str(v)).grid(row=i, column=1, padx=10, pady=5, sticky="w")
+
+            # Upload History
+            ctk.CTkLabel(detail_win, text="Lịch sử đồng bộ HKB", font=("Arial", 13, "bold")).pack(pady=(10, 0))
+            hist_box = ctk.CTkTextbox(detail_win, height=150)
+            hist_box.pack(fill="both", expand=True, padx=20, pady=10)
+            
+            uploaded_to = log_data.get('uploaded_to', [])
+            if not uploaded_to:
+                hist_box.insert("1.0", "Chưa được đồng bộ lên hệ thống nào.")
             else:
-                messagebox.showwarning("Thông báo", "Lượt điểm danh này không có dữ liệu ảnh hoặc ảnh đã bị xóa.")
+                hist_text = "Đã đồng bộ thành công tới:\n"
+                for sys_id in uploaded_to:
+                    hist_text += f"- System UUID: {sys_id}\n"
+                hist_box.insert("1.0", hist_text)
+            hist_box.configure(state="disabled")
 
-        btn_container = tk.Frame(root)
-        btn_container.pack(pady=10)
+        tree.bind("<Double-1>", on_double_click)
 
-        tk.Button(btn_container, text="XEM ẢNH", command=on_view_image, width=15, bg="#f39c12", fg="white").pack(side=tk.LEFT, padx=5)
+        # Action Buttons
+        btn_frame = ctk.CTkFrame(root, fg_color="transparent")
+        btn_frame.pack(pady=20)
         
-        # Show batch upload button for admin and company roles
+        ctk.CTkButton(btn_frame, text="XEM ẢNH", command=on_view_image, width=150, fg_color="#f39c12", hover_color="#d35400").pack(side="left", padx=10)
         if session_role and str(session_role).lower() in ['admin', 'company']:
-            tk.Button(btn_container, text="UPLOAD LÊN HỆ THỐNG", command=on_batch_upload, width=20, bg="#28a745", fg="white").pack(side=tk.LEFT, padx=5)
-        
-        tk.Button(btn_container, text="ĐÓNG", command=root.destroy, width=15, bg="#007bff", fg="white").pack(side=tk.LEFT, padx=5)
+            ctk.CTkButton(btn_frame, text="TẢI LÊN HKB", command=on_batch_upload, width=180, fg_color="#28a745", hover_color="#218838").pack(side="left", padx=10)
+        ctk.CTkButton(btn_frame, text="ĐÓNG", command=root.destroy, width=120, fg_color="gray").pack(side="left", padx=10)
 
         root.mainloop()
 
     def show_hkb_connections_ui(self):
-        """
-        Displays a list of HKB connections and allows registering/connecting.
-        """
-        import tkinter as tk
-        from tkinter import ttk, messagebox
+        """Modernized UI to manage HKB connections using CustomTkinter."""
         from src.services.hkb_service import hkb_service
         from src.config import AuthServiceConfig
 
-        # Lấy user_id từ session đang đăng nhập, mặc định là 1
         current_user_id = getattr(self, "session_user_id", 1) or 1
-
-        root = tk.Tk()
-        root.title("Kết nối AuthService")
-        root.geometry("1000x500")
+        root = ctk.CTk()
+        try: root.iconbitmap("app_icon.ico")
+        except: pass
+        root.title("Bittech AI - Kết nối AuthService")
+        root.geometry("1100x650")
         root.attributes('-topmost', True)
 
-        tk.Label(root, text="DANH SÁCH KẾT NỐI", font=("Arial", 14, "bold")).pack(pady=10)
+        ctk.CTkLabel(root, text="DANH SÁCH KẾT NỐI HỆ THỐNG", font=("Arial", 22, "bold"), text_color="#1f6aa5").pack(pady=20)
 
-        # Create Treeview with more columns
+        tree_frame = ctk.CTkFrame(root)
+        tree_frame.pack(fill="both", expand=True, padx=20, pady=10)
+
         columns = ("id", "name", "system_id", "endpoint", "actived", "status")
-        tree = ttk.Treeview(root, columns=columns, show="headings")
-        
+        tree = ttk.Treeview(tree_frame, columns=columns, show="headings")
         tree.heading("id", text="ID")
         tree.heading("name", text="Tên hệ thống")
         tree.heading("system_id", text="System ID")
@@ -1050,453 +1003,250 @@ class AttendanceUI:
         tree.heading("actived", text="Hoạt động")
         tree.heading("status", text="Trạng thái")
         
-        tree.column("id", width=40, anchor="center")
+        tree.column("id", width=50, anchor="center")
         tree.column("name", width=250)
         tree.column("system_id", width=200)
         tree.column("endpoint", width=200)
-        tree.column("actived", width=80, anchor="center")
-        tree.column("status", width=120, anchor="center")
+        tree.column("actived", width=100, anchor="center")
+        tree.column("status", width=150, anchor="center")
+        tree.pack(fill="both", expand=True)
 
         def refresh_list():
-            for item in tree.get_children():
-                tree.delete(item)
-            
-            # Truyền user_id hiện tại để lọc danh sách UUID đã đăng ký, và session_username cho group keys
-            connections = hkb_service.get_connections(
-                user_id=current_user_id, 
-                username=getattr(self, "session_username", "GLOBAL")
-            )
+            for item in tree.get_children(): tree.delete(item)
+            connections = hkb_service.get_connections(user_id=current_user_id, username=getattr(self, "session_username", "GLOBAL"))
             if connections and isinstance(connections, list):
                 for conn in connections:
-                    # Logic: client_register = 0 -> Chưa kết nối, 1 -> Đã kết nối
                     is_registered = conn.get("client_register", 0)
                     status_str = "Đã kết nối" if is_registered == 1 else "Chưa kết nối"
-                    
-                    tree.insert("", tk.END, values=(
-                        conn.get("id", "N/A"),
-                        conn.get("name", "N/A"),
-                        conn.get("system_id", "N/A"),
-                        conn.get("endpoint", "N/A"),
-                        "Có" if conn.get("actived") == 1 else "Không",
-                        status_str
-                    ))
-            elif connections:
-                # Might be a single dict or other structure
-                logger.info(f"API result is not a list: {connections}")
-            else:
-                messagebox.showinfo("Thông báo", "Không tìm thấy kết nối nào hoặc lỗi API.")
+                    tree.insert("", tk.END, values=(conn.get("id", "N/A"), conn.get("name", "N/A"), conn.get("system_id", "N/A"), conn.get("endpoint", "N/A"), "Có" if conn.get("actived") == 1 else "Không", status_str))
 
         def on_register():
             sel = tree.selection()
-            if not sel:
-                messagebox.showwarning("!", "Vui lòng chọn hệ thống cần kết nối từ danh sách")
-                return
-            
-            # Get data from selected row
+            if not sel: return messagebox.showwarning("!", "Vui lòng chọn hệ thống")
             item = tree.item(sel[0])['values']
-            conn_id = item[0]
-            conn_name = item[1]
-            remote_sys_id = item[2]
-
-            # Gửi yêu cầu kết nối với thông tin hệ thống được chọn
-            root.config(cursor="watch") # Đổi chuột sang trạng thái chờ
-            root.update()
-            
-            result = hkb_service.register_client(
-                system_id=remote_sys_id,
-                external_id=current_user_id,
-                description=f"đang yêu cầu kết nối hệ thống {conn_name}",
-                user_info={"app": "Face Attendance System"},
-                system_connection_id=conn_id,
-                system_register=AuthServiceConfig.SYSTEM_ID
-            )
-            
-            root.config(cursor="") # Trả lại chuột bình thường
-            
-            if result and result.success:
-                msg = result.message if result.message else f"Đã gửi yêu cầu kết nối tới: {conn_name}"
-                messagebox.showinfo("Thành công", msg)
-                refresh_list()
-            else:
-                err_msg = result.message if result and result.message else "Gửi yêu cầu kết nối thất bại"
-                messagebox.showerror("Lỗi", err_msg)
-
-        def on_revoke():
-            sel = tree.selection()
-            if not sel:
-                messagebox.showwarning("!", "Vui lòng chọn hệ thống cần hủy kết nối")
-                return
-            
-            item = tree.item(sel[0])['values']
-            conn_name = item[1]
-            remote_sys_id = item[2]
-            status_str = item[5]
-
-            if status_str != "Đã kết nối":
-                messagebox.showwarning("!", "Hệ thống này chưa được kết nối!")
-                return
-
-            if not messagebox.askyesno("Xác nhận", f"Bạn có chắc chắn muốn hủy kết nối với {conn_name}?\nHành động này sẽ vô hiệu hóa API Key hiện tại."):
-                return
-
-            # Lấy API Key từ MongoDB cục bộ
-            auth_data = mongo_db.auth_services.find_one({"uuid": remote_sys_id})
-            if not auth_data or not auth_data.get("key"):
-                messagebox.showerror("Lỗi", "Không tìm thấy API Key cục bộ để thực hiện hủy!")
-                return
-            
-            api_key = auth_data["key"]
-
-            # Mặc định mật khẩu là 123 khi hủy kết nối
-            password = "123"
-
-            root.config(cursor="watch")
-            root.update()
-            
-            result = hkb_service.revoke_connection(
-                system_id=remote_sys_id,
-                api_key=api_key,
-                password=password
-            )
-            
-            root.config(cursor="")
-            
-            if result and result.success:
-                messagebox.showinfo("Thành công", f"Đã hủy kết nối thành công với: {conn_name}")
-                refresh_list()
-            else:
-                err_msg = result.message if result and result.message else "Hủy kết nối thất bại"
-                messagebox.showerror("Lỗi", err_msg)
+            root.config(cursor="watch"); root.update()
+            res = hkb_service.register_client(system_id=item[2], external_id=current_user_id, description=f"Yêu cầu từ {item[1]}", user_info={"app": "Face Attendance"}, system_connection_id=item[0], system_register=AuthServiceConfig.SYSTEM_ID)
+            root.config(cursor=""); refresh_list()
+            if res and res.success: messagebox.showinfo("Thành công", "Đã gửi yêu cầu kết nối")
+            else: messagebox.showerror("Lỗi", res.message if res else "Thất bại")
 
         def on_get_employees():
             sel = tree.selection()
-            if not sel:
-                messagebox.showwarning("!", "Vui lòng chọn hệ thống để lấy danh sách nhân sự")
-                return
-            
+            if not sel: return messagebox.showwarning("!", "Vui lòng chọn hệ thống")
             item = tree.item(sel[0])['values']
-            conn_name = item[1]
-            remote_sys_id = item[2]
-            endpoint = item[3]
-            status_str = item[5]
-
-            if status_str != "Đã kết nối":
-                messagebox.showwarning("!", "Hệ thống này chưa được kết nối! Vui lòng đăng ký trước.")
-                return
-
-            # Lấy API Key từ MongoDB cục bộ
-            auth_data = mongo_db.auth_services.find_one({"uuid": remote_sys_id})
-            if not auth_data or not auth_data.get("key"):
-                messagebox.showerror("Lỗi", "Không tìm thấy API Key cục bộ để thực hiện lấy dữ liệu!")
-                return
+            if item[5] != "Đã kết nối": return messagebox.showwarning("!", "Chưa được kết nối")
             
-            api_key = auth_data["key"]
-            ext_id = auth_data.get("user_id", current_user_id)
-
-            root.config(cursor="watch")
-            root.update()
+            auth_data = mongo_db.auth_services.find_one({"uuid": item[2]})
+            if not auth_data: return messagebox.showerror("Lỗi", "Thiếu API Key")
             
-            result = hkb_service.get_employees(
-                endpoint=endpoint,
-                system_id=remote_sys_id,
-                api_key=api_key,
-                user_id=ext_id
-            )
-            
+            root.config(cursor="watch"); root.update()
+            res = hkb_service.get_employees(endpoint=item[3], system_id=item[2], api_key=auth_data["key"], user_id=auth_data.get("user_id", current_user_id))
             root.config(cursor="")
-            
-            if result and result.success:
-                employees = result.data
-                if not employees or not isinstance(employees, list):
-                    messagebox.showinfo("Thông báo", "Không có dữ liệu nhân sự hoặc định dạng không đúng.")
-                    return
-                
-                # Determine target company ID for saving
-                target_cid = remote_sys_id
-                if str(self.session_role).lower() == 'company' and self.session_company_id:
-                    target_cid = self.session_company_id
-                    logger.info(f"Company user sync: using forced company_id '{target_cid}' instead of system uuid '{remote_sys_id}'")
-                
-                # Hiển thị danh sách nhân sự trong một cửa sổ mới
-                self.show_remote_employees_ui(conn_name, employees, target_cid)
-            else:
-                err_msg = result.message if result and result.message else "Lấy danh sách nhân sự thất bại"
-                if result and result.data and "raw" in result.data:
-                    logger.debug(f"Raw response: {result.data['raw']}")
-                messagebox.showerror("Lỗi", err_msg)
+            if res and res.success: self.show_remote_employees_ui(item[1], res.data, item[2])
+            else: messagebox.showerror("Lỗi", res.message if res else "Thất bại")
 
-        tree.pack(expand=True, fill="both", padx=10, pady=10)
+        btn_frame = ctk.CTkFrame(root, fg_color="transparent")
+        btn_frame.pack(pady=20)
+        ctk.CTkButton(btn_frame, text="LÀM MỚI", command=refresh_list, width=120).pack(side=tk.LEFT, padx=10)
+        ctk.CTkButton(btn_frame, text="ĐĂNG KÝ KẾT NỐI", command=on_register, width=150, fg_color="#28a745").pack(side=tk.LEFT, padx=10)
+        ctk.CTkButton(btn_frame, text="ĐỒNG BỘ NHÂN VIÊN", command=on_get_employees, width=150, fg_color="#17a2b8").pack(side=tk.LEFT, padx=10)
+        ctk.CTkButton(btn_frame, text="ĐÓNG", command=root.destroy, width=100, fg_color="gray").pack(side=tk.LEFT, padx=10)
         
-        btn_container = tk.Frame(root)
-        btn_container.pack(pady=10)
-
-        tk.Button(btn_container, text="LÀM MỚI", command=refresh_list, width=15).pack(side=tk.LEFT, padx=5)
-        tk.Button(btn_container, text="ĐĂNG KÝ HỆ THỐNG", command=on_register, width=15, bg="#28a745", fg="white").pack(side=tk.LEFT, padx=5)
-        tk.Button(btn_container, text="LẤY DANH SÁCH NV", command=on_get_employees, width=15, bg="#17a2b8", fg="white").pack(side=tk.LEFT, padx=5)
-        tk.Button(btn_container, text="HỦY KẾT NỐI", command=on_revoke, width=15, bg="#dc3545", fg="white").pack(side=tk.LEFT, padx=5)
-        tk.Button(btn_container, text="ĐÓNG", command=root.destroy, width=15, bg="#007bff", fg="white").pack(side=tk.LEFT, padx=5)
-
         refresh_list()
         root.mainloop()
 
     def show_remote_employees_ui(self, system_name, employees, target_company_id):
-        """
-        Displays a list of employees fetched from a remote system with saving options.
-        """
+        """Modernized UI to view and save remote employees using CustomTkinter."""
         import tkinter as tk
         from tkinter import ttk, messagebox
+        import customtkinter as ctk
 
-        root = tk.Tk()
+        root = ctk.CTk()
         root.title(f"Nhân viên từ {system_name}")
-        root.geometry("900x550")
+        root.geometry("1000x700")
         root.attributes('-topmost', True)
 
-        tk.Label(root, text=f"DANH SÁCH NHÂN VIÊN - {system_name}", font=("Arial", 12, "bold")).pack(pady=10)
-        tk.Label(root, text=f"Công ty: {target_company_id}", font=("Arial", 10, "italic"), fg="gray").pack()
-        tk.Label(root, text=f"Tìm thấy: {len(employees)} nhân sự", font=("Arial", 10)).pack(pady=5)
+        ctk.CTkLabel(root, text=f"ĐỒNG BỘ NHÂN VIÊN: {system_name.upper()}", font=("Arial", 20, "bold"), text_color="#1f6aa5").pack(pady=20)
 
-        # Create Treeview with multiple selection enabled (default)
+        tree_frame = ctk.CTkFrame(root)
+        tree_frame.pack(fill="both", expand=True, padx=20, pady=10)
+
         columns = ("user_id", "name", "bday", "sex", "group")
-        tree = ttk.Treeview(root, columns=columns, show="headings", selectmode="extended")
-        
-        tree.heading("user_id", text="Mã nhân viên")
+        tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="extended")
+        tree.heading("user_id", text="Mã NV")
         tree.heading("name", text="Họ và tên")
         tree.heading("bday", text="Ngày sinh")
         tree.heading("sex", text="Giới tính")
-        tree.heading("group", text="Nhóm/Phòng ban")
-        
-        tree.column("user_id", width=100, anchor="center")
-        tree.column("name", width=200)
-        tree.column("bday", width=100, anchor="center")
-        tree.column("sex", width=80, anchor="center")
-        tree.column("group", width=150)
+        tree.heading("group", text="Phòng ban")
+        tree.pack(fill="both", expand=True)
 
-        # Store full employee data for lookup
         emp_map = {}
         for emp in employees:
             u_id = emp.get("barcode") or emp.get("user_id") or emp.get("uid") or emp.get("id") or "N/A"
             u_name = emp.get("full_name") or emp.get("name") or emp.get("user_name") or "Unknown"
-            u_bday = emp.get("birthday") or emp.get("birth_day") or "N/A"
-            u_sex = emp.get("sex") or "-"
-            u_group = emp.get("group_id") or emp.get("company_id") or emp.get("description") or "-"
-            
-            item_id = tree.insert("", tk.END, values=(u_id, u_name, u_bday, u_sex, u_group))
-            emp_map[item_id] = {
-                "id": u_id,
-                "name": u_name,
-                "bday": u_bday,
-                "cid": target_company_id
-            }
-
-        tree.pack(expand=True, fill="both", padx=10, pady=10)
+            u_bday = emp.get("birthday") or "N/A"
+            item_id = tree.insert("", tk.END, values=(u_id, u_name, u_bday, emp.get("sex", "-"), emp.get("group_id", "-")))
+            emp_map[item_id] = {"id": u_id, "name": u_name, "bday": u_bday, "cid": target_company_id}
 
         def save_to_db(selected_only=False):
-            if selected_only:
-                items = tree.selection()
-                if not items:
-                    messagebox.showwarning("!", "Vui lòng chọn ít nhất một nhân viên")
-                    return
-                targets = [emp_map[i] for i in items]
-                msg_confirm = f"Lưu {len(targets)} nhân viên đã chọn vào hệ thống?"
-            else:
-                targets = list(emp_map.values())
-                msg_confirm = f"Lưu TẤT CẢ {len(targets)} nhân viên vào hệ thống?"
-
-            if not messagebox.askyesno("Xác nhận", msg_confirm):
-                return
+            targets = [emp_map[i] for i in tree.selection()] if selected_only else list(emp_map.values())
+            if not targets: return messagebox.showwarning("!", "Không có nhân viên nào")
+            if not messagebox.askyesno("Xác nhận", f"Lưu {len(targets)} nhân viên vào hệ thống?"): return
             
-            saved_count = 0
-            errors = []
-            update_all = False
-            skip_all = False
-            
+            saved = 0
             for t in targets:
-                # Try saving normally
-                ok, msg = mongo_db.save_employee(t["id"], t["name"], t["bday"], t["cid"], force_update=False)
-                
-                if not ok and "đã tồn tại" in msg:
-                    # User already exists
-                    if skip_all:
-                        continue
-                    if update_all:
-                        ok, msg = mongo_db.save_employee(t["id"], t["name"], t["bday"], t["cid"], force_update=True)
-                    else:
-                        # Ask the user what to do
-                        # Since we might have many, we offer "Update All" or "Skip All" via a custom or multiple choice
-                        # For simplicity with basic messagebox, we'll ask Yes/No/Cancel
-                        # Yes -> Update this one, No -> Skip this one, Cancel -> Stop
-                        
-                        confirm_msg = f"Nhân viên ID '{t['id']}' ({t['name']}) đã tồn tại.\n\nBạn có muốn CẬP NHẬT thông tin mới nhất không?"
-                        
-                        # Use a more flexible dialog if possible, or just ask yes/no
-                        # To support "Update All", we can use askyesnocancel or a custom dialog.
-                        # Let's try a simple approach with a count-save pop-up
-                        
-                        res = messagebox.askyesnocancel("Phát hiện trùng lặp", confirm_msg)
-                        
-                        if res is True: # Yes: Update
-                            ok, msg = mongo_db.save_employee(t["id"], t["name"], t["bday"], t["cid"], force_update=True)
-                        elif res is False: # No: Skip
-                            continue
-                        else: # None: Cancel Batch
-                            logger.info("Batch save cancelled by user.")
-                            break
-                
-                if ok:
-                    saved_count += 1
-                    # Also sync to Qdrant if user exists there
-                    try:
-                        from src.attendance.qdrant_db import attendance
-                        user_info = attendance.get_user_info(t["id"])
-                        if user_info:
-                            # User exists in Qdrant, update their info
-                            attendance.update_user_info(t["id"], t["name"], t["bday"])
-                            logger.info(f"Synced info to Qdrant for user {t['id']}")
-                    except Exception as e:
-                        logger.warning(f"Could not sync to Qdrant for {t['id']}: {e}")
-                else:
-                    errors.append(f"ID {t['id']}: {msg}")
+                ok, _ = mongo_db.save_employee(t["id"], t["name"], t["bday"], t["cid"])
+                if ok: saved += 1
             
-            if errors:
-                error_msg = "\n".join(errors[:10])
-                if len(errors) > 10: error_msg += f"\n... và {len(errors)-10} lỗi khác"
-                messagebox.showwarning("Kết quả lưu", f"Đã lưu/cập nhật {saved_count}/{len(targets)} nhân viên.\n\nCác lỗi:\n{error_msg}")
-            else:
-                messagebox.showinfo("Thành công", f"Đã lưu/cập nhật thành công {saved_count}/{len(targets)} nhân viên vào công ty {target_company_id}")
-            
-            if saved_count > 0:
-                root.destroy()
+            messagebox.showinfo("Kết quả", f"Đã lưu thành công {saved}/{len(targets)} nhân viên.")
+            if saved > 0: root.destroy()
 
-        btn_frame = tk.Frame(root)
-        btn_frame.pack(pady=15)
-
-        tk.Button(btn_frame, text="LƯU ĐÃ CHỌN", command=lambda: save_to_db(True), width=20, bg="#28a745", fg="white", font=("Arial", 10, "bold")).pack(side=tk.LEFT, padx=10)
-        tk.Button(btn_frame, text="LƯU TẤT CẢ", command=lambda: save_to_db(False), width=20, bg="#17a2b8", fg="white", font=("Arial", 10, "bold")).pack(side=tk.LEFT, padx=10)
-        tk.Button(btn_frame, text="HỦY", command=root.destroy, width=15).pack(side=tk.LEFT, padx=10)
+        btn_frame = ctk.CTkFrame(root, fg_color="transparent")
+        btn_frame.pack(pady=20)
+        ctk.CTkButton(btn_frame, text="LƯU ĐÃ CHỌN", command=lambda: save_to_db(True), width=150, fg_color="#28a745").pack(side=tk.LEFT, padx=10)
+        ctk.CTkButton(btn_frame, text="LƯU TẤT CẢ", command=lambda: save_to_db(False), width=150, fg_color="#17a2b8").pack(side=tk.LEFT, padx=10)
+        ctk.CTkButton(btn_frame, text="HỦY", command=root.destroy, width=100, fg_color="gray").pack(side=tk.LEFT, padx=10)
 
         root.mainloop()
 
-    @staticmethod
-    def show_company_management_ui(mongo_db):
-        """Management UI for Companies."""
-        import tkinter as tk
-        from tkinter import ttk, messagebox, simpledialog
+    def show_company_management_ui(self, mongo_db):
+        """Modernized UI for Company Management (Admin Only) using CustomTkinter."""
 
-        root = tk.Tk()
-        root.title("Quản lý Công ty")
-        root.geometry("600x500")
+        root = ctk.CTk()
+        try: root.iconbitmap("app_icon.ico")
+        except: pass
+        root.title("Bittech AI - Quản lý công ty")
+        root.geometry("800x600")
         root.attributes('-topmost', True)
 
-        tk.Label(root, text="DANH SÁCH CÔNG TY", font=("Arial", 12, "bold")).pack(pady=10)
+        ctk.CTkLabel(root, text="DANH SÁCH CÔNG TY TRÊN HỆ THỐNG", font=("Arial", 20, "bold"), text_color="#1f6aa5").pack(pady=20)
 
-        tree = ttk.Treeview(root, columns=("id", "name", "desc"), show="headings")
-        tree.heading("id", text="Company ID")
+        tree_frame = ctk.CTkFrame(root)
+        tree_frame.pack(fill="both", expand=True, padx=20, pady=10)
+
+        columns = ("id", "name", "desc")
+        tree = ttk.Treeview(tree_frame, columns=columns, show="headings")
+        tree.heading("id", text="Mã công ty (ID)")
         tree.heading("name", text="Tên công ty")
         tree.heading("desc", text="Mô tả")
         
-        tree.column("id", width=120)
-        tree.column("name", width=200)
-        tree.column("desc", width=200)
+        tree.column("id", width=150)
+        tree.column("name", width=250)
+        tree.column("desc", width=250)
+        tree.pack(fill="both", expand=True)
 
         def refresh():
-            for i in tree.get_children(): tree.delete(i)
+            for item in tree.get_children(): tree.delete(item)
             for c in mongo_db.get_all_companies():
                 tree.insert("", tk.END, values=(c.get('company_id'), c.get('name'), c.get('description')))
 
         def on_add():
-            add_win = tk.Toplevel(root)
-            add_win.title("Thêm Công ty")
-            add_win.geometry("300x250")
+            add_win = ctk.CTkToplevel(root)
+            add_win.title("Thêm công ty mới")
+            add_win.geometry("400x400")
+            add_win.attributes('-topmost', True)
             
-            tk.Label(add_win, text="Company ID:").pack()
-            e_id = tk.Entry(add_win); e_id.pack()
-            tk.Label(add_win, text="Tên công ty:").pack()
-            e_name = tk.Entry(add_win); e_name.pack()
-            tk.Label(add_win, text="Mô tả:").pack()
-            e_desc = tk.Entry(add_win); e_desc.pack()
+            ctk.CTkLabel(add_win, text="THÔNG TIN CÔNG TY", font=("Arial", 16, "bold")).pack(pady=20)
+            
+            ctk.CTkLabel(add_win, text="Mã Công ty (ID):").pack(anchor="w", padx=40)
+            e_id = ctk.CTkEntry(add_win, width=320)
+            e_id.pack(pady=5)
+            
+            ctk.CTkLabel(add_win, text="Tên Công ty:").pack(anchor="w", padx=40)
+            e_name = ctk.CTkEntry(add_win, width=320)
+            e_name.pack(pady=5)
+            
+            ctk.CTkLabel(add_win, text="Mô tả:").pack(anchor="w", padx=40)
+            e_desc = ctk.CTkEntry(add_win, width=320)
+            e_desc.pack(pady=5)
             
             def submit():
-                cid, name, desc = e_id.get(), e_name.get(), e_desc.get()
-                if not cid or not name: return messagebox.showwarning("!", "Nhập ID & Tên")
+                cid, name, desc = e_id.get().strip(), e_name.get().strip(), e_desc.get().strip()
+                if not cid or not name: return messagebox.showwarning("!", "Vui lòng nhập đầy đủ ID và Tên công ty")
                 success, msg = mongo_db.create_company(cid, name, desc)
                 if success:
-                    messagebox.showinfo("OK", "Đã thêm công ty")
+                    messagebox.showinfo("Thành công", f"Đã thêm công ty {name} thành công")
                     add_win.destroy()
                     refresh()
                 else: messagebox.showerror("Lỗi", msg)
             
-            tk.Button(add_win, text="LƯU", command=submit, bg="green", fg="white").pack(pady=10)
+            ctk.CTkButton(add_win, text="LƯU CÔNG TY", command=submit, height=40, font=("Arial", 14, "bold")).pack(pady=30)
 
         def on_delete():
             sel = tree.selection()
             if not sel: return
             cid = tree.item(sel[0])['values'][0]
-            if messagebox.askyesno("Xác nhận", f"Xóa công ty {cid}?"):
+            if messagebox.askyesno("Xác nhận", f"Bạn có chắc muốn xóa công ty {cid}?\nTất cả nhân viên thuộc công ty này sẽ bị mất liên kết."):
                 if mongo_db.delete_company(cid):
-                    messagebox.showinfo("OK", "Đã xóa")
+                    messagebox.showinfo("OK", "Đã xóa công ty thành công")
                     refresh()
-                else: messagebox.showerror("Lỗi", "Không thể xóa")
+                else: messagebox.showerror("Lỗi", "Không thể xóa công ty này")
 
-        tree.pack(fill="both", expand=True, padx=10)
-        btn_frame = tk.Frame(root); btn_frame.pack(pady=10)
-        tk.Button(btn_frame, text="LÀM MỚI", command=refresh).pack(side=tk.LEFT, padx=5)
-        tk.Button(btn_frame, text="THÊM MỚI", command=on_add, bg="green", fg="white").pack(side=tk.LEFT, padx=5)
-        tk.Button(btn_frame, text="XÓA", command=on_delete, bg="red", fg="white").pack(side=tk.LEFT, padx=5)
-        tk.Button(btn_frame, text="ĐÓNG", command=root.destroy).pack(side=tk.LEFT, padx=5)
-
+        btn_frame = ctk.CTkFrame(root, fg_color="transparent")
+        btn_frame.pack(pady=20)
+        
+        ctk.CTkButton(btn_frame, text="LÀM MỚI", command=refresh, width=120).pack(side=tk.LEFT, padx=10)
+        ctk.CTkButton(btn_frame, text="THÊM MỚI", command=on_add, width=120, fg_color="#28a745", hover_color="#218838").pack(side=tk.LEFT, padx=10)
+        ctk.CTkButton(btn_frame, text="XÓA CÔNG TY", command=on_delete, width=120, fg_color="#dc3545", hover_color="#c82333").pack(side=tk.LEFT, padx=10)
+        ctk.CTkButton(btn_frame, text="ĐÓNG", command=root.destroy, width=100, fg_color="gray").pack(side=tk.LEFT, padx=10)
+        
         refresh()
         root.mainloop()
 
-    @staticmethod
-    def show_user_management_ui(mongo_db):
-        """Management UI for Cloud Users (Logins)."""
-        import tkinter as tk
-        from tkinter import ttk, messagebox
+    def show_user_management_ui(self, mongo_db):
+        """Modernized UI to manage system users (Admin Only) using CustomTkinter."""
 
-        root = tk.Tk()
-        root.title("Quản lý User Hệ thống")
-        root.geometry("600x500")
+        root = ctk.CTk()
+        try: root.iconbitmap("app_icon.ico")
+        except: pass
+        root.title("Bittech AI - Quản lý tài khoản")
+        root.geometry("800x600")
         root.attributes('-topmost', True)
 
-        tk.Label(root, text="DANH SÁCH USER (ADMIN/COMPANY)", font=("Arial", 12, "bold")).pack(pady=10)
+        ctk.CTkLabel(root, text="DANH SÁCH TÀI KHOẢN HỆ THỐNG", font=("Arial", 20, "bold"), text_color="#1f6aa5").pack(pady=20)
 
-        tree = ttk.Treeview(root, columns=("user", "role", "company"), show="headings")
-        tree.heading("user", text="Username")
+        # Treeview (still using standard ttk for tabular data, but wrapped in custom frame)
+        tree_frame = ctk.CTkFrame(root)
+        tree_frame.pack(fill="both", expand=True, padx=20, pady=10)
+
+        columns = ("user", "role", "company")
+        tree = ttk.Treeview(tree_frame, columns=columns, show="headings")
+        tree.heading("user", text="Tên đăng nhập")
         tree.heading("role", text="Quyền")
-        tree.heading("company", text="Phân quyền Công ty")
-        
-        # Helper for display names in the list
-        all_companies = mongo_db.get_all_companies()
-        company_id_to_name = {c.get("company_id"): c.get("name", c.get("company_id")) for c in all_companies}
-        company_id_to_name["admin"] = "Admin (Cổng Tổng)"
+        tree.heading("company", text="Mã công ty")
+        tree.pack(fill="both", expand=True)
 
         def refresh():
-            for i in tree.get_children(): tree.delete(i)
-            for u in mongo_db.get_all_cloud_users():
-                cid = u.get('company_id', 'admin')
-                cname = company_id_to_name.get(cid, cid)
-                tree.insert("", tk.END, values=(u.get('username'), u.get('role'), cname))
+            for item in tree.get_children(): tree.delete(item)
+            users = mongo_db.db.users.find()
+            for u in users:
+                tree.insert("", tk.END, values=(u.get("username"), u.get("role"), u.get("company_id")))
 
         def on_add():
-            from tkinter import ttk
-            add_win = tk.Toplevel(root); add_win.title("Thêm User Mới"); add_win.geometry("300x420")
+            add_win = ctk.CTkToplevel(root)
+            add_win.title("Thêm tài khoản mới")
+            add_win.geometry("400x500")
+            add_win.attributes('-topmost', True)
             
-            tk.Label(add_win, text="Username:").pack(pady=5)
-            e_user = tk.Entry(add_win); e_user.pack()
+            ctk.CTkLabel(add_win, text="THÊM TÀI KHOẢN", font=("Arial", 16, "bold")).pack(pady=20)
             
-            tk.Label(add_win, text="Password:").pack(pady=5)
-            e_pwd = tk.Entry(add_win, show="*"); e_pwd.pack()
+            ctk.CTkLabel(add_win, text="Username:").pack(anchor="w", padx=40)
+            e_user = ctk.CTkEntry(add_win, width=320)
+            e_user.pack(pady=5)
             
-            tk.Label(add_win, text="Quyền hạn:").pack(pady=5)
-            e_role = ttk.Combobox(add_win, values=["admin", "company"])
-            e_role.set("company"); e_role.pack()
+            ctk.CTkLabel(add_win, text="Password:").pack(anchor="w", padx=40)
+            e_pwd = ctk.CTkEntry(add_win, width=320, show="*")
+            e_pwd.pack(pady=5)
             
-            tk.Label(add_win, text="Phân quyền Công ty:").pack(pady=5)
+            ctk.CTkLabel(add_win, text="Quyền hạn:").pack(anchor="w", padx=40)
+            e_role = ctk.CTkComboBox(add_win, values=["admin", "company", "staff"], width=320)
+            e_role.pack(pady=5)
             
-            # Map display names to IDs
+            ctk.CTkLabel(add_win, text="Gán cho công ty:").pack(anchor="w", padx=40)
+            # Fetch company list
+            all_companies = mongo_db.db.companies.find()
             company_map = {"Admin (Cổng Tổng)": "admin"}
             company_display_list = ["Admin (Cổng Tổng)"]
-            
             for c in all_companies:
                 cid = c.get("company_id")
                 cname = c.get("name", cid)
@@ -1504,8 +1254,8 @@ class AttendanceUI:
                 company_map[display_text] = cid
                 company_display_list.append(display_text)
             
-            e_cid = ttk.Combobox(add_win, values=company_display_list, state="readonly")
-            e_cid.set("Admin (Cổng Tổng)"); e_cid.pack()
+            e_cid = ctk.CTkComboBox(add_win, values=company_display_list, width=320)
+            e_cid.set("Admin (Cổng Tổng)"); e_cid.pack(pady=5)
             
             def submit():
                 u, p, r = e_user.get(), e_pwd.get(), e_role.get()
@@ -1522,7 +1272,7 @@ class AttendanceUI:
                 else:
                     messagebox.showerror("Lỗi", msg)
 
-            tk.Button(add_win, text="LƯU TÀI KHOẢN", command=submit, bg="#28a745", fg="white", font=("Arial", 10, "bold")).pack(pady=20)
+            ctk.CTkButton(add_win, text="LƯU TÀI KHOẢN", command=submit, height=40, font=("Arial", 14, "bold")).pack(pady=30)
 
         def on_delete():
             sel = tree.selection()
@@ -1535,37 +1285,42 @@ class AttendanceUI:
                     refresh()
                 else: messagebox.showerror("Lỗi", "Không thể xóa")
 
-        tree.pack(fill="both", expand=True, padx=10)
-        btn_frame = tk.Frame(root); btn_frame.pack(pady=10)
-        tk.Button(btn_frame, text="LÀM MỚI", command=refresh).pack(side=tk.LEFT, padx=5)
-        tk.Button(btn_frame, text="THÊM MỚI", command=on_add, bg="green", fg="white").pack(side=tk.LEFT, padx=5)
-        tk.Button(btn_frame, text="XÓA USER", command=on_delete, bg="red", fg="white").pack(side=tk.LEFT, padx=5)
-        tk.Button(btn_frame, text="ĐÓNG", command=root.destroy).pack(side=tk.LEFT, padx=5)
+        btn_frame = ctk.CTkFrame(root, fg_color="transparent")
+        btn_frame.pack(pady=20)
+        
+        ctk.CTkButton(btn_frame, text="LÀM MỚI", command=refresh, width=120).pack(side=tk.LEFT, padx=10)
+        ctk.CTkButton(btn_frame, text="THÊM MỚI", command=on_add, width=120, fg_color="#28a745", hover_color="#218838").pack(side=tk.LEFT, padx=10)
+        ctk.CTkButton(btn_frame, text="XÓA TÀI KHOẢN", command=on_delete, width=120, fg_color="#dc3545", hover_color="#c82333").pack(side=tk.LEFT, padx=10)
+        ctk.CTkButton(btn_frame, text="ĐÓNG", command=root.destroy, width=100, fg_color="gray").pack(side=tk.LEFT, padx=10)
         
         refresh()
         root.mainloop()
 
     def show_login_dialog(self):
         """
-        Shows a login dialog for admin authentication.
+        Shows a modern login dialog for admin authentication using CustomTkinter.
         """
-        import tkinter as tk
-        from tkinter import messagebox
-        from src.attendance.mongodb_mgr import mongo_db
-
-        login_root = tk.Tk()
-        login_root.title("System Login")
-        window_width, window_height = 300, 200
+        # Close any existing OpenCV windows to avoid overlap issues if needed
+        # cv2.destroyAllWindows() 
+        
+        login_root = ctk.CTk()
+        try: login_root.iconbitmap("app_icon.ico")
+        except: pass
+        login_root.title("Bittech AI - Đăng nhập")
+        window_width, window_height = 400, 450
+        
+        # Center the window
         screen_width = login_root.winfo_screenwidth()
         screen_height = login_root.winfo_screenheight()
         pos_x = (screen_width // 2) - (window_width // 2)
         pos_y = (screen_height // 2) - (window_height // 2)
         login_root.geometry(f"{window_width}x{window_height}+{pos_x}+{pos_y}")
         login_root.attributes('-topmost', True)
+        login_root.resizable(False, False)
         
         login_status = {"authenticated": False}
 
-        def attempt_login():
+        def attempt_login(event=None):
             user = entry_user.get()
             pwd = entry_pwd.get()
             
@@ -1574,85 +1329,106 @@ class AttendanceUI:
             
             if auth_info:
                 login_status["authenticated"] = True
-                self.is_admin_logged_in = True # Keeping the flag name but role based now
+                self.is_admin_logged_in = True 
                 self.session_role = auth_info["role"]
                 self.session_company_id = auth_info["company_id"]
                 self.session_username = auth_info["username"]
-                self.session_user_id = auth_info.get("user_id", 1) # Lấy user_id từ DB nếu có
+                self.session_user_id = auth_info.get("user_id", 1)
                 login_root.destroy()
             else:
-                messagebox.showerror("Lỗi", "Sai tài khoản hoặc mật khẩu Cloud!")
+                messagebox.showerror("Lỗi đăng nhập", "Sai tài khoản hoặc mật khẩu hệ thống Cloud!")
 
-        tk.Label(login_root, text="ĐĂNG NHẬP HỆ THỐNG", font=("Arial", 10, "bold")).pack(pady=10)
-        tk.Label(login_root, text="Tên đăng nhập:").pack()
-        entry_user = tk.Entry(login_root)
-        entry_user.pack()
-        tk.Label(login_root, text="Mật khẩu:").pack()
-        entry_pwd = tk.Entry(login_root, show="*")
-        entry_pwd.pack()
+        # UI Construction
+        main_frame = ctk.CTkFrame(login_root)
+        main_frame.pack(padx=20, pady=20, fill="both", expand=True)
+
+        ctk.CTkLabel(main_frame, text="HỆ THỐNG AI CHẤM CÔNG", font=("Arial", 18, "bold"), text_color="#1f6aa5").pack(pady=(20, 30))
         
-        tk.Button(login_root, text="ĐĂNG NHẬP", command=attempt_login, bg="#007bff", fg="white").pack(pady=10)
+        ctk.CTkLabel(main_frame, text="Tên đăng nhập", font=("Arial", 12)).pack(anchor="w", padx=30)
+        entry_user = ctk.CTkEntry(main_frame, width=280, height=35, placeholder_text="Nhập username...")
+        entry_user.pack(pady=(5, 15))
+        
+        ctk.CTkLabel(main_frame, text="Mật khẩu", font=("Arial", 12)).pack(anchor="w", padx=30)
+        entry_pwd = ctk.CTkEntry(main_frame, width=280, height=35, placeholder_text="Nhập mật khẩu...", show="*")
+        entry_pwd.pack(pady=(5, 30))
+        
+        btn_login = ctk.CTkButton(main_frame, text="ĐĂNG NHẬP", command=attempt_login, width=280, height=40, font=("Arial", 14, "bold"))
+        btn_login.pack(pady=10)
+        
+        def on_exit_app():
+            login_status["authenticated"] = "EXIT"
+            login_root.destroy()
+
+        ctk.CTkButton(main_frame, text="THOÁT", command=on_exit_app, width=150, fg_color="gray").pack(pady=5)
+        
+        # Support Enter key
+        login_root.bind('<Return>', attempt_login)
 
         login_root.mainloop()
         return login_status["authenticated"]
 
     @staticmethod
     def show_system_settings_ui(mongo_db, session_username="GLOBAL"):
-        """UI to manage settings like Group Keys and Camera (user-specific)."""
-        import tkinter as tk
-        from tkinter import messagebox
-
-        root = tk.Tk()
-        root.title("Cài đặt Hệ thống")
-        root.geometry("600x550")
+        """Modernized UI to manage settings like Group Keys and Camera using CustomTkinter."""
+        root = ctk.CTk()
+        try: root.iconbitmap("app_icon.ico")
+        except: pass
+        root.title("Bittech AI - Cài đặt hệ thống")
+        root.geometry("650x600")
         root.attributes('-topmost', True)
+        root.resizable(False, False)
 
-        tk.Label(root, text="CẤU HÌNH HỆ THỐNG", font=("Arial", 14, "bold")).pack(pady=20)
+        ctk.CTkLabel(root, text="CẤU HÌNH HỆ THỐNG", font=("Arial", 20, "bold"), text_color="#1f6aa5").pack(pady=20)
 
-        main_frame = tk.Frame(root)
-        main_frame.pack(fill="both", expand=True, padx=20)
+        main_frame = ctk.CTkFrame(root)
+        main_frame.pack(fill="both", expand=True, padx=20, pady=10)
 
-        # --- A. CAMERA CONFIG (New) ---
-        tk.Label(main_frame, text="CẤU HÌNH CAMERA (RTSP)", font=("Arial", 10, "bold"), fg="blue").pack(anchor="w", pady=(0, 5))
+        # --- A. CAMERA CONFIG ---
+        cam_group = ctk.CTkFrame(main_frame, fg_color="transparent")
+        cam_group.pack(fill="x", padx=20, pady=10)
         
-        cam_frame = tk.Frame(main_frame)
-        cam_frame.pack(fill="x", pady=5)
+        ctk.CTkLabel(cam_group, text="CẤU HÌNH CAMERA (RTSP)", font=("Arial", 13, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
         
-        # Grid for camera fields
-        tk.Label(cam_frame, text="IP Camera:").grid(row=0, column=0, sticky="e", pady=2)
-        e_ip = tk.Entry(cam_frame, width=25)
-        e_ip.grid(row=0, column=1, padx=5); e_ip.insert(0, mongo_db.get_setting("camera_ip", "192.168.1.1", username=session_username))
+        # IP & Port row
+        ctk.CTkLabel(cam_group, text="IP Camera:").grid(row=1, column=0, sticky="w", pady=5)
+        e_ip = ctk.CTkEntry(cam_group, width=180, placeholder_text="192.168.1.100")
+        e_ip.grid(row=1, column=1, padx=5, sticky="w")
+        e_ip.insert(0, mongo_db.get_setting("camera_ip", "192.168.1.1", username=session_username))
         
-        tk.Label(cam_frame, text="Port (RTSP):").grid(row=0, column=2, sticky="e", pady=2)
-        e_port = tk.Entry(cam_frame, width=10)
-        e_port.grid(row=0, column=3, padx=5); e_port.insert(0, mongo_db.get_setting("camera_port", "554", username=session_username))
+        ctk.CTkLabel(cam_group, text="Port:").grid(row=1, column=2, sticky="w", pady=5, padx=(10, 0))
+        e_port = ctk.CTkEntry(cam_group, width=80, placeholder_text="554")
+        e_port.grid(row=1, column=3, padx=5, sticky="w")
+        e_port.insert(0, mongo_db.get_setting("camera_port", "554", username=session_username))
         
-        tk.Label(cam_frame, text="Username:").grid(row=1, column=0, sticky="e", pady=2)
-        e_user = tk.Entry(cam_frame, width=25)
-        e_user.grid(row=1, column=1, padx=5); e_user.insert(0, mongo_db.get_setting("camera_user", "admin", username=session_username))
+        # User & Pass row
+        ctk.CTkLabel(cam_group, text="Tài khoản:").grid(row=2, column=0, sticky="w", pady=5)
+        e_user = ctk.CTkEntry(cam_group, width=180, placeholder_text="admin")
+        e_user.grid(row=2, column=1, padx=5, sticky="w")
+        e_user.insert(0, mongo_db.get_setting("camera_user", "admin", username=session_username))
         
-        tk.Label(cam_frame, text="Password:").grid(row=1, column=2, sticky="e", pady=2)
-        e_pass = tk.Entry(cam_frame, width=25, show="*")
-        e_pass.grid(row=1, column=3, padx=5); e_pass.insert(0, mongo_db.get_setting("camera_pass", "password", username=session_username))
-
-        tk.Label(main_frame, text="----------------------------------------------------------", fg="gray").pack(pady=10)
+        ctk.CTkLabel(cam_group, text="Mật khẩu:").grid(row=2, column=2, sticky="w", pady=5, padx=(10, 0))
+        e_pass = ctk.CTkEntry(cam_group, width=180, placeholder_text="password", show="*")
+        e_pass.grid(row=2, column=3, padx=5, sticky="w")
+        e_pass.insert(0, mongo_db.get_setting("camera_pass", "password", username=session_username))
 
         # --- B. GROUP KEYS ---
-        tk.Label(main_frame, text="Group Keys (Các key cách nhau bởi dấu phẩy):", font=("Arial", 10, "bold"), fg="blue").pack(anchor="w", pady=(0, 5))
+        keys_group = ctk.CTkFrame(main_frame, fg_color="transparent")
+        keys_group.pack(fill="both", expand=True, padx=20, pady=10)
+        
+        ctk.CTkLabel(keys_group, text="GROUP KEYS (Phân cách bởi dấu phẩy)", font=("Arial", 13, "bold")).pack(anchor="w", pady=(0, 5))
+        
         current_keys = mongo_db.get_setting("group_keys", "", username=session_username)
-        text_keys = tk.Text(main_frame, height=4, width=65)
-        text_keys.pack(pady=5)
+        text_keys = ctk.CTkTextbox(keys_group, height=120, font=("Consolas", 12))
+        text_keys.pack(fill="both", expand=True, pady=5)
         text_keys.insert("1.0", current_keys)
 
         def save_settings():
-            # Get values
             new_keys = text_keys.get("1.0", "end-1c").strip()
             ip = e_ip.get().strip()
             port = e_port.get().strip()
             user = e_user.get().strip()
             pwd = e_pass.get().strip()
             
-            # Save all to DB
             success = True
             success &= mongo_db.set_setting("group_keys", new_keys, username=session_username)
             success &= mongo_db.set_setting("camera_ip", ip, username=session_username)
@@ -1661,16 +1437,17 @@ class AttendanceUI:
             success &= mongo_db.set_setting("camera_pass", pwd, username=session_username)
             
             if success:
-                messagebox.showinfo("Thành công", "Đã lưu cài đặt hệ thống!\nBạn cần khởi động lại dịch vụ Camera để áp dụng thay đổi IP/Pass.")
+                messagebox.showinfo("Thành công", "Đã lưu cài đặt hệ thống!\nBạn cần khởi động lại dịch vụ Camera để áp dụng thay đổi.")
                 root.destroy()
             else:
                 messagebox.showerror("Lỗi", "Không thể lưu cài đặt!")
 
-        btn_frame = tk.Frame(root)
+        # Action Buttons
+        btn_frame = ctk.CTkFrame(root, fg_color="transparent")
         btn_frame.pack(pady=20, side=tk.BOTTOM)
         
-        tk.Button(btn_frame, text="LƯU CÀI ĐẶT", command=save_settings, bg="#28a745", fg="white", width=20, font=("Arial", 10, "bold")).pack(side=tk.LEFT, padx=10)
-        tk.Button(btn_frame, text="HỦY", command=root.destroy, width=15).pack(side=tk.LEFT, padx=10)
+        ctk.CTkButton(btn_frame, text="LƯU CÀI ĐẶT", command=save_settings, width=180, height=40, font=("Arial", 13, "bold")).pack(side=tk.LEFT, padx=10)
+        ctk.CTkButton(btn_frame, text="ĐÓNG", command=root.destroy, width=120, height=40, fg_color="gray", hover_color="#555555").pack(side=tk.LEFT, padx=10)
 
         root.mainloop()
 

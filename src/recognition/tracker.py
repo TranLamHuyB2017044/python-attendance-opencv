@@ -204,6 +204,7 @@ class FaceTracker:
         for face in detected_faces:
             center = self._get_center(face.bbox)
             matched_id = None
+            is_real = getattr(face, 'is_real', True)
             
             # ... (matching logic remains the same)
             # Sort active faces by distance to current center to find the best match first
@@ -227,7 +228,7 @@ class FaceTracker:
                     'start_time': current_time,
                     'last_seen': current_time,
                     'center': center,
-                    'status': 'STABILIZING',
+                    'status': 'STABILIZING' if is_real else 'SPOOF_DETECTED',
                     'user_data': None,
                     'cooldown_remaining': 0,
                     'unknown_attempts': 0,
@@ -238,13 +239,21 @@ class FaceTracker:
                 f_data['last_seen'] = current_time
                 f_data['center'] = center
                 
+                # Check for spoofing even if previously real
+                if not is_real:
+                    f_data['status'] = 'SPOOF_DETECTED'
+                elif f_data['status'] == 'SPOOF_DETECTED' and is_real:
+                    # Reset if it was spoof but now real (e.g. tracker flipped)
+                    f_data['status'] = 'STABILIZING'
+                    f_data['start_time'] = current_time
+
                 time_stayed = current_time - f_data['start_time']
                 wait_time = current_time - f_data['last_attempt_time']
                 can_attempt = False
                 
                 # Check if we can attempt recognition, but ONLY if none done this frame yet
                 # Note: Already recognized or cooldown faces do NOT block others
-                if f_data['status'] in ['RECOGNIZED', 'COOLDOWN']:
+                if not is_real or f_data['status'] in ['RECOGNIZED', 'COOLDOWN', 'SPOOF_DETECTED']:
                     can_attempt = False
                 elif not recognition_done_this_frame:
                     if f_data['status'] == 'STABILIZING':
@@ -253,6 +262,8 @@ class FaceTracker:
                     elif f_data['status'] in ['RETRY_WAIT', 'UNAUTHORIZED']:
                         if f_data['unknown_attempts'] < 5 or wait_time >= 5.0:
                             can_attempt = True
+                
+                # ... (rest of recognition logic)
 
                 if can_attempt:
                     if attendance_mgr is None:
@@ -367,10 +378,15 @@ class FaceTracker:
                         face.name = f"Chua ro (Thu lai {max(0, wait_left)}s)"
                     elif data['status'] == 'UNAUTHORIZED':
                         face.name = "!!! TRUY CAP LAI !!!"
+                    elif data['status'] == 'SPOOF_DETECTED':
+                        face.name = "!!! CANH BAO: MAT GIA !!!"
                     else:
                         face.name = remove_accents(u_d.get('name', 'Chua ro'))
                 else:
-                    face.name = "Dang phan tich..."
+                    if data['status'] == 'SPOOF_DETECTED':
+                        face.name = "MAT GIA / SPOOF"
+                    else:
+                        face.name = "Dang phan tich..."
                     face.score = 0.0
 
         self.active_faces = {k: v for k, v in updated_faces_map.items() if current_time - v['last_seen'] < 1.0}

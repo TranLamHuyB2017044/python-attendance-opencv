@@ -115,6 +115,9 @@ def main():
     preview_interval = 1.0 / preview_fps 
 
     try:
+        from src.attendance.mongodb_mgr import mongo_db
+        CameraConfig.load_from_mongodb(mongo_db)
+        
         face_rec = FaceRecognition()
         attendance = QdrantAttendanceManager()
         camera = RTSPCamera()

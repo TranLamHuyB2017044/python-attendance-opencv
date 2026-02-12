@@ -74,6 +74,37 @@ class CameraConfig:
     ROI_SIZE: Tuple[int, int] = (1280, 720) # Match default resolution, no cropping
     
     @classmethod
+    def load_from_mongodb(cls, mongo_db):
+        """
+        Fetch latest camera settings from MongoDB and update the static config.
+        This allows the app and background service to be configured via the Management UI.
+        """
+        try:
+            # 1. Get settings from DB, fallback to current class values (from .env)
+            ip = mongo_db.get_setting("camera_ip", cls.IP)
+            port = mongo_db.get_setting("camera_port", str(cls.PORT))
+            user = mongo_db.get_setting("camera_user", cls.USER)
+            pwd = mongo_db.get_setting("camera_pass", cls.PASS)
+
+            # 2. Update class attributes
+            cls.IP = ip
+            cls.PORT = int(port)
+            cls.USER = user
+            cls.PASS = pwd
+
+            # 3. Re-build RTSP_URL template
+            # If a full RTSP_URL exists in .env, we keep it, otherwise build from parts
+            raw_env_url = os.getenv("RTSP_URL")
+            if not raw_env_url:
+                cls.RTSP_URL = f"rtsp://{cls.USER}:{cls.PASS}@{cls.IP}:{cls.PORT}/ch1/main"
+            
+            logger.info(f"CameraConfig: Updated settings from MongoDB -> {cls.IP}:{cls.PORT}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to load camera settings from MongoDB: {e}")
+            return False
+
+    @classmethod
     def validate(cls) -> bool:
         """Validate camera configuration."""
         if not cls.RTSP_URL or cls.RTSP_URL == "":
