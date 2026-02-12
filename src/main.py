@@ -48,28 +48,25 @@ def get_target_company(ui, mongo_db, allow_selection=True):
                     logger.info(f"Admin selected company: {picked}")
                     return picked
                 else:
-                    # User cancelled selection
+                    logger.warning("Company selection cancelled.")
                     return None
             else:
-                # No companies exist, use admin's default
-                logger.warning("No companies found, using admin default")
-                return ui.session_company_id or MongoDbConfig.COMPANY_ID
+                logger.warning("No companies found in database.")
+                return "" # Fallback
         else:
-            # Direct use of session company
-            return ui.session_company_id or MongoDbConfig.COMPANY_ID
+            cid = ui.session_company_id or ""
+            logger.info(f"Admin using session company: '{cid}'")
+            return cid
     
-    # Fallback to session company or config default
-    return ui.session_company_id or MongoDbConfig.COMPANY_ID
-
+    return "" # Default fallback
 
 
 def enroll_from_camera(camera, face_rec, attendance, ui):
     """
     Enroll a user by capturing face samples from the camera.
     """
-    from src.attendance.mongodb_mgr import MongoDbManager
+    from src.attendance.mongodb_mgr import mongo_db
     from src.config import MongoDbConfig
-    mongo_db = MongoDbManager()
     
     user_info = ui.get_user_form(
         include_upload=False, 
@@ -299,6 +296,174 @@ def enroll_by_upload(face_rec, attendance, ui):
         logger.error(traceback.format_exc())
 
 
+def handle_edit_logic(attendance, face_rec, ui, camera):
+    """
+    Handles the sequence for editing a user: Company Selection -> User Picking -> Details Edit -> (Optional) Re-enroll.
+    """
+    # 1. Determine target company with access control
+    target_company = get_target_company(ui, mongo_db, allow_selection=True)
+    
+    if target_company is None:
+        return
+    
+    # For company users, we also want to see employees from their connected HKB systems
+    filter_company = target_company
+    if str(ui.session_role).lower() == "company":
+        conns = list(mongo_db.auth_services.find({"user_id": ui.session_user_id}))
+        if conns:
+            filter_company = [target_company] if target_company else []
+            for c in conns:
+                if c["uuid"] not in filter_company:
+                    filter_company.append(c["uuid"])
+            logger.info(f"Company user '{ui.session_username}' editing merged list for IDs: {filter_company}")
+
+    # 2. Get merged employee list (MongoDB + Qdrant) for this company ONLY
+    mongo_employees = mongo_db.get_all_employees(company_id=filter_company)
+    qdrant_employees = attendance.get_all_users(company_id=filter_company)
+    
+    # Merge employee lists
+    all_employees = []
+    seen_ids = set()
+    
+    # First add all from Qdrant (have face data)
+    for emp in qdrant_employees:
+        u_id_str = str(emp['user_id'])
+        if u_id_str not in seen_ids:
+            all_employees.append({
+                'user_id': u_id_str,
+                'user_name': emp['user_name'],
+                'birthday': emp['birthday'],
+                'has_face': True
+            })
+            seen_ids.add(u_id_str)
+    
+    # Then add MongoDB-only employees (no face data yet)
+    for emp in mongo_employees:
+        # Normalize to string for comparison
+        if str(emp['user_id']) not in seen_ids:
+            all_employees.append({
+                'user_id': emp['user_id'],
+                'user_name': emp['name'],
+                'birthday': emp.get('birthday', 'N/A'),
+                'has_face': False
+            })
+            seen_ids.add(str(emp['user_id']))
+    
+    # 3. Pick User from merged list
+    u_id = ui.pick_user_ui(all_employees)
+    
+    if u_id:
+        logger.info(f"Selected user_id for edit: {u_id}")
+        
+        # 4. Get user info - try Qdrant first, then MongoDB
+        user_info = attendance.get_user_info(u_id)
+        
+        if not user_info:
+            logger.info(f"User {u_id} not found in Qdrant, checking MongoDB...")
+            mongo_emp = next((e for e in mongo_employees if str(e['user_id']) == str(u_id)), None)
+            if mongo_emp:
+                user_info = {
+                    "user_id": mongo_emp['user_id'],
+                    "user_name": mongo_emp['name'],
+                    "birthday": mongo_emp.get('birthday', 'N/A')
+                }
+            else:
+                logger.warning(f"User {u_id} not found in MongoDB either!")
+        
+        if user_info:
+            edit_res = ui.get_edit_user_form(
+                user_info["user_id"], 
+                user_info["user_name"], 
+                user_info["birthday"],
+                session_role=ui.session_role
+            )
+            if edit_res:
+                if edit_res["delete"]:
+                    # Delete from both Qdrant and MongoDB
+                    attendance.delete_user(u_id)
+                    mongo_db.employees.delete_one({"user_id": str(u_id), "company_id": target_company})
+                    logger.success(f"Da xoa nhan vien ID: {u_id}")
+                
+                elif edit_res["enroll_camera"]:
+                    # Update thong tin trước, sau đó dang ký qua camera
+                    attendance.update_user_info(u_id, edit_res["name"], edit_res["bday"])
+                    mongo_db.save_employee(str(u_id), edit_res["name"], edit_res["bday"], target_company, force_update=True)
+                    
+                    if not camera.is_connected: camera.connect()
+                    
+                    # Trigger collection
+                    samples = []
+                    try:
+                        while len(samples) < 5:
+                            success, frame = camera.read_frame()
+                            if not success or frame is None: continue
+                            
+                            display_frame = frame.copy()
+                            faces = face_rec.detect_and_extract(frame)
+                            h, w = display_frame.shape[:2]
+                            
+                            if faces:
+                                faces.sort(key=lambda x: (x.bbox[2]-x.bbox[0])*(x.bbox[3]-x.bbox[1]), reverse=True)
+                                bbox = faces[0].bbox.astype(int)
+                                cv2.rectangle(display_frame, (bbox[0], bbox[1]), (bbox[2], bbox[3]), (255, 255, 0), 2)
+                                cv2.putText(display_frame, f"Mau {len(samples)}/5", (10, 30), 0, 0.8, (255, 255, 0), 2)
+                            else:
+                                cv2.putText(display_frame, "Khong tim thay mat!", (10, 30), 0, 0.8, (0, 0, 255), 2)
+                            
+                            cv2.rectangle(display_frame, (0, h-60), (w, h), (0, 0, 0), -1)
+                            cv2.putText(display_frame, "[S] Luu mau  [F] Hoan thanh  [M] Menu  [C] Huy", (10, h-20), 0, 0.7, (255, 255, 255), 2)
+                            cv2.imshow("Che do Dang ky", display_frame)
+                            key = cv2.waitKey(1) & 0xFF
+                            if key == ord('s'):
+                                if faces:
+                                    samples.append(faces[0].normed_embedding)
+                                    logger.info(f"Captured sample {len(samples)}/5")
+                            elif key == ord('f') and len(samples) >= 1: break
+                            elif key in [ord('m'), ord('c')]: break
+                        
+                        if len(samples) >= 1:
+                            attendance.upsert_user(edit_res["name"], u_id, edit_res["bday"], samples, clear_old=True, company_id=target_company)
+                            from tkinter import messagebox
+                            root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
+                            messagebox.showinfo("Thành công", f"Đã đăng ký khuôn mặt cho {edit_res['name']}")
+                            root.destroy()
+                    finally:
+                        try: cv2.destroyWindow("Che do Dang ky")
+                        except: pass
+                
+                elif edit_res["enroll_upload"]:
+                    # Update thong tin truoc
+                    attendance.update_user_info(u_id, edit_res["name"], edit_res["bday"])
+                    mongo_db.save_employee(str(u_id), edit_res["name"], edit_res["bday"], target_company, force_update=True)
+                    
+                    from tkinter import filedialog
+                    root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
+                    file_paths = filedialog.askopenfilenames(title="Chọn ảnh khuôn mặt", filetypes=[("Image files", "*.jpg *.jpeg *.png *.webp")])
+                    root.destroy()
+                    
+                    if file_paths:
+                        samples = []
+                        for fp in file_paths[:5]:
+                            img = cv2.imread(fp)
+                            if img is not None:
+                                faces = face_rec.detect_and_extract(img)
+                                if faces: samples.append(faces[0].normed_embedding)
+                        
+                        if len(samples) >= 1:
+                            attendance.upsert_user(edit_res["name"], u_id, edit_res["bday"], samples, clear_old=True, company_id=target_company)
+                            root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
+                            messagebox.showinfo("Thành công", f"Đã cập nhật {len(samples)} ảnh cho {edit_res['name']}")
+                            root.destroy()
+                else:
+                    # Only update info
+                    mongo_db.save_employee(str(u_id), edit_res["name"], edit_res["bday"], target_company, force_update=True)
+                    attendance.update_user_info(u_id, edit_res["name"], edit_res["bday"])
+                    logger.success(f"Da cap nhat thong tin ID: {u_id}")
+        else:
+            from tkinter import messagebox
+            messagebox.showerror("Lỗi", "Không tìm thấy thông tin nhân viên")
+
+
 def main():
     setup_logger()
     logger.info("Initializing Face Attendance System...")
@@ -478,249 +643,7 @@ def main():
                 continue
 
             elif ui.current_state == STATE_EDIT:
-                # 1. Determine target company with access control
-                target_company = get_target_company(ui, mongo_db, allow_selection=True)
-                
-                if target_company is None:
-                    # User cancelled company selection
-                    ui.current_state = STATE_MENU
-                    continue
-                
-                # For company users, we also want to see employees from their connected HKB systems
-                filter_company = target_company
-                if str(ui.session_role).lower() == "company":
-                    conns = list(mongo_db.auth_services.find({"user_id": ui.session_user_id}))
-                    if conns:
-                        filter_company = [target_company] if target_company else []
-                        for c in conns:
-                            if c["uuid"] not in filter_company:
-                                filter_company.append(c["uuid"])
-                        logger.info(f"Company user '{ui.session_username}' editing merged list for IDs: {filter_company}")
-
-                # 2. Get merged employee list (MongoDB + Qdrant) for this company ONLY
-                mongo_employees = mongo_db.get_all_employees(company_id=filter_company)
-                qdrant_employees = attendance.get_all_users(company_id=filter_company)
-                
-                # Merge employee lists
-                all_employees = []
-                seen_ids = set()
-                
-                # First add all from Qdrant (have face data)
-                for emp in qdrant_employees:
-                    u_id_str = str(emp['user_id'])
-                    if u_id_str not in seen_ids:
-                        all_employees.append({
-                            'user_id': u_id_str,
-                            'user_name': emp['user_name'],
-                            'birthday': emp['birthday'],
-                            'has_face': True
-                        })
-                        seen_ids.add(u_id_str)
-                
-                # Then add MongoDB-only employees (no face data yet)
-                for emp in mongo_employees:
-                    # Normalize to string for comparison
-                    if str(emp['user_id']) not in seen_ids:
-                        all_employees.append({
-                            'user_id': emp['user_id'],
-                            'user_name': emp['name'],
-                            'birthday': emp.get('birthday', 'N/A'),
-                            'has_face': False
-                        })
-                        seen_ids.add(str(emp['user_id']))
-                
-                # 3. Pick User from merged list
-                u_id = ui.pick_user_ui(all_employees)
-                
-                if u_id:
-                    logger.info(f"Selected user_id for edit: {u_id} (type: {type(u_id)})")
-                    
-                    # 4. Get user info - try Qdrant first, then MongoDB
-                    user_info = attendance.get_user_info(u_id)
-                    
-                    if not user_info:
-                        logger.info(f"User {u_id} not found in Qdrant, checking MongoDB...")
-                        # Employee exists only in MongoDB, get from there
-                        # Convert both to string for comparison
-                        mongo_emp = next((e for e in mongo_employees if str(e['user_id']) == str(u_id)), None)
-                        if mongo_emp:
-                            user_info = {
-                                "user_id": mongo_emp['user_id'],
-                                "user_name": mongo_emp['name'],
-                                "birthday": mongo_emp.get('birthday', 'N/A')
-                            }
-                            logger.info(f"Found user in MongoDB: {user_info}")
-                        else:
-                            logger.warning(f"User {u_id} not found in MongoDB either!")
-                    else:
-                        logger.info(f"Found user in Qdrant: {user_info}")
-                    
-                    if user_info:
-                        edit_res = AttendanceUI.get_edit_user_form(
-                            user_info["user_id"], 
-                            user_info["user_name"], 
-                            user_info["birthday"],
-                            session_role=ui.session_role
-                        )
-                        if edit_res:
-                            if edit_res["delete"]:
-                                # Delete from both Qdrant and MongoDB
-                                attendance.delete_user(u_id)
-                                mongo_db.employees.delete_one({"user_id": str(u_id), "company_id": target_company})
-                                logger.success(f"Da xoa nhan vien ID: {u_id}")
-                            
-                            elif edit_res["enroll_camera"]:
-                                # Update info first, then enroll via camera
-                                attendance.update_user_info(u_id, edit_res["name"], edit_res["bday"])
-                                mongo_db.save_employee(str(u_id), edit_res["name"], edit_res["bday"], target_company, force_update=True)
-                                logger.info(f"Updated info for {u_id}, starting camera enrollment...")
-                                
-                                # Trigger camera enrollment
-                                if not camera.is_connected:
-                                    camera.connect()
-                                
-                                # Call enrollment function
-                                samples = []
-                                logger.info(f"Collecting 3-5 samples for '{edit_res['name']}' (ID: {u_id}). Press 's' to capture, 'f' to finish, 'm' to menu, 'c' to cancel.")
-                                
-                                try:
-                                    while len(samples) < 5:
-                                        success, frame = camera.read_frame()
-                                        if not success or frame is None:
-                                            continue
-                                            
-                                        display_frame = frame.copy()
-                                        faces = face_rec.detect_and_extract(frame)
-                                        
-                                        # Get frame dimensions
-                                        h, w = display_frame.shape[:2]
-                                        
-                                        if faces:
-                                            faces.sort(key=lambda x: (x.bbox[2]-x.bbox[0])*(x.bbox[3]-x.bbox[1]), reverse=True)
-                                            bbox = faces[0].bbox.astype(int)
-                                            cv2.rectangle(display_frame, (bbox[0], bbox[1]), (bbox[2], bbox[3]), (255, 255, 0), 2)
-                                            cv2.putText(display_frame, f"Mau {len(samples)}/5", (10, 30),
-                                                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
-                                        else:
-                                            cv2.putText(display_frame, "Khong tim thay mat!", (10, 30),
-                                                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-                                        
-                                        # Add instruction panel at bottom
-                                        cv2.rectangle(display_frame, (0, h-60), (w, h), (0, 0, 0), -1)
-                                        cv2.putText(display_frame, "[S] Luu mau  [F] Hoan thanh  [M] Menu  [C] Huy", (10, h-20),
-                                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-
-                                        cv2.imshow("Che do Dang ky", display_frame)
-                                        key = cv2.waitKey(1) & 0xFF
-                                        
-                                        if key == ord('s'):
-                                            if faces:
-                                                samples.append(faces[0].normed_embedding)
-                                                logger.info(f"Captured sample {len(samples)}/5")
-                                            else:
-                                                logger.warning("No face detected to capture.")
-                                        elif key == ord('f'):
-                                            if len(samples) >= 1:
-                                                break
-                                        elif key == ord('m'):
-                                            logger.info("Returning to menu...")
-                                            break
-                                        elif key == ord('c'):
-                                            logger.warning("Enrollment cancelled by user.")
-                                            break
-
-                                    if len(samples) >= 1:
-                                        ok = attendance.upsert_user(edit_res["name"], u_id, edit_res["bday"], samples, clear_old=True, company_id=target_company)
-                                        if ok:
-                                            logger.success(f"Da dang ky khuon mat cho: {edit_res['name']} (ID: {u_id})")
-                                            
-                                            from tkinter import messagebox
-                                            import tkinter as tk
-                                            msg_root = tk.Tk()
-                                            msg_root.withdraw()
-                                            messagebox.showinfo("Thành công", f"Đã đăng ký khuôn mặt cho {edit_res['name']}")
-                                            msg_root.destroy()
-                                        else:
-                                            logger.error(f"Lỗi khi lưu dữ liệu vào Qdrant cho {u_id}")
-                                            from tkinter import messagebox
-                                            import tkinter as tk
-                                            msg_root = tk.Tk()
-                                            msg_root.withdraw()
-                                            messagebox.showerror("Lỗi", "Không thể lưu dữ liệu khuôn mặt vào hệ thống nhận diện.")
-                                            msg_root.destroy()
-                                
-                                finally:
-                                    # Always cleanup window
-                                    try:
-                                        cv2.destroyWindow("Che do Dang ky")
-                                    except:
-                                        pass
-                            
-                            elif edit_res["enroll_upload"]:
-                                # Update info first, then enroll via file upload
-                                attendance.update_user_info(u_id, edit_res["name"], edit_res["bday"])
-                                mongo_db.save_employee(str(u_id), edit_res["name"], edit_res["bday"], target_company, force_update=True)
-                                logger.info(f"Updated info for {u_id}, starting file upload enrollment...")
-                                
-                                # Trigger file upload enrollment
-                                from tkinter import filedialog
-                                import tkinter as tk
-                                
-                                file_root = tk.Tk()
-                                file_root.withdraw()
-                                file_paths = filedialog.askopenfilenames(
-                                    title="Chọn ảnh khuôn mặt (Ít nhất 1 ảnh)",
-                                    filetypes=[("Image files", "*.jpg *.jpeg *.png *.bmp *.webp")]
-                                )
-                                file_root.destroy()
-                                
-                                if file_paths and len(file_paths) >= 1:
-                                    samples = []
-                                    for fpath in file_paths[:5]:
-                                        img = cv2.imread(fpath)
-                                        if img is not None:
-                                            faces = face_rec.detect_and_extract(img)
-                                            if faces:
-                                                samples.append(faces[0].normed_embedding)
-                                                logger.info(f"Extracted face from {fpath}")
-                                    
-                                    if len(samples) >= 1:
-                                        ok = attendance.upsert_user(edit_res["name"], u_id, edit_res["bday"], samples, clear_old=True, company_id=target_company)
-                                        if ok:
-                                            logger.success(f"Da dang ky khuon mat cho: {edit_res['name']} (ID: {u_id})")
-                                            
-                                            from tkinter import messagebox
-                                            import tkinter as tk
-                                            msg_root = tk.Tk()
-                                            msg_root.withdraw()
-                                            messagebox.showinfo("Thành công", f"Đã đăng ký {len(samples)} ảnh khuôn mặt cho {edit_res['name']}")
-                                            msg_root.destroy()
-                                        else:
-                                            logger.error(f"Lỗi khi lưu dữ liệu vào Qdrant cho {u_id}")
-                                            from tkinter import messagebox
-                                            import tkinter as tk
-                                            msg_root = tk.Tk()
-                                            msg_root.withdraw()
-                                            messagebox.showerror("Lỗi", "Không thể lưu dữ liệu khuôn mặt vào hệ thống nhận diện.")
-                                            msg_root.destroy()
-                                    else:
-                                        from tkinter import messagebox
-                                        import tkinter as tk
-                                        msg_root = tk.Tk()
-                                        msg_root.withdraw()
-                                        messagebox.showwarning("Cảnh báo", "Không tìm thấy khuôn mặt hợp lệ trong các ảnh đã chọn!")
-                                        msg_root.destroy()
-                            
-                            else:
-                                # Just update info, no enrollment (Force update)
-                                mongo_db.save_employee(str(u_id), edit_res["name"], edit_res["bday"], target_company, force_update=True)
-                                attendance.update_user_info(u_id, edit_res["name"], edit_res["bday"])
-                                logger.success(f"Da cap nhat thong tin nhan vien ID: {u_id}")
-                    else:
-                        logger.error(f"Could not find user info for {u_id}")
-                        from tkinter import messagebox
-                        messagebox.showerror("Lỗi", f"Không tìm thấy thông tin nhân viên {u_id}")
-                
+                handle_edit_logic(attendance, face_rec, ui, camera)
                 ui.current_state = STATE_MENU
                 continue
 

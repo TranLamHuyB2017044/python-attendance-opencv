@@ -100,9 +100,9 @@ class MongoDBManager:
                 status = "FAILED"
             else:
                 # --- ADDED: 15-MINUTE PERSISTENT COOLDOWN ---
-                # Check directly in DB to see if this user has checked in recently
+                # Find last record of THIS user in THIS company TODAY
                 last_record = self.logs.find_one(
-                    {"user_id": user_id, "company_id": cid},
+                    {"user_id": user_id, "company_id": cid, "date": date_str},
                     sort=[("_id", -1)]
                 )
                 
@@ -206,10 +206,12 @@ class MongoDBManager:
                     )
                     
                     if res and res.success:
-                        self.mark_logs_uploaded([log_entry["_id"]], service["uuid"])
+                        self.mark_logs_uploaded([log_entry["_id"]], service["uuid"], details={"status": "SUCCESS", "message": res.message})
                         logger.success(f"Sync: Successfully synced to {service['app_name']}")
                     else:
-                        logger.warning(f"Sync: Failed to sync to {service['app_name']}: {res.message if res else 'No response'}")
+                        msg = res.message if res else 'No response'
+                        self.mark_logs_uploaded([log_entry["_id"]], service["uuid"], details={"status": "FAILED", "message": msg})
+                        logger.warning(f"Sync: Failed to sync to {service['app_name']}: {msg}")
             
             except Exception as e:
                 logger.error(f"Sync: Background task error: {e}")
@@ -366,6 +368,18 @@ class MongoDBManager:
         """Get list of all companies."""
         return list(self.companies.find().sort("name", 1))
 
+    def get_company_name(self, company_id):
+        """Retrieve company name from its ID."""
+        try:
+            if not company_id or company_id == "admin":
+                return "Admin"
+            company = self.companies.find_one({"company_id": str(company_id)})
+            if company:
+                return company.get("name", str(company_id))
+            return str(company_id)
+        except Exception:
+            return str(company_id)
+
     def get_all_cloud_users(self):
         """Get list of all management users."""
         return list(self.users.find().sort("username", 1))
@@ -404,17 +418,26 @@ class MongoDBManager:
             logger.error(f"Failed to save auth service: {e}")
             return False
 
-    def mark_logs_uploaded(self, log_ids, system_id):
-        """Mark attendance logs as uploaded to a specific system."""
+    def mark_logs_uploaded(self, log_ids, system_id, details=None):
+        """
+        Mark attendance logs as uploaded to a specific system.
+        details: dict example {"status": "SUCCESS", "message": "OK"}
+        """
         try:
             from bson.objectid import ObjectId
             object_ids = [ObjectId(log_id) for log_id in log_ids]
             
+            update_data = {"$addToSet": {"uploaded_to": system_id}}
+            if details:
+                # Store full history if needed, or just last status
+                details["system_id"] = system_id
+                details["timestamp"] = datetime.utcnow()
+                update_data["$push"] = {"upload_history": details}
+
             result = self.logs.update_many(
                 {"_id": {"$in": object_ids}},
-                {"$addToSet": {"uploaded_to": system_id}}
+                update_data
             )
-            logger.success(f"Marked {result.modified_count} logs as uploaded to {system_id}")
             return True
         except Exception as e:
             logger.error(f"Failed to mark logs as uploaded: {e}")

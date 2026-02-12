@@ -161,9 +161,13 @@ class FaceTracker:
             annotated_frame = cv2.resize(annotated_frame, (max_w, target_h))
             logger.debug(f"Image resized from {w}x{h} to {max_w}x{target_h} for sync.")
 
-        # Determine image subdirectory (by company_id)
+        # Determine image subdirectory (by company name instead of uuid)
         current_time = time.time()
-        company_folder = str(company_id) if company_id else "unknown_company"
+        
+        raw_company_name = mongo_db.get_company_name(company_id) if company_id else "unknown_company"
+        # Make folder name safe (remove accents, spaces to underscores)
+        company_folder = remove_accents(raw_company_name).replace(" ", "_")
+        
         target_dir = CAPTURES_DIR / company_folder
         target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -187,7 +191,7 @@ class FaceTracker:
         url = f"{ApiConfig.BASE_URL}/captures/{company_folder}/{img_name}"
         return url, res_status
 
-    def update(self, detected_faces, attendance_mgr, frame=None, company_id=None):
+    def update(self, detected_faces, attendance_mgr, frame=None, company_id=None, only_recognize=False):
         """
         Assigns IDs and decides when to trigger recognition or alerts.
         """
@@ -257,11 +261,9 @@ class FaceTracker:
                             can_attempt = True
 
                 if can_attempt:
-                    # Skip recognition if attendance manager is None (monitor-only mode)
                     if attendance_mgr is None:
-                        # In monitor mode, just mark as "Monitoring" without logging
                         f_data['status'] = 'MONITORING'
-                        f_data['user_name'] = 'Monitoring...'
+                        f_data['user_name'] = 'DANG PHAN TICH...'
                         f_data['user_id'] = 'N/A'
                         continue
                     
@@ -269,6 +271,14 @@ class FaceTracker:
                     user_data = attendance_mgr.recognize(face.normed_embedding)
                     user_id = user_data.get('user_id', 'Unknown')
                     user_name = user_data.get('name', 'Unknown')
+
+                    # If only_recognize is True, we just update the UI data and skip everything else
+                    if only_recognize:
+                        f_data['status'] = 'RECOGNIZED'
+                        f_data['user_name'] = user_name
+                        f_data['user_id'] = user_id
+                        f_data['user_data'] = user_data
+                        continue
                     
                     if user_name != "Unknown":
                         # CASE: THÀNH CÔNG
@@ -305,10 +315,10 @@ class FaceTracker:
                             # Send Webhook notification (with 15-min deduplication)
                             self._send_user_webhook(user_id, user_name, status, is_unknown=False)
                         
-                        # --- Tự động bổ sung embedding nếu chưa đủ 5 mẫu ---
+                        # --- Tự động bổ sung embedding nếu chưa đủ 10 mẫu ---
                         vector_count = user_data.get('vector_count', 0)
-                        if vector_count < 5:
-                            logger.info(f"Auto-enriching: {user_name} has {vector_count}/5 samples. Adding new one...")
+                        if vector_count < 10:
+                            logger.info(f"Auto-enriching: {user_name} has {vector_count}/10 samples. Adding new one...")
                             attendance_mgr.upsert_user(
                                 user_name=user_name,
                                 user_id=user_id,

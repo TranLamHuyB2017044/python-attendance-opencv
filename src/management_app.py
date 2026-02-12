@@ -33,7 +33,7 @@ from src.ui.app_ui import (
     STATE_HKB_LIST, STATE_COMPANY, STATE_CLOUD_USER, STATE_LOGOUT, STATE_SETTINGS,
     STATE_TEST_CAM
 )
-from src.main import enroll_from_camera, enroll_by_upload, get_target_company
+from src.main import enroll_from_camera, enroll_by_upload, get_target_company, handle_edit_logic
 from src.config import DATA_DIR, MongoDbConfig, CameraConfig
 
 from src.utils.notification import show_error_message, send_notification
@@ -150,52 +150,100 @@ def main():
                     last_w, last_h = cur_w, cur_h
                 
             elif ui.current_state == STATE_DETECT:
-                # --- CHẾ ĐỘ GIÁM SÁT TRỰC TIẾP (SMOOTH STREAM) ---
-                cam_ip = mongo_db.get_setting("camera_ip", CameraConfig.IP, username=ui.session_username)
-                cam_port = mongo_db.get_setting("camera_port", CameraConfig.PORT, username=ui.session_username)
-                cam_user = mongo_db.get_setting("camera_user", CameraConfig.USER, username=ui.session_username)
-                cam_pass = mongo_db.get_setting("camera_pass", CameraConfig.PASS, username=ui.session_username)
+                if not service_active:
+                    from tkinter import messagebox
+                    import threading
+                    def show_warn():
+                        import tkinter as tk
+                        msg_root = tk.Tk(); msg_root.withdraw(); msg_root.attributes('-topmost', True)
+                        messagebox.showwarning("Dịch Vụ Đang Tắt", "Dịch vụ Camera ẩn chưa chạy.\n\nHướng dẫn:\n1. Vui lòng mở file 'service_main.exe' trước khi xem live.")
+                        msg_root.destroy()
+                    threading.Thread(target=show_warn, daemon=True).start()
+                    ui.current_state = STATE_MENU
+                    continue
+
+                # --- LIVE PREVIEW FROM BACKGROUND SERVICE (MJPEG STREAM) ---
+                from src.config import DATA_DIR
+                preview_path = DATA_DIR / "camera_preview.jpg"
                 
-                new_url = f"rtsp://{cam_user}:{cam_pass}@{cam_ip}:{cam_port}/ch1/main"
-                if cam_ip.isdigit(): new_url = int(cam_ip)
+                # Prepare Display Frame
+                display_frame = np.zeros((cur_h, cur_w, 3), dtype=np.uint8)
+                preview_img = None
+
+                # --- LIVE PREVIEW FROM SHARED MEMORY (ULTRA STABLE) ---
+                from src.config import DATA_DIR
+                preview_path = DATA_DIR / "camera_preview.jpg"
                 
-                if not camera.is_connected or str(camera.camera_source) != str(new_url):
-                    camera.disconnect()
-                    camera = RTSPCamera(rtsp_url=str(new_url))
-                    if not camera.connect():
-                        from tkinter import messagebox
-                        messagebox.showerror("Lỗi", f"Không thể kết nối camera tại {cam_ip}!")
-                        ui.current_state = STATE_MENU
-                        continue
+                # Prepare Display Frame
+                display_frame = np.zeros((cur_h, cur_w, 3), dtype=np.uint8)
+                preview_img = None
+
+                if service_active:
+                    try:
+                        from multiprocessing import shared_memory
+                        # Connect or Reset SHM
+                        if not hasattr(main, 'shm_obj') or main.shm_obj is None:
+                            try:
+                                main.shm_obj = shared_memory.SharedMemory(name="bittech_monitor_shm")
+                            except:
+                                main.shm_obj = None
+                        
+                        if main.shm_obj is not None:
+                            # 1. READ SEQUENCE START
+                            seq1 = int(main.shm_obj.buf[0])
+                            
+                            # Valid data only if sequence is EVEN
+                            if seq1 % 2 == 0:
+                                # 2. Read size
+                                size_bytes = main.shm_obj.buf[1:5]
+                                size = np.frombuffer(size_bytes, dtype=np.uint32)[0]
+                                
+                                # Safety check for size
+                                if 100 < size < 4.8 * 1024 * 1024:
+                                    # 3. Read JPEG data
+                                    img_data = bytes(main.shm_obj.buf[5:5+size])
+                                    
+                                    # 4. READ SEQUENCE END
+                                    seq2 = int(main.shm_obj.buf[0])
+                                    
+                                    # Confirm data was NOT changed during read
+                                    if seq1 == seq2:
+                                        nparr = np.frombuffer(img_data, dtype=np.uint8)
+                                        # Use high-performance imdecode
+                                        decoded = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                                        if decoded is not None:
+                                            preview_img = decoded
+                                            main.last_valid_frame = preview_img
+                    except Exception as e:
+                        # Reset SHM object on any error to self-heal
+                        main.shm_obj = None
+
+                # --- ULTIMATE FLICKER & FREEZE PREVENTION ---
+                if preview_img is None and hasattr(main, 'last_valid_frame'):
+                    preview_img = main.last_valid_frame
                 
-                mon_tracker = FaceTracker(threshold_seconds=1.0)
-                f_count = 0
-                mon_faces = []
-                
-                while ui.current_state == STATE_DETECT:
-                    success, frame = camera.read_frame()
-                    if not success or frame is None:
-                        f = np.zeros((cur_h, cur_w, 3), dtype=np.uint8)
-                        cv2.putText(f, "KHONG THE DOC FRAME", (cur_w//2-100, cur_h//2), 0, 0.7, (0,0,255), 2)
-                        cv2.imshow(win_name, f)
-                        if cv2.waitKey(1) & 0xFF == ord('m'): break
-                        continue
+                if preview_img is not None:
+                    p_h, p_w = preview_img.shape[:2]
+                    # True Full screen scaling (fit to window)
+                    scale_w = cur_w / p_w
+                    scale_h = cur_h / p_h 
+                    scale = min(scale_w, scale_h)
                     
-                    f_count += 1
-                    if f_count % 3 == 0:
-                        mon_faces = face_rec.detect_and_extract(frame)
+                    target_w = int(p_w * scale)
+                    target_h = int(p_h * scale)
+                    preview_img = cv2.resize(preview_img, (target_w, target_h))
                     
-                    mon_tracker.update(mon_faces, None, frame, company_id=ui.session_company_id)
-                    display_frame = face_rec.draw_faces(frame.copy(), mon_faces)
-                    
-                    # Chỉ hiển thị video sạch, không có status bar
-                    cv2.imshow(win_name, display_frame)
-                    if cv2.waitKey(1) & 0xFF == ord('m'):
-                        break
-                
-                camera.disconnect()
-                ui.current_state = STATE_MENU
-                continue
+                    y_off = (cur_h - target_h) // 2
+                    x_off = (cur_w - target_w) // 2
+                    display_frame[y_off:y_off+target_h, x_off:x_off+target_w] = preview_img
+                else:
+                    cv2.putText(display_frame, "DANG KET NOI MONITOR...", (cur_w//2 - 150, cur_h//2), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
+
+                # Subtle hint at the bottom
+                cv2.putText(display_frame, "[M] Thoat", (10, cur_h - 10), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (80, 80, 80), 1)
+
 
             elif ui.current_state == STATE_ENROLL_CAM:
                 if not camera.is_connected:
@@ -214,7 +262,6 @@ def main():
                 continue
 
             elif ui.current_state == STATE_LIST:
-                from src.main import get_target_company
                 target_cid = get_target_company(ui, mongo_db, allow_selection=True)
                 if target_cid:
                     mongo_employees = mongo_db.get_all_employees(company_id=target_cid)
@@ -235,7 +282,6 @@ def main():
                 continue
             
             elif ui.current_state == STATE_EDIT:
-                from src.main import handle_edit_logic
                 handle_edit_logic(attendance, face_rec, ui, camera)
                 ui.current_state = STATE_MENU
                 continue
@@ -267,9 +313,30 @@ def main():
                 ui.current_state = STATE_MENU
                 continue
             
+            elif ui.current_state == STATE_CLOUD_USER:
+                ui.show_user_management_ui(mongo_db)
+                ui.current_state = STATE_MENU
+                continue
+            
+            elif ui.current_state == STATE_COMPANY:
+                ui.show_company_management_ui(mongo_db)
+                ui.current_state = STATE_MENU
+                continue
+            
             final_show = display_frame if ui.current_state in [STATE_DETECT, STATE_MENU, STATE_TEST_CAM] else ui.frame
             cv2.imshow(win_name, final_show)
-            if cv2.waitKey(1) & 0xFF == ord('q'): break
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'): break
+            elif key == ord('m'):
+                ui.current_state = STATE_MENU
+                camera.disconnect()
+                # Release stream if active
+                if hasattr(main, 'stream_cap') and main.stream_cap is None:
+                    main.stream_cap = None
+                elif hasattr(main, 'stream_cap') and main.stream_cap is not None:
+                    main.stream_cap.release()
+                    main.stream_cap = None
+
 
     finally:
         camera.disconnect()

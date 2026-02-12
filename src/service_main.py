@@ -32,6 +32,57 @@ from src.recognition.tracker import FaceTracker
 
 from src.utils.notification import send_notification, show_error_message
 
+# --- SHARED MEMORY FOR PERSISTENT MONITORING (ULTRA STABLE) ---
+from multiprocessing import shared_memory
+import numpy as np
+
+SHM_NAME = "bittech_monitor_shm"
+SHM_SIZE = 5 * 1024 * 1024 # Increased to 5MB for 720p high quality
+
+try:
+    # Try to connect to existing or create new
+    try:
+        shm = shared_memory.SharedMemory(name=SHM_NAME)
+        logger.info("Found existing Shared Memory.")
+    except FileNotFoundError:
+        shm = shared_memory.SharedMemory(name=SHM_NAME, create=True, size=SHM_SIZE)
+        logger.success("Created new Shared Memory for monitoring.")
+except Exception as e:
+    logger.error(f"Failed to init Shared Memory: {e}")
+    shm = None
+
+def write_frame_to_shm(frame):
+    """Writes JPEG bytes into the Shared Memory buffer with a sequence counter."""
+    global shm
+    if shm is None or frame is None: return
+    try:
+        # 1. Encode to JPEG
+        ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+        if not ret: return
+        
+        data = buffer.tobytes()
+        size = len(data)
+        
+        if size > SHM_SIZE - 10:
+            return
+            
+        # 2. Get current sequence and increment to ODD (Signals "Work in Progress")
+        current_seq = shm.buf[0]
+        shm.buf[0] = (current_seq + 1) % 255
+        
+        # 3. Write Size (offset 1) and Data (offset 5)
+        shm.buf[1:5] = np.array([size], dtype=np.uint32).tobytes()
+        shm.buf[5:5+size] = data
+        
+        # 4. Increment to EVEN (Signals "Done / Valid Data")
+        shm.buf[0] = (current_seq + 2) % 255
+    except Exception as e:
+        logger.debug(f"SHM Write error: {e}")
+
+# Note: FastAPI server is no longer needed but kept as empty if you want to reuse it later
+# or we can just remove uvicorn to be clean.
+# -------------------------------------------------------------
+
 def main():
     """
     Headless background service for face recognition and attendance logging.
@@ -103,22 +154,21 @@ def main():
             if not camera.is_connected:
                 if not camera.connect():
                     logger.warning("Camera not connected. Creating waiting preview...")
-                    
-                    # Create a "waiting" preview so management app doesn't freeze
                     try:
                         import numpy as np
-                        waiting_frame = np.zeros((360, 640, 3), dtype=np.uint8)
-                        cv2.putText(waiting_frame, "DANG CHO KET NOI CAMERA...", (120, 160), 
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 165, 255), 2)
-                        cv2.putText(waiting_frame, f"Retrying: {time.strftime('%H:%M:%S')}", (200, 200), 
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (150, 150, 150), 1)
-                        cv2.putText(waiting_frame, "Service is running but camera offline", (140, 240), 
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 100, 100), 1)
+                        waiting_frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+                        cv2.putText(waiting_frame, "MAT KET NOI CAMERA (RTSP ERROR)", (350, 320), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
+                        cv2.putText(waiting_frame, f"Dang thu lai: {time.strftime('%H:%M:%S')}", (480, 380), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (200, 200, 200), 2)
+                        
+                        # Ghi vào cả File và RAM để App quản lý nhận được
+                        write_frame_to_shm(waiting_frame)
                         cv2.imwrite(str(preview_path), waiting_frame, [cv2.IMWRITE_JPEG_QUALITY, 50])
                     except Exception as e:
                         logger.error(f"Failed to create waiting preview: {e}")
                     
-                    time.sleep(10) # Wait before retry
+                    time.sleep(5) # Giảm xuống 5s để phản hồi nhanh hơn
                     continue
             
             success, frame = camera.read_frame()
@@ -139,12 +189,14 @@ def main():
                 # 1. Draw results for preview
                 annotated_preview = face_rec.draw_faces(frame, faces)
                 
-                # 2. Save a small preview frame
-                small_frame = cv2.resize(annotated_preview, (640, 360))
-                # Add a "LIVE" indicator
-                cv2.putText(small_frame, f"LIVE MONITOR: {time.strftime('%H:%M:%S')}", (10, 30), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                cv2.imwrite(str(preview_path), small_frame, [cv2.IMWRITE_JPEG_QUALITY, 50])
+                # 2. Prepare high-quality preview (1280x720 for Full Screen)
+                preview_frame = cv2.resize(annotated_preview, (1280, 720))
+                
+                # Update Shared Memory for Monitoring (Ultra stable local IPC)
+                write_frame_to_shm(preview_frame.copy())
+                
+                # Still write to file as fallback for some parts of the system
+                cv2.imwrite(str(preview_path), preview_frame, [cv2.IMWRITE_JPEG_QUALITY, 50])
             except Exception as e:
                 logger.warning(f"Failed to update preview: {e}")
 

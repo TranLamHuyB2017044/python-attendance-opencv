@@ -56,17 +56,19 @@ class AttendanceUI:
                     self.current_state = STATE_LOGOUT
                     return
 
-            # --- COLUMN 1 ACTIONS ---
-            # 1. XEM SERVICE (LIVE)
-            row1_y = cY - int(120 * (h/600))
-            row1_5_y = cY - int(40 * (h/600))
-            row2_y = cY + int(40 * (h/600))
-            row3_y = cY + int(120 * (h/600))
+            # Row 1 positions
+            row1_y = cY - int(100 * (h/600))
+            # Row 2 positions
+            row2_y = cY + int(0 * (h/600))
+            # Row 3 positions
+            row3_y = cY + int(100 * (h/600))
 
+            # --- COLUMN 1 ---
+            # 1. XEM SERVICE (LIVE)
             if col1_L < x < col1_R and row1_y < y < row1_y + btn_h: 
                 self.current_state = STATE_DETECT
                 
-            # --- ADMIN & COMPANY RECOGNITION ACTIONS ---
+            # --- ADMIN & COMPANY ACTIONS ---
             if str(self.session_role).lower() in ['admin', 'company']:
                 # DANG KY CAM (Col 1, Row 2)
                 if col1_L < x < col1_R and row2_y < y < row2_y + btn_h: 
@@ -76,17 +78,17 @@ class AttendanceUI:
                 if col1_L < x < col1_R and row3_y < y < row3_y + btn_h: 
                     self.current_state = STATE_ENROLL_UPLOAD
 
-                # --- COLUMN 2 ACTIONS ---
-                # CHINH SUA (Align with Row 1)
+                # --- COLUMN 2 ---
+                # CHINH SUA (Col 2, Row 1)
                 if col2_L < x < col2_R and row1_y < y < row1_y + btn_h: 
                     self.current_state = STATE_EDIT
 
-                # DANH SACH (Align with Row 1.5)
-                elif col2_L < x < col2_R and row1_5_y < y < row1_5_y + btn_h: 
+                # DANH SACH (Col 2, Row 2)
+                elif col2_L < x < col2_R and row2_y < y < row2_y + btn_h: 
                     self.current_state = STATE_LIST
                 
-                # LICH SU (Align with Row 2)
-                elif col2_L < x < col2_R and row2_y < y < row2_y + btn_h: 
+                # LICH SU (Col 2, Row 3)
+                elif col2_L < x < col2_R and row3_y < y < row3_y + btn_h: 
                     self.current_state = STATE_HISTORY
 
             # --- ADMIN & COMPANY MANAGEMENT ---
@@ -104,12 +106,12 @@ class AttendanceUI:
             # --- ADMIN ONLY SYSTEM MANAGEMENT ---
             if str(self.session_role).lower() == 'admin':
                 # --- ADMIN ONLY BOTTOM BAR ---
-                if h - int(84*(h/600)) < y < h - int(20*(h/600)):
+                if (h - int(84*(h/600))) < y < (h - int(20*(h/600))):
                     # 2. QUAN LY USER (Bottom Center)
-                    if cX - int(120*(w/800)) < x < cX + int(120*(w/800)):
+                    if (cX - int(120*(w/800))) < x < (cX + int(120*(w/800))):
                         self.current_state = STATE_CLOUD_USER
                     # 3. QUAN LY CONG TY (Bottom Right)
-                    elif cX + int(140*(w/800)) < x < cX + int(380*(w/800)): 
+                    elif (cX + int(140*(w/800))) < x < (cX + int(380*(w/800))): 
                         self.current_state = STATE_COMPANY
 
     def draw_main_menu(self, w=1280, h=720, service_active=False):
@@ -137,11 +139,10 @@ class AttendanceUI:
         col1_x = cX - btn_w - gap_x
         col2_x = cX + gap_x
 
-        # Define Rows (Shared for both columns)
-        row1_y = cY - int(120 * (h/600))
-        row1_5_y = cY - int(40 * (h/600))
-        row2_y = cY + int(40 * (h/600))
-        row3_y = cY + int(120 * (h/600))
+        # Define Rows (Symmetrical 3x2 Layout)
+        row1_y = cY - int(100 * (h/600))
+        row2_y = cY + int(0 * (h/600))
+        row3_y = cY + int(100 * (h/600))
 
         # --- Column 1 ---
         # Button 1: Monitor Service (All users)
@@ -168,19 +169,19 @@ class AttendanceUI:
         
         # Management Buttons (Admin & Company Only)
         if role_lower in ['admin', 'company']:
-            # Button 4: Edit (Align with Row 1)
+            # Button 4: Edit (Col 2, Row 1)
             cv2.rectangle(frame, (col2_x, row1_y), (col2_x + btn_w, row1_y + btn_h), (100, 100, 100), -1)
             cv2.putText(frame, "CHINH SUA", (col2_x + int(75 * (w/800)), row1_y + int(38 * (h/600))),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8 * (w/800), (255, 255, 255), 2)
 
-            # Button 5: List (Align with Row 1.5)
-            cv2.rectangle(frame, (col2_x, row1_5_y), (col2_x + btn_w, row1_5_y + btn_h), (150, 50, 150), -1)
-            cv2.putText(frame, "DANH SACH", (col2_x + int(75 * (w/800)), row1_5_y + int(38 * (h/600))),
+            # Button 5: List (Col 2, Row 2)
+            cv2.rectangle(frame, (col2_x, row2_y), (col2_x + btn_w, row2_y + btn_h), (150, 50, 150), -1)
+            cv2.putText(frame, "DANH SACH", (col2_x + int(75 * (w/800)), row2_y + int(38 * (h/600))),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8 * (w/800), (255, 255, 255), 2)
 
-            # Button 6: History (Align with Row 2)
-            cv2.rectangle(frame, (col2_x, row2_y), (col2_x + btn_w, row2_y + btn_h), (100, 50, 0), -1)
-            cv2.putText(frame, "LICH SU", (col2_x + int(90 * (w/800)), row2_y + int(38 * (h/600))),
+            # Button 6: History (Col 2, Row 3)
+            cv2.rectangle(frame, (col2_x, row3_y), (col2_x + btn_w, row3_y + btn_h), (100, 50, 0), -1)
+            cv2.putText(frame, "LICH SU", (col2_x + int(90 * (w/800)), row3_y + int(38 * (h/600))),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8 * (w/800), (255, 255, 255), 2)
         
         # --- Instruction Table (Compact) ---
@@ -793,15 +794,93 @@ class AttendanceUI:
         tree.column("status", width=80)
         tree.column("uploaded", width=100)
 
-        # logs structure from MongoDB: (id, user_id, user_name, timestamp, date, status, image_path, uploaded_to)
+        # logs structure from MongoDB (dictionaries): _id, user_id, user_name, timestamp, date, status, image_path, uploaded_to
         for log in logs:
-            status_val = log[5] if len(log) > 5 else "N/A"
-            uploaded_to = log[7] if len(log) > 7 else []
+            status_val = log.get('status', 'N/A')
+            uploaded_to = log.get('uploaded_to', [])
             uploaded_str = "✓" if uploaded_to else ""
-            tree.insert("", tk.END, values=(log[0], log[1], log[2], log[3], status_val, uploaded_str))
+            tree.insert("", tk.END, values=(
+                str(log.get('_id', '')), 
+                log.get('user_id', 'N/A'), 
+                log.get('user_name', 'N/A'), 
+                log.get('timestamp', 'N/A'), 
+                status_val, 
+                uploaded_str
+            ))
 
         tree.pack(expand=True, fill="both", padx=10, pady=10)
         
+        def on_log_double_click(event):
+            selected_item = tree.selection()
+            if not selected_item:
+                return
+            
+            item_values = tree.item(selected_item[0])['values']
+            log_id = str(item_values[0])
+            
+            # Find the original log dict to get full details
+            from bson.objectid import ObjectId
+            from src.attendance.mongodb_mgr import mongo_db
+            log_data = mongo_db.logs.find_one({"_id": ObjectId(log_id)})
+            
+            if not log_data:
+                return
+            
+            # Create a detail window
+            detail_win = tk.Toplevel(root)
+            detail_win.title(f"Chi tiết Log: {log_id}")
+            detail_win.geometry("500x450")
+            detail_win.attributes('-topmost', True)
+            
+            label_title = tk.Label(detail_win, text="CHI TIẾT ĐIỂM DANH & UPLOAD", font=("Arial", 10, "bold"))
+            label_title.pack(pady=10)
+
+            txt = tk.Text(detail_win, wrap=tk.WORD, padx=10, pady=10, font=("Consolas", 9))
+            txt.pack(expand=True, fill="both", padx=10, pady=5)
+            
+            # Build report
+            report = []
+            report.append(f"Mã Log: {log_id}")
+            report.append(f"Nhân viên: {log_data.get('user_name')} (Mã: {log_data.get('user_id')})")
+            report.append(f"Thời gian: {log_data.get('timestamp')}")
+            report.append(f"Trạng thái: {log_data.get('status')}")
+            report.append("-" * 40)
+            
+            uploaded_to = log_data.get('uploaded_to', [])
+            report.append(f"Đã upload tới: {len(uploaded_to)} hệ thống")
+            for sys_id in uploaded_to:
+                sys_info = mongo_db.auth_services.find_one({"uuid": sys_id})
+                name = sys_info.get('app_name', sys_id) if sys_info else sys_id
+                report.append(f" [OK] {name}")
+            
+            report.append("-" * 40)
+            report.append("Lịch sử Upload (Debug log):")
+            history = log_data.get('upload_history', [])
+            if not history:
+                report.append(" (Dữ liệu cũ hoặc không có lịch sử chi tiết)")
+            else:
+                for h in history:
+                    sys_id = h.get('system_id', '?')
+                    sys_info = mongo_db.auth_services.find_one({"uuid": sys_id})
+                    name = sys_info.get('app_name', sys_id) if sys_info else sys_id
+                    
+                    status = h.get('status', 'N/A')
+                    msg = h.get('message', 'N/A')
+                    time_val = h.get('timestamp', '')
+                    time_str = ""
+                    if hasattr(time_val, 'strftime'):
+                        time_str = time_val.strftime("%H:%M:%S")
+                    
+                    report.append(f"[{time_str}] {name}: {status}")
+                    report.append(f"   > Msg: {msg}\n")
+            
+            txt.insert(tk.END, "\n".join(report))
+            txt.config(state=tk.DISABLED)
+            
+            tk.Button(detail_win, text="ĐÓNG", command=detail_win.destroy, width=10).pack(pady=10)
+
+        tree.bind("<Double-1>", on_log_double_click)
+
         def on_batch_upload():
             """Upload selected or all attendance logs to a chosen system."""
             from src.services.hkb_service import hkb_service
