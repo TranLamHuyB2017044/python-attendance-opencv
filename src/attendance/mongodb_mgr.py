@@ -3,7 +3,7 @@ import datetime
 from loguru import logger
 import cv2
 import numpy as np
-from src.config import MongoDbConfig
+from src.config import MongoDbConfig, RecognitionConfig
 
 class MongoDBManager:
     """
@@ -95,7 +95,7 @@ class MongoDBManager:
                     
                     if last_time:
                         elapsed = (datetime.datetime.utcnow() - last_time).total_seconds()
-                        if elapsed < 900: # 15 mins cooldown
+                        if elapsed < RecognitionConfig.COOLDOWN_SECONDS:
                             return 'COOLDOWN'
                 
                 # Alternate IN/OUT
@@ -147,8 +147,8 @@ class MongoDBManager:
                         
                         if last_time:
                             elapsed = (datetime.datetime.utcnow() - last_time).total_seconds()
-                            if elapsed < 900: # 15 mins
-                                logger.warning(f"MongoDB: Cooldown active for {user_name} ({int(elapsed)}s < 900s). Skip saving log.")
+                            if elapsed < RecognitionConfig.COOLDOWN_SECONDS:
+                                logger.warning(f"MongoDB: Cooldown active for {user_name} ({int(elapsed)}s < {RecognitionConfig.COOLDOWN_SECONDS}s). Skip saving log.")
                                 return last_record.get("status")
                 
                 # Determine IN/OUT if not provided

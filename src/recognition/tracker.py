@@ -59,8 +59,9 @@ class FaceTracker:
                 else:
                     # Known user - check 15 minute cooldown (Database Persistent + Local Memory)
                     if status == 'COOLDOWN':
-                        logger.debug(f"Webhook blocked for {user_name} (Database Cooldown active)")
-                        return
+                        # Allow webhook to proceed but log it. 
+                        # Deduplication (15m) will still apply.
+                        logger.debug(f"Handling COOLDOWN webhook for {user_name}")
 
                     if user_id in self.webhook_sent_time:
                         last_sent = self.webhook_sent_time[user_id]
@@ -92,6 +93,8 @@ class FaceTracker:
                 if status in ["IN", "OUT"]:
                     action_vn = "vào" if status == "IN" else "ra"
                     voice_text = f"Xin chào {user_name}, bạn đã chấm công {action_vn} thành công"
+                elif status == "COOLDOWN":
+                    voice_text = "Bạn đã truy cập gần đây"
                 else:
                     # Default for unknown/unauthorized
                     voice_text = "Xin vui lòng thử lại"
@@ -122,7 +125,7 @@ class FaceTracker:
     def _get_center(self, bbox):
         return (int((bbox[0] + bbox[2]) / 2), int((bbox[1] + bbox[3]) / 2))
 
-    def _save_log_with_bbox(self, frame, face, user_id, user_name, score, is_known=True, status=None, company_id=None, unknown_attempt=0):
+    def _save_log_with_bbox(self, frame, face, user_id, user_name, score, is_known=True, status=None, company_id=None, unknown_attempt=0, birthday="N/A", vector_count=0):
         """Sync state check + Async heavy saving."""
         if frame is None: return None, None
         
@@ -132,30 +135,103 @@ class FaceTracker:
         if is_known and status is None:
             # Important: pass company_id to check the correct log collection
             final_status = mongo_db.get_attendance_status(user_id, company_id=company_id) 
+            
+        # --- BLOCK NEW SAVES IF IN COOLDOWN ---
+        if final_status == 'COOLDOWN':
+            logger.debug(f"Bỏ qua lưu ảnh/log cho {user_id} ({user_name}) vì đang trong thời gian chặn (Cooldown).")
+            return None, final_status
         
-        # 2. Visual Prep
+        # 2. Visual Prep: SMART CROP (Maintain 16:9 Aspect Ratio centered on face)
         log_frame = frame.copy()
         bbox = face.bbox.astype(int)
+        h_orig, w_orig = frame.shape[:2]
+        
+        # Center of face
+        face_cx = (bbox[0] + bbox[2]) // 2
+        face_cy = (bbox[1] + bbox[3]) // 2
+        face_w = bbox[2] - bbox[0]
+        face_h = bbox[3] - bbox[1]
+
+        # Target crop size (approx 4x face width for good context)
+        # We need width = 1.77 * height (16:9)
+        crop_h = int(face_h * 4.0)
+        crop_w = int(crop_h * (16/9))
+        
+        # Ensure crop isn't too small or too large
+        crop_h = min(h_orig, max(200, crop_h))
+        crop_w = int(crop_h * (16/9))
+        
+        if crop_w > w_orig:
+            crop_w = w_orig
+            crop_h = int(crop_w * (9/16))
+
+        # Calculate coordinates centered on face
+        x1 = max(0, face_cx - crop_w // 2)
+        y1 = max(0, face_cy - crop_h // 2)
+        x2 = x1 + crop_w
+        y2 = y1 + crop_h
+        
+        # Shift crop if it hits right/bottom edge
+        if x2 > w_orig:
+            x2 = w_orig
+            x1 = max(0, x2 - crop_w)
+        if y2 > h_orig:
+            y2 = h_orig
+            y1 = max(0, y2 - crop_h)
+            
+        # Draw small marker on the original before cropping
         color = (0, 255, 0) if is_known else (0, 255, 255)
         cv2.rectangle(log_frame, (bbox[0], bbox[1]), (bbox[2], bbox[3]), color, 2)
+        
+        # Calculate relative coordinates for labels in the crop
+        rel_x = bbox[0] - x1
+        rel_y = bbox[1] - y1
+        rel_x2 = bbox[2] - x1
+        rel_y2 = bbox[3] - y1
+        
+        # Crop the face area
+        save_frame = log_frame[y1:y2, x1:x2]
         
         def async_save_task():
             try:
                 from src.config import RecognitionConfig, CAPTURES_DIR, ApiConfig, CameraConfig
-                # Add overlays to the copy
+                from src.utils.string_utils import remove_accents
+                
+                # Draw Labels exactly as detection frame
                 ts, _ = time_mgr.get_formatted_time()
-                label = f"{remove_accents(user_name)} ({score:.2f})"
+                current_time_str = ts.split(' ')[-1] # Only HH:MM:SS
+                
+                # Main Name Label
+                main_label = f"{remove_accents(user_name)} ({score:.2f})"
                 if not is_known and unknown_attempt > 0:
-                    label = f"Nguoi la #{unknown_attempt} ({score:.2f})"
+                    main_label = f"Nguoi la #{unknown_attempt}"
                 
-                cv2.putText(log_frame, label, (bbox[0], bbox[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-                cv2.putText(log_frame, f"{CameraConfig.CAMERA_NAME} | {ts}", (20, log_frame.shape[0]-20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1)
+                # Draw Name Label above box
+                cv2.putText(save_frame, main_label, (rel_x, rel_y - 10), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2)
+                
+                # Camera & Time Label
+                cam_time_label = f"{CameraConfig.CAMERA_NAME} | {current_time_str}"
+                cv2.putText(save_frame, cam_time_label, (rel_x, rel_y - 30), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
 
-                # Heavy Resize & Path Setup
-                max_w = RecognitionConfig.CAPTURE_MAX_WIDTH
-                h, w = log_frame.shape[:2]
-                save_frame = cv2.resize(log_frame, (max_w, int(h * (max_w/w)))) if w > max_w else log_frame
+                if is_known:
+                    meta_info = [
+                        f"ID: {user_id}",
+                        f"N-sinh: {birthday}",
+                        f"Gio: {current_time_str}",
+                        f"Mau: {vector_count}"
+                    ]
+                    
+                    for i, text in enumerate(meta_info):
+                        pos = (rel_x, rel_y2 + 25 + (i * 22))
+                        cv2.putText(save_frame, text, pos, 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
                 
+                # --- OPTIMIZATION: Resize to 640x360 and compress quality ---
+                # This meets user request for ~10KB file size
+                final_img = cv2.resize(save_frame, (640, 360), interpolation=cv2.INTER_AREA)
+
                 raw_company_name = mongo_db.get_company_name(company_id) if company_id else "unknown_company"
                 company_folder = remove_accents(raw_company_name).replace(" ", "_")
                 
@@ -172,10 +248,10 @@ class FaceTracker:
                 img_name = f"{int(time.time())}.webp"
                 img_path = str(target_dir / img_name)
                 
-                # Heavy Disk Write
-                cv2.imwrite(img_path, save_frame, [int(cv2.IMWRITE_WEBP_QUALITY), 70])
+                # Heavy Disk Write with quality 50 to target ~10KB
+                cv2.imwrite(img_path, final_img, [int(cv2.IMWRITE_WEBP_QUALITY), 50])
                 # Actual DB Commit
-                mongo_db.log_attendance(user_id, user_name, status=status, frame=save_frame, company_id=company_id, unknown_attempt=unknown_attempt)
+                mongo_db.log_attendance(user_id, user_name, status=status, frame=final_img, company_id=company_id, unknown_attempt=unknown_attempt)
             except Exception as e:
                 logger.error(f"Async log error: {e}")
 
@@ -205,6 +281,7 @@ class FaceTracker:
             center = self._get_center(face.bbox)
             matched_id = None
             is_real = getattr(face, 'is_real', True)
+            as_label = getattr(face, 'as_label', 1) # 0=SPOOF, 1=REAL, 2=WAITING
             
             # ... (matching logic remains the same)
             # Sort active faces by distance to current center to find the best match first
@@ -224,11 +301,15 @@ class FaceTracker:
             if matched_id is None:
                 matched_id = self.face_id_counter
                 self.face_id_counter += 1
+                
+                # Initial status: FORCED TO STABILIZING FOR BYPASS
+                initial_status = 'STABILIZING'
+                
                 updated_faces_map[matched_id] = {
                     'start_time': current_time,
                     'last_seen': current_time,
                     'center': center,
-                    'status': 'STABILIZING' if is_real else 'SPOOF_DETECTED',
+                    'status': initial_status,
                     'user_data': None,
                     'cooldown_remaining': 0,
                     'unknown_attempts': 0,
@@ -239,13 +320,12 @@ class FaceTracker:
                 f_data['last_seen'] = current_time
                 f_data['center'] = center
                 
-                # Check for spoofing even if previously real
-                if not is_real:
-                    f_data['status'] = 'SPOOF_DETECTED'
-                elif f_data['status'] == 'SPOOF_DETECTED' and is_real:
-                    # Reset if it was spoof but now real (e.g. tracker flipped)
+                # --- BYPASS: Keep stabilizing even if spoof/waiting detected ---
+                if f_data['status'] in ['SPOOF_DETECTED', 'LIVENESS_WAITING']:
                     f_data['status'] = 'STABILIZING'
                     f_data['start_time'] = current_time
+                elif f_data['status'] not in ['RECOGNIZED', 'COOLDOWN', 'RETRY_WAIT', 'UNAUTHORIZED']:
+                    f_data['status'] = 'STABILIZING'
 
                 time_stayed = current_time - f_data['start_time']
                 wait_time = current_time - f_data['last_attempt_time']
@@ -288,18 +368,22 @@ class FaceTracker:
                     if user_name != "Unknown":
                         # CASE: THÀNH CÔNG
                         target_cid = user_data.get('company_id') or active_company
-                        
                         if not RecognitionConfig.TEST_MODE and user_id in self.user_cooldowns:
                             elapsed = current_time - self.user_cooldowns[user_id]
                             if elapsed < RecognitionConfig.COOLDOWN_SECONDS:
                                 f_data['status'] = 'COOLDOWN'
                                 f_data['user_data'] = user_data
                                 f_data['cooldown_remaining'] = int(RecognitionConfig.COOLDOWN_SECONDS - elapsed)
+                                # Send voice notification for cooldown (15m deduplication applies)
+                                self._send_user_webhook(user_id, user_name, 'COOLDOWN', is_unknown=False)
                             else:
                                 f_data['status'] = 'RECOGNIZED'
                                 f_data['user_data'] = user_data
                                 self.user_cooldowns[user_id] = current_time
-                                url, status = self._save_log_with_bbox(frame, face, user_id, user_name, user_data.get('score', 0.0), company_id=target_cid)
+                                url, status = self._save_log_with_bbox(frame, face, user_id, user_name, user_data.get('score', 0.0), 
+                                                                     company_id=target_cid, 
+                                                                     birthday=user_data.get('birthday', 'N/A'), 
+                                                                     vector_count=user_data.get('vector_count', 0))
                                 
                                 if status == 'IN': logger.info(f"Diem danh VAO: {user_name}")
                                 elif status == 'OUT': logger.info(f"Diem danh RA: {user_name}")
@@ -311,7 +395,10 @@ class FaceTracker:
                             f_data['status'] = 'RECOGNIZED'
                             f_data['user_data'] = user_data
                             self.user_cooldowns[user_id] = current_time
-                            url, status = self._save_log_with_bbox(frame, face, user_id, user_name, user_data.get('score', 0.0), company_id=target_cid)
+                            url, status = self._save_log_with_bbox(frame, face, user_id, user_name, user_data.get('score', 0.0), 
+                                                                 company_id=target_cid, 
+                                                                 birthday=user_data.get('birthday', 'N/A'), 
+                                                                 vector_count=user_data.get('vector_count', 0))
                             
                             if status == 'IN': logger.info(f"Diem danh VAO: {user_name}")
                             elif status == 'OUT': logger.info(f"Diem danh RA: {user_name}")
@@ -380,11 +467,15 @@ class FaceTracker:
                         face.name = "!!! TRUY CAP LAI !!!"
                     elif data['status'] == 'SPOOF_DETECTED':
                         face.name = "!!! CANH BAO: MAT GIA !!!"
+                    elif data['status'] == 'LIVENESS_WAITING':
+                        face.name = "VUI LONG NHAY MAT..."
                     else:
                         face.name = remove_accents(u_d.get('name', 'Chua ro'))
                 else:
                     if data['status'] == 'SPOOF_DETECTED':
                         face.name = "MAT GIA / SPOOF"
+                    elif data['status'] == 'LIVENESS_WAITING':
+                        face.name = "VUI LONG NHAY MAT..."
                     else:
                         face.name = "Dang phan tich..."
                     face.score = 0.0

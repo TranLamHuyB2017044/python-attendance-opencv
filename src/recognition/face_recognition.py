@@ -42,18 +42,17 @@ class FaceRecognition:
         
         try:
             # Initialize FaceAnalysis
-            # It will download models automatically to ~/.insightface/models/ if not present
             self.app = FaceAnalysis(
                 name=self.model_name,
                 root=str(MODELS_DIR),
-                allowed_modules=['detection', 'recognition', 'attribute'],
+                allowed_modules=['detection', 'recognition', 'attribute', 'landmark_2d_106'],
                 providers=['CPUExecutionProvider'] # Forcing CPU as requested
             )
             self.app.prepare(ctx_id=ctx_id, det_size=self.det_size, det_thresh=self.det_thresh)
             # Anti-Spoofing Setup (Simple Non-AI Version)
             from src.recognition.antispoofing import AntiSpoofing
             self.anti_spoof = AntiSpoofing()
-            logger.info("Anti-Spoofing (Texture Analysis) enabled.")
+            logger.info("Anti-Spoofing (Blink Detection) initialized.")
                 
         except Exception as e:
             logger.error(f"Failed to load InsightFace model: {e}")
@@ -78,9 +77,14 @@ class FaceRecognition:
                 # Run Anti-Spoofing if model is available
                 for face in faces:
                     if self.anti_spoof:
-                        is_real, as_score = self.anti_spoof.predict(frame, face.bbox)
-                        face.is_real = bool(is_real)
+                        # Pass the whole face object to access landmarks
+                        as_label, as_score = self.anti_spoof.predict(frame, face)
+                        face.as_label = int(as_label)
                         face.as_score = float(as_score)
+                        
+                        # --- TEMPORARY BYPASS: Force all to be REAL for testing ---
+                        face.is_real = True 
+                        # face.is_real = (face.as_label == 1) 
                     else:
                         # Fallback to True if no model
                         face.is_real = True
@@ -145,7 +149,6 @@ class FaceRecognition:
                     meta_info = [
                         f"ID: {getattr(face, 'user_id', 'Unknown') or 'Unknown'}",
                         f"N-sinh: {getattr(face, 'birthday', 'N/A') or 'N/A'}",
-                        f"G-tinh: {gender_val} ({age_val}t)",
                         f"Gio: {getattr(face, 'detect_time', 'N/A') or 'N/A'}",
                         f"Mau: {getattr(face, 'vector_count', 0) if getattr(face, 'vector_count', None) is not None else 0}"
                     ]

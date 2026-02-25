@@ -312,7 +312,8 @@ def main():
             elif ui.current_state == STATE_HISTORY:
                 target_cid = get_target_company(ui, mongo_db, allow_selection=True)
                 if target_cid:
-                    target_date = ui.get_date_form(title=f"Lịch sử [{target_cid}]")
+                    company_displayName = mongo_db.get_company_name(target_cid)
+                    target_date = ui.get_date_form(title=f"Lịch sử [{company_displayName}]", ok_button_text="LẤY DỮ LIỆU")
                     if target_date:
                         logs = mongo_db.get_logs(company_id=target_cid, date=target_date)
                         ui.show_attendance_logs_ui(logs, title=f"Lịch sử - {target_date}", session_role=ui.session_role, session_username=ui.session_username)
