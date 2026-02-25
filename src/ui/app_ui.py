@@ -1644,6 +1644,18 @@ class AttendanceUI:
         e_pass.grid(row=2, column=3, padx=5, sticky="w")
         e_pass.insert(0, mongo_db.get_setting("camera_pass", "password", username=session_username))
 
+        # Recognition & Cooldown Settings
+        ctk.CTkLabel(cam_group, text="NHẬN DIỆN & KHÓA", font=("Arial", 13, "bold")).grid(row=3, column=0, columnspan=2, sticky="w", pady=(15, 10))
+        
+        ctk.CTkLabel(cam_group, text="Thời gian khóa (phút):").grid(row=4, column=0, sticky="w", pady=5)
+        e_cooldown = ctk.CTkEntry(cam_group, width=180, placeholder_text="60")
+        e_cooldown.grid(row=4, column=1, padx=5, sticky="w")
+        
+        # Get current cooldown (stored in SECONDS, display in MINUTES)
+        from src.config import RecognitionConfig
+        current_cooldown_sec = int(mongo_db.get_setting("detection_cooldown", str(RecognitionConfig.COOLDOWN_SECONDS), username=session_username))
+        e_cooldown.insert(0, str(current_cooldown_sec // 60))
+
         # --- B. GROUP KEYS ---
         keys_group = ctk.CTkFrame(main_frame, fg_color="transparent")
         keys_group.pack(fill="both", expand=True, padx=20, pady=10)
@@ -1661,6 +1673,7 @@ class AttendanceUI:
             port = e_port.get().strip()
             user = e_user.get().strip()
             pwd = e_pass.get().strip()
+            cooldown_min = e_cooldown.get().strip()
             
             success = True
             success &= mongo_db.set_setting("group_keys", new_keys, username=session_username)
@@ -1668,6 +1681,17 @@ class AttendanceUI:
             success &= mongo_db.set_setting("camera_port", port, username=session_username)
             success &= mongo_db.set_setting("camera_user", user, username=session_username)
             success &= mongo_db.set_setting("camera_pass", pwd, username=session_username)
+            
+            # Save cooldown (convert MINUTES to SECONDS for backend)
+            try:
+                cooldown_sec = int(cooldown_min) * 60
+                success &= mongo_db.set_setting("detection_cooldown", str(cooldown_sec), username=session_username)
+                # Update global config immediately
+                from src.config import RecognitionConfig
+                RecognitionConfig.COOLDOWN_SECONDS = cooldown_sec
+            except ValueError:
+                messagebox.showerror("Lỗi", "Thời gian khóa phải là một con số!")
+                return
             
             if success:
                 messagebox.showinfo("Thành công", "Đã lưu cài đặt hệ thống!\nBạn cần khởi động lại dịch vụ Camera để áp dụng thay đổi.")

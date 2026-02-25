@@ -66,7 +66,10 @@ class FaceTracker:
                     if user_id in self.webhook_sent_time:
                         last_sent = self.webhook_sent_time[user_id]
                         elapsed = current_time - last_sent
-                        if elapsed < 900:  # 15 minutes = 900 seconds
+                        
+                        # Only block if it's NOT a COOLDOWN status. 
+                        # We want the "Ban da truy cap gan day" voice feedback to work immediately.
+                        if status != 'COOLDOWN' and elapsed < 900:  # 15 minutes = 900 seconds
                             remaining = int(900 - elapsed)
                             logger.debug(f"Webhook blocked for {user_name} (sent {int(elapsed)}s ago, {remaining}s remaining)")
                             return
@@ -94,7 +97,9 @@ class FaceTracker:
                     action_vn = "vào" if status == "IN" else "ra"
                     voice_text = f"Xin chào {user_name}, bạn đã chấm công {action_vn} thành công"
                 elif status == "COOLDOWN":
-                    voice_text = "Bạn đã truy cập gần đây"
+                    voice_text = f"Bạn {user_name} đã truy cập gần đây"
+                elif status == "SPOOF":
+                    voice_text = "Cảnh báo: Phát hiện hành vi giả mạo khuôn mặt"
                 else:
                     # Default for unknown/unauthorized
                     voice_text = "Xin vui lòng thử lại"
@@ -261,7 +266,7 @@ class FaceTracker:
         # Return the actual REAL status so Voice says it right
         return "processing_url", final_status
 
-    def update(self, detected_faces, attendance_mgr, frame=None, company_id=None, only_recognize=False):
+    def update(self, detected_faces, attendance_mgr, face_rec=None, frame=None, company_id=None, only_recognize=False):
         """
         Assigns IDs and decides when to trigger recognition or alerts.
         """
@@ -313,18 +318,25 @@ class FaceTracker:
                     'user_data': None,
                     'cooldown_remaining': 0,
                     'unknown_attempts': 0,
-                    'last_attempt_time': 0
+                    'last_attempt_time': 0,
+                    'liveness_verified': False
                 }
             else:
                 f_data = self.active_faces[matched_id]
                 f_data['last_seen'] = current_time
                 f_data['center'] = center
+
+                # SYNC BACK: If we already verified this face in previous frames, 
+                # update the current frame's face object to stop it from showing "Analyzing"
+                if f_data.get('liveness_verified'):
+                    face.as_label = 1 if f_data['status'] != 'SPOOF_DETECTED' else 0
+                    face.is_real = (face.as_label == 1)
+                    if f_data['user_data']:
+                        face.name = remove_accents(f_data['user_data'].get('name', 'Unknown'))
+                        face.as_score = f_data['user_data'].get('as_score', 1.0)
                 
-                # --- BYPASS: Keep stabilizing even if spoof/waiting detected ---
-                if f_data['status'] in ['SPOOF_DETECTED', 'LIVENESS_WAITING']:
-                    f_data['status'] = 'STABILIZING'
-                    f_data['start_time'] = current_time
-                elif f_data['status'] not in ['RECOGNIZED', 'COOLDOWN', 'RETRY_WAIT', 'UNAUTHORIZED']:
+                # Update status if not in a final state
+                if f_data['status'] not in ['RECOGNIZED', 'COOLDOWN', 'RETRY_WAIT', 'UNAUTHORIZED', 'SPOOF_DETECTED']:
                     f_data['status'] = 'STABILIZING'
 
                 time_stayed = current_time - f_data['start_time']
@@ -346,100 +358,89 @@ class FaceTracker:
                 # ... (rest of recognition logic)
 
                 if can_attempt:
-                    if attendance_mgr is None:
+                    if face_rec is None or attendance_mgr is None:
                         f_data['status'] = 'MONITORING'
-                        f_data['user_name'] = 'DANG PHAN TICH...'
-                        f_data['user_id'] = 'N/A'
                         continue
                     
-                    recognition_done_this_frame = True # Mark as done to defer others to next frame
-                    user_data = attendance_mgr.recognize(face.normed_embedding)
-                    user_id = user_data.get('user_id', 'Unknown')
-                    user_name = user_data.get('name', 'Unknown')
+                    recognition_done_this_frame = True # Rate limit
+                    bbox = face.bbox.astype(int)
+                    x1, y1, x2, y2 = bbox[0], bbox[1], bbox[2], bbox[3]
+                    
+                    # 1. RUN ANTI-SPOOFING (Sequential check after stability)
+                    logger.debug(f"Triggering Anti-Spoofing for ID: {matched_id}")
+                    as_label, as_score = face_rec.anti_spoof.predict(frame, face)
+                    
+                    face.is_real = (as_label == 1)
+                    face.as_label = int(as_label)
+                    face.as_score = float(as_score)
+                    f_data['liveness_verified'] = True
+                    
+                    if not face.is_real:
+                        # ... (spoof logic)
+                        f_data['status'] = 'SPOOF_DETECTED'
+                        if f_data.get('last_spoof_log', 0) < current_time - 30:
+                            self._save_log_with_bbox(frame, face, "Spoof", "Kẻ giả mạo", 
+                                                    score=face.as_score, is_known=False, 
+                                                    status="SPOOF", company_id=active_company)
+                            self._send_user_webhook("Spoof", "Kẻ giả mạo", "SPOOF", is_unknown=True)
+                            f_data['last_spoof_log'] = current_time
+                        logger.warning(f"SPOOF DETECTED for ID {matched_id}")
+                    else:
+                        # CASE: REAL FACE -> PROCEED TO RECOGNITION
+                        logger.debug(f"Face is REAL. Extracting embedding for ID: {matched_id}")
+                        face_rec.rec_model.get(frame, face) # Extract 512-dim embedding
+                        
+                        user_data = attendance_mgr.recognize(face.normed_embedding)
+                        user_data['as_score'] = face.as_score # Keep the score for sync back
+                        user_id = user_data.get('user_id', 'Unknown')
+                        user_name = user_data.get('name', 'Unknown')
 
-                    # If only_recognize is True, we just update the UI data and skip everything else
-                    if only_recognize:
-                        f_data['status'] = 'RECOGNIZED'
-                        f_data['user_name'] = user_name
-                        f_data['user_id'] = user_id
-                        f_data['user_data'] = user_data
-                        continue
-                    
-                    if user_name != "Unknown":
-                        # CASE: THÀNH CÔNG
-                        target_cid = user_data.get('company_id') or active_company
-                        if not RecognitionConfig.TEST_MODE and user_id in self.user_cooldowns:
-                            elapsed = current_time - self.user_cooldowns[user_id]
-                            if elapsed < RecognitionConfig.COOLDOWN_SECONDS:
-                                f_data['status'] = 'COOLDOWN'
-                                f_data['user_data'] = user_data
-                                f_data['cooldown_remaining'] = int(RecognitionConfig.COOLDOWN_SECONDS - elapsed)
-                                # Send voice notification for cooldown (15m deduplication applies)
-                                self._send_user_webhook(user_id, user_name, 'COOLDOWN', is_unknown=False)
+                        if only_recognize:
+                            f_data['status'] = 'RECOGNIZED'
+                            f_data['user_name'] = user_name
+                            f_data['user_id'] = user_id
+                            f_data['user_data'] = user_data
+                        elif user_name != "Unknown":
+                            target_cid = user_data.get('company_id') or active_company
+                            if not RecognitionConfig.TEST_MODE and user_id in self.user_cooldowns:
+                                elapsed = current_time - self.user_cooldowns[user_id]
+                                if elapsed < RecognitionConfig.COOLDOWN_SECONDS:
+                                    f_data['status'] = 'COOLDOWN'
+                                    f_data['user_data'] = user_data
+                                    f_data['cooldown_remaining'] = int(RecognitionConfig.COOLDOWN_SECONDS - elapsed)
+                                    self._send_user_webhook(user_id, user_name, 'COOLDOWN', is_unknown=False)
+                                else:
+                                    f_data['status'] = 'RECOGNIZED'
+                                    f_data['user_data'] = user_data
+                                    self.user_cooldowns[user_id] = current_time
+                                    url, status = self._save_log_with_bbox(frame, face, user_id, user_name, user_data.get('score', 0.0), 
+                                                                         company_id=target_cid, birthday=user_data.get('birthday', 'N/A'), vector_count=user_data.get('vector_count', 0))
+                                    self._send_user_webhook(user_id, user_name, status, is_unknown=False)
                             else:
                                 f_data['status'] = 'RECOGNIZED'
                                 f_data['user_data'] = user_data
                                 self.user_cooldowns[user_id] = current_time
                                 url, status = self._save_log_with_bbox(frame, face, user_id, user_name, user_data.get('score', 0.0), 
-                                                                     company_id=target_cid, 
-                                                                     birthday=user_data.get('birthday', 'N/A'), 
-                                                                     vector_count=user_data.get('vector_count', 0))
-                                
-                                if status == 'IN': logger.info(f"Diem danh VAO: {user_name}")
-                                elif status == 'OUT': logger.info(f"Diem danh RA: {user_name}")
-                                else: logger.info(f"Diem danh THANH CONG: {user_name}")
-                                
-                                # Send Webhook notification (with 15-min deduplication)
+                                                                     company_id=target_cid, birthday=user_data.get('birthday', 'N/A'), vector_count=user_data.get('vector_count', 0))
                                 self._send_user_webhook(user_id, user_name, status, is_unknown=False)
+                            
+                            # Auto-enrichment
+                            vector_count = user_data.get('vector_count', 0)
+                            if vector_count < 10:
+                                attendance_mgr.upsert_user(user_name=user_name, user_id=user_id, birthday=user_data.get('birthday', 'N/A'), embeddings=[face.normed_embedding], company_id=target_cid)
+                            
+                            f_data['unknown_attempts'] = 0
                         else:
-                            f_data['status'] = 'RECOGNIZED'
+                            f_data['unknown_attempts'] += 1
+                            f_data['last_attempt_time'] = current_time
                             f_data['user_data'] = user_data
-                            self.user_cooldowns[user_id] = current_time
-                            url, status = self._save_log_with_bbox(frame, face, user_id, user_name, user_data.get('score', 0.0), 
-                                                                 company_id=target_cid, 
-                                                                 birthday=user_data.get('birthday', 'N/A'), 
-                                                                 vector_count=user_data.get('vector_count', 0))
+                            self._send_user_webhook("Unknown", f"Nguoi la {f_data['unknown_attempts']}", "unknown", is_unknown=True)
+                            self._save_log_with_bbox(frame, face, "Unknown", "Người lạ", score=0.0, is_known=False, status="FAILED", company_id=active_company, unknown_attempt=f_data['unknown_attempts'])
                             
-                            if status == 'IN': logger.info(f"Diem danh VAO: {user_name}")
-                            elif status == 'OUT': logger.info(f"Diem danh RA: {user_name}")
-                            else: logger.info(f"Diem danh THANH CONG: {user_name}")
-                            
-                            # Send Webhook notification (with 15-min deduplication)
-                            self._send_user_webhook(user_id, user_name, status, is_unknown=False)
-                        
-                        # --- Tự động bổ sung embedding nếu chưa đủ 10 mẫu ---
-                        vector_count = user_data.get('vector_count', 0)
-                        if vector_count < 10:
-                            logger.info(f"Auto-enriching: {user_name} has {vector_count}/10 samples. Adding new one...")
-                            attendance_mgr.upsert_user(
-                                user_name=user_name,
-                                user_id=user_id,
-                                birthday=user_data.get('birthday', 'N/A'),
-                                embeddings=[face.normed_embedding],
-                                company_id=target_cid
-                            )
-                        # --------------------------------------------------
-
-                        f_data['unknown_attempts'] = 0 # Reset khi thành công
-                    
-                    else:
-                        # CASE: KHÔNG NHẬN DIÊN ĐƯỢC (UNKNOWN)
-                        f_data['unknown_attempts'] += 1
-                        f_data['last_attempt_time'] = current_time
-                        f_data['user_data'] = user_data
-                        
-                        # Gửi Webhook và ghi log DB cho người lạ (max 10 lần, reset khi có người checkin)
-                        logger.warning(f"Unknown face detected (Attempt {f_data['unknown_attempts']}).")
-                        self._send_user_webhook("Unknown", f"Nguoi la {f_data['unknown_attempts']}", "unknown", is_unknown=True)
-                        self._save_log_with_bbox(frame, face, "Unknown", "Người lạ", 
-                                                score=0.0, is_known=False, 
-                                                status="FAILED", company_id=active_company,
-                                                unknown_attempt=f_data['unknown_attempts'])
-                        
-                        if f_data['unknown_attempts'] >= 10:
-                            f_data['status'] = 'UNAUTHORIZED'
-                        else:
-                            f_data['status'] = 'RETRY_WAIT'
+                            if f_data['unknown_attempts'] >= 10:
+                                f_data['status'] = 'UNAUTHORIZED'
+                            else:
+                                f_data['status'] = 'RETRY_WAIT'
                         
                         # Các lần thử khác chỉ log console để theo dõi
                         logger.warning(f"Unknown face. Attempt {f_data['unknown_attempts']} in progress.")
@@ -466,9 +467,7 @@ class FaceTracker:
                     elif data['status'] == 'UNAUTHORIZED':
                         face.name = "!!! TRUY CAP LAI !!!"
                     elif data['status'] == 'SPOOF_DETECTED':
-                        face.name = "!!! CANH BAO: MAT GIA !!!"
-                    elif data['status'] == 'LIVENESS_WAITING':
-                        face.name = "VUI LONG NHAY MAT..."
+                        face.name = "!!! CANH BAO GIA MAO!!!"
                     else:
                         face.name = remove_accents(u_d.get('name', 'Chua ro'))
                 else:

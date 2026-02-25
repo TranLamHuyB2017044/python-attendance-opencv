@@ -607,8 +607,8 @@ def main():
                         display_frame = np.zeros((cur_h, cur_w, 3), dtype=np.uint8)
                         cv2.putText(display_frame, "DANG DOC DU LIEU TU CAMERA...", (cur_w//2 - 200, cur_h//2), 0, 0.7, (0, 255, 255), 2)
                     else:
-                        faces = face_rec.detect_and_extract(frame)
-                        tracker.update(faces, attendance, frame, company_id=ui.session_company_id)
+                        faces = face_rec.detect_and_extract(frame, fast=True)
+                        tracker.update(faces, attendance, face_rec=face_rec, frame=frame, company_id=ui.session_company_id)
                         display_frame = face_rec.draw_faces(frame, faces)
                         
                         cv2.rectangle(display_frame, (0, 0), (cur_w, 40), (0, 0, 100), -1)
@@ -650,8 +650,8 @@ def main():
                         continue
                     
                     # Detection every few frames
-                    faces = face_rec.detect_and_extract(frame)
-                    tracker.update(faces, attendance, frame, company_id=ui.session_company_id)
+                    faces = face_rec.detect_and_extract(frame, fast=True)
+                    tracker.update(faces, attendance, face_rec=face_rec, frame=frame, company_id=ui.session_company_id)
                     display_frame = face_rec.draw_faces(frame, faces)
                     cv2.putText(display_frame, "CHEDO TEST CAMERA (TRUC TIEP)", (10, cur_h-50), 0, 0.7, (0, 0, 255), 2)
                     cv2.putText(display_frame, "[M] Quay ve Menu", (10, cur_h-20), 0, 0.6, (255,255,255), 1)

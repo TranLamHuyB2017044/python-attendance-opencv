@@ -98,7 +98,12 @@ class CameraConfig:
             if not raw_env_url:
                 cls.RTSP_URL = f"rtsp://{cls.USER}:{cls.PASS}@{cls.IP}:{cls.PORT}/ch1/main"
             
-            logger.info(f"CameraConfig: Updated settings from MongoDB -> {cls.IP}:{cls.PORT}")
+            # 4. Update Recognition & Cooldown Settings
+            from src.config import RecognitionConfig
+            cooldown_sec = mongo_db.get_setting("detection_cooldown", str(RecognitionConfig.COOLDOWN_SECONDS), username="GLOBAL")
+            RecognitionConfig.COOLDOWN_SECONDS = int(cooldown_sec)
+            
+            logger.info(f"CameraConfig: Updated settings from MongoDB -> {cls.IP}:{cls.PORT} | Cooldown: {cooldown_sec}s")
             return True
         except Exception as e:
             logger.error(f"Failed to load camera settings from MongoDB: {e}")

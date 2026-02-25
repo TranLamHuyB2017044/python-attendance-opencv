@@ -1,154 +1,420 @@
+import os
 import cv2
 import numpy as np
-import time
+import torch
+import torch.nn.functional as F
 from loguru import logger
-from typing import Tuple, Any
+import math
+
+# MiniFASNet Architecture
+from torch.nn import Linear, Conv2d, BatchNorm1d, BatchNorm2d, PReLU, ReLU, Sigmoid, \
+    AdaptiveAvgPool2d, Sequential, Module
+
+class L2Norm(Module):
+    def forward(self, input):
+        return F.normalize(input)
+
+class Flatten(Module):
+    def forward(self, input):
+        return input.view(input.size(0), -1)
+
+class Conv_block(Module):
+    def __init__(self, in_c, out_c, kernel=(1, 1), stride=(1, 1), padding=(0, 0), groups=1):
+        super(Conv_block, self).__init__()
+        self.conv = Conv2d(in_c, out_c, kernel_size=kernel, groups=groups,
+                           stride=stride, padding=padding, bias=False)
+        self.bn = BatchNorm2d(out_c)
+        self.prelu = PReLU(out_c)
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = self.bn(x)
+        x = self.prelu(x)
+        return x
+
+class Linear_block(Module):
+    def __init__(self, in_c, out_c, kernel=(1, 1), stride=(1, 1), padding=(0, 0), groups=1):
+        super(Linear_block, self).__init__()
+        self.conv = Conv2d(in_c, out_channels=out_c, kernel_size=kernel,
+                           groups=groups, stride=stride, padding=padding, bias=False)
+        self.bn = BatchNorm2d(out_c)
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = self.bn(x)
+        return x
+
+class Depth_Wise(Module):
+     def __init__(self, c1, c2, c3, residual=False, kernel=(3, 3), stride=(2, 2), padding=(1, 1), groups=1):
+        super(Depth_Wise, self).__init__()
+        c1_in, c1_out = c1
+        c2_in, c2_out = c2
+        c3_in, c3_out = c3
+        self.conv = Conv_block(c1_in, out_c=c1_out, kernel=(1, 1), padding=(0, 0), stride=(1, 1))
+        self.conv_dw = Conv_block(c2_in, c2_out, groups=c2_in, kernel=kernel, padding=padding, stride=stride)
+        self.project = Linear_block(c3_in, c3_out, kernel=(1, 1), padding=(0, 0), stride=(1, 1))
+        self.residual = residual
+
+     def forward(self, x):
+        if self.residual:
+            short_cut = x
+        x = self.conv(x)
+        x = self.conv_dw(x)
+        x = self.project(x)
+        if self.residual:
+            output = short_cut + x
+        else:
+            output = x
+        return output
+
+class Residual(Module):
+    def __init__(self, c1, c2, c3, num_block, groups, kernel=(3, 3), stride=(1, 1), padding=(1, 1)):
+        super(Residual, self).__init__()
+        modules = []
+        for i in range(num_block):
+            c1_tuple = c1[i]
+            c2_tuple = c2[i]
+            c3_tuple = c3[i]
+            modules.append(Depth_Wise(c1_tuple, c2_tuple, c3_tuple, residual=True,
+                                      kernel=kernel, padding=padding, stride=stride, groups=groups))
+        self.model = Sequential(*modules)
+
+    def forward(self, x):
+        return self.model(x)
+
+class MiniFASNet(Module):
+    def __init__(self, keep, embedding_size, conv6_kernel=(7, 7),
+                 drop_p=0.0, num_classes=3, img_channel=3):
+        super(MiniFASNet, self).__init__()
+        self.embedding_size = embedding_size
+
+        self.conv1 = Conv_block(img_channel, keep[0], kernel=(3, 3), stride=(2, 2), padding=(1, 1))
+        self.conv2_dw = Conv_block(keep[0], keep[1], kernel=(3, 3), stride=(1, 1), padding=(1, 1), groups=keep[1])
+
+        c1 = [(keep[1], keep[2])]
+        c2 = [(keep[2], keep[3])]
+        c3 = [(keep[3], keep[4])]
+
+        self.conv_23 = Depth_Wise(c1[0], c2[0], c3[0], kernel=(3, 3), stride=(2, 2), padding=(1, 1), groups=keep[3])
+
+        c1 = [(keep[4], keep[5]), (keep[7], keep[8]), (keep[10], keep[11]), (keep[13], keep[14])]
+        c2 = [(keep[5], keep[6]), (keep[8], keep[9]), (keep[11], keep[12]), (keep[14], keep[15])]
+        c3 = [(keep[6], keep[7]), (keep[9], keep[10]), (keep[12], keep[13]), (keep[15], keep[16])]
+
+        self.conv_3 = Residual(c1, c2, c3, num_block=4, groups=keep[4], kernel=(3, 3), stride=(1, 1), padding=(1, 1))
+
+        c1 = [(keep[16], keep[17])]
+        c2 = [(keep[17], keep[18])]
+        c3 = [(keep[18], keep[19])]
+
+        self.conv_34 = Depth_Wise(c1[0], c2[0], c3[0], kernel=(3, 3), stride=(2, 2), padding=(1, 1), groups=keep[19])
+
+        c1 = [(keep[19], keep[20]), (keep[22], keep[23]), (keep[25], keep[26]), (keep[28], keep[29]),
+              (keep[31], keep[32]), (keep[34], keep[35])]
+        c2 = [(keep[20], keep[21]), (keep[23], keep[24]), (keep[26], keep[27]), (keep[29], keep[30]),
+              (keep[32], keep[33]), (keep[35], keep[36])]
+        c3 = [(keep[21], keep[22]), (keep[24], keep[25]), (keep[27], keep[28]), (keep[30], keep[31]),
+              (keep[33], keep[34]), (keep[36], keep[37])]
+
+        self.conv_4 = Residual(c1, c2, c3, num_block=6, groups=keep[19], kernel=(3, 3), stride=(1, 1), padding=(1, 1))
+
+        c1 = [(keep[37], keep[38])]
+        c2 = [(keep[38], keep[39])]
+        c3 = [(keep[39], keep[40])]
+
+        self.conv_45 = Depth_Wise(c1[0], c2[0], c3[0], kernel=(3, 3), stride=(2, 2), padding=(1, 1), groups=keep[40])
+
+        c1 = [(keep[40], keep[41]), (keep[43], keep[44])]
+        c2 = [(keep[41], keep[42]), (keep[44], keep[45])]
+        c3 = [(keep[42], keep[43]), (keep[45], keep[46])]
+
+        self.conv_5 = Residual(c1, c2, c3, num_block=2, groups=keep[40], kernel=(3, 3), stride=(1, 1), padding=(1, 1))
+        self.conv_6_sep = Conv_block(keep[46], keep[47], kernel=(1, 1), stride=(1, 1), padding=(0, 0))
+        self.conv_6_dw = Linear_block(keep[47], keep[48], groups=keep[48], kernel=conv6_kernel, stride=(1, 1), padding=(0, 0))
+        self.conv_6_flatten = Flatten()
+        self.linear = Linear(512, embedding_size, bias=False)
+        self.bn = BatchNorm1d(embedding_size)
+        self.drop = torch.nn.Dropout(p=drop_p)
+        self.prob = Linear(embedding_size, num_classes, bias=False)
+
+    def forward(self, x):
+        out = self.conv1(x)
+        out = self.conv2_dw(out)
+        out = self.conv_23(out)
+        out = self.conv_3(out)
+        out = self.conv_34(out)
+        out = self.conv_4(out)
+        out = self.conv_45(out)
+        out = self.conv_5(out)
+        out = self.conv_6_sep(out)
+        out = self.conv_6_dw(out)
+        out = self.conv_6_flatten(out)
+        if self.embedding_size != 512:
+            out = self.linear(out)
+        out = self.bn(out)
+        out = self.drop(out)
+        out = self.prob(out)
+        return out
+
+keep_dict = {'1.8M': [32, 32, 103, 103, 64, 13, 13, 64, 26, 26,
+                      64, 13, 13, 64, 52, 52, 64, 231, 231, 128,
+                      154, 154, 128, 52, 52, 128, 26, 26, 128, 52,
+                      52, 128, 26, 26, 128, 26, 26, 128, 308, 308,
+                      128, 26, 26, 128, 26, 26, 128, 512, 512],
+
+             '1.8M_': [32, 32, 103, 103, 64, 13, 13, 64, 13, 13, 64, 13,
+                       13, 64, 13, 13, 64, 231, 231, 128, 231, 231, 128, 52,
+                       52, 128, 26, 26, 128, 77, 77, 128, 26, 26, 128, 26, 26,
+                       128, 308, 308, 128, 26, 26, 128, 26, 26, 128, 512, 512]
+             }
+
+def MiniFASNetV1(embedding_size=128, conv6_kernel=(7, 7),
+                     drop_p=0.2, num_classes=3, img_channel=3):
+    return MiniFASNet(keep_dict['1.8M'], embedding_size, conv6_kernel, drop_p, num_classes, img_channel)
+
+def MiniFASNetV2(embedding_size=128, conv6_kernel=(7, 7),
+                     drop_p=0.2, num_classes=3, img_channel=3):
+    return MiniFASNet(keep_dict['1.8M_'], embedding_size, conv6_kernel, drop_p, num_classes, img_channel)
+
+class SEModule(Module):
+    def __init__(self, channels, reduction):
+        super(SEModule, self).__init__()
+        self.avg_pool = AdaptiveAvgPool2d(1)
+        self.fc1 = Conv2d(
+            channels, channels // reduction, kernel_size=1, padding=0, bias=False)
+        self.bn1 = BatchNorm2d(channels // reduction)
+        self.relu = ReLU(inplace=True)
+        self.fc2 = Conv2d(
+            channels // reduction, channels, kernel_size=1, padding=0, bias=False)
+        self.bn2 = BatchNorm2d(channels)
+        self.sigmoid = Sigmoid()
+
+    def forward(self, x):
+        module_input = x
+        x = self.avg_pool(x)
+        x = self.fc1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.fc2(x)
+        x = self.bn2(x)
+        x = self.sigmoid(x)
+        return module_input * x
+
+class Depth_Wise_SE(Module):
+    def __init__(self, c1, c2, c3, residual=False, kernel=(3, 3), stride=(2, 2), padding=(1, 1), groups=1, se_reduct=8):
+        super(Depth_Wise_SE, self).__init__()
+        c1_in, c1_out = c1
+        c2_in, c2_out = c2
+        c3_in, c3_out = c3
+        self.conv = Conv_block(c1_in, out_c=c1_out, kernel=(1, 1), padding=(0, 0), stride=(1, 1))
+        self.conv_dw = Conv_block(c2_in, c2_out, groups=c2_in, kernel=kernel, padding=padding, stride=stride)
+        self.project = Linear_block(c3_in, c3_out, kernel=(1, 1), padding=(0, 0), stride=(1, 1))
+        self.residual = residual
+        self.se_module = SEModule(c3_out, se_reduct)
+
+    def forward(self, x):
+        if self.residual:
+            short_cut = x
+        x = self.conv(x)
+        x = self.conv_dw(x)
+        x = self.project(x)
+        if self.residual:
+            x = self.se_module(x)
+            output = short_cut + x
+        else:
+            output = x
+        return output
+
+class ResidualSE(Module):
+    def __init__(self, c1, c2, c3, num_block, groups, kernel=(3, 3), stride=(1, 1), padding=(1, 1), se_reduct=4):
+        super(ResidualSE, self).__init__()
+        modules = []
+        for i in range(num_block):
+            c1_tuple = c1[i]
+            c2_tuple = c2[i]
+            c3_tuple = c3[i]
+            if i == num_block-1:
+                modules.append(
+                    Depth_Wise_SE(c1_tuple, c2_tuple, c3_tuple, residual=True, kernel=kernel, padding=padding, stride=stride,
+                               groups=groups, se_reduct=se_reduct))
+            else:
+                modules.append(Depth_Wise(c1_tuple, c2_tuple, c3_tuple, residual=True, kernel=kernel, padding=padding,
+                                          stride=stride, groups=groups))
+        self.model = Sequential(*modules)
+
+    def forward(self, x):
+        return self.model(x)
+
+class MiniFASNetSE(MiniFASNet):
+    def __init__(self, keep, embedding_size, conv6_kernel=(7, 7),drop_p=0.75, num_classes=3, img_channel=3):
+        super(MiniFASNetSE, self).__init__(keep=keep, embedding_size=embedding_size, conv6_kernel=conv6_kernel,
+                                               drop_p=drop_p, num_classes=num_classes, img_channel=img_channel)
+
+        c1 = [(keep[4], keep[5]), (keep[7], keep[8]), (keep[10], keep[11]), (keep[13], keep[14])]
+        c2 = [(keep[5], keep[6]), (keep[8], keep[9]), (keep[11], keep[12]), (keep[14], keep[15])]
+        c3 = [(keep[6], keep[7]), (keep[9], keep[10]), (keep[12], keep[13]), (keep[15], keep[16])]
+        self.conv_3 = ResidualSE(c1, c2, c3, num_block=4, groups=keep[4], kernel=(3, 3), stride=(1, 1), padding=(1, 1))
+
+        c1 = [(keep[19], keep[20]), (keep[22], keep[23]), (keep[25], keep[26]), (keep[28], keep[29]),
+              (keep[31], keep[32]), (keep[34], keep[35])]
+        c2 = [(keep[20], keep[21]), (keep[23], keep[24]), (keep[26], keep[27]), (keep[29], keep[30]),
+              (keep[32], keep[33]), (keep[35], keep[36])]
+        c3 = [(keep[21], keep[22]), (keep[24], keep[25]), (keep[27], keep[28]), (keep[30], keep[31]),
+              (keep[33], keep[34]), (keep[36], keep[37])]
+        self.conv_4 = ResidualSE(c1, c2, c3, num_block=6, groups=keep[19], kernel=(3, 3), stride=(1, 1), padding=(1, 1))
+
+        c1 = [(keep[40], keep[41]), (keep[43], keep[44])]
+        c2 = [(keep[41], keep[42]), (keep[44], keep[45])]
+        c3 = [(keep[42], keep[43]), (keep[45], keep[46])]
+        self.conv_5 = ResidualSE(c1, c2, c3, num_block=2, groups=keep[40], kernel=(3, 3), stride=(1, 1), padding=(1, 1))
+
+def MiniFASNetV1SE(embedding_size=128, conv6_kernel=(7, 7),
+                   drop_p=0.75, num_classes=3, img_channel=3):
+    return MiniFASNetSE(keep_dict['1.8M'], embedding_size, conv6_kernel,drop_p, num_classes, img_channel)
+
+def MiniFASNetV2SE(embedding_size=128, conv6_kernel=(7, 7),
+                   drop_p=0.75, num_classes=3, img_channel=3):
+    return MiniFASNetSE(keep_dict['1.8M_'], embedding_size, conv6_kernel,drop_p, num_classes, img_channel)
+
+class AntiSpoof:
+    def __init__(self, model_dir="models/anti_spoof"):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model_dir = model_dir
+        self.models = {}
+        self._load_models()
+        logger.success(f"Silent-Face-Anti-Spoofing initialized on {self.device}")
+
+    def _load_models(self):
+        if not os.path.exists(self.model_dir):
+            logger.warning(f"Anti-Spoofing models directory not found: {self.model_dir}")
+            return
+
+        for model_name in os.listdir(self.model_dir):
+            if model_name.endswith(".pth"):
+                path = os.path.join(self.model_dir, model_name)
+                try:
+                    h, w, model_type, scale = self._parse_model_name(model_name)
+                    kernel = ((h + 15) // 16, (w + 15) // 16)
+                    
+                    if model_type == 'MiniFASNetV1':
+                        model = MiniFASNetV1(conv6_kernel=kernel).to(self.device)
+                    elif model_type == 'MiniFASNetV2':
+                        model = MiniFASNetV2(conv6_kernel=kernel).to(self.device)
+                    elif model_type == 'MiniFASNetV1SE':
+                        model = MiniFASNetV1SE(conv6_kernel=kernel).to(self.device)
+                    elif model_type == 'MiniFASNetV2SE':
+                        model = MiniFASNetV2SE(conv6_kernel=kernel).to(self.device)
+                    else:
+                        continue
+
+                    state_dict = torch.load(path, map_location=self.device)
+                    # Handle DataParallel state dict
+                    if list(state_dict.keys())[0].startswith('module.'):
+                        from collections import OrderedDict
+                        new_state_dict = OrderedDict()
+                        for k, v in state_dict.items():
+                            new_state_dict[k[7:]] = v
+                        model.load_state_dict(new_state_dict)
+                    else:
+                        model.load_state_dict(state_dict)
+                    
+                    model.eval()
+                    self.models[model_name] = {
+                        'model': model,
+                        'h': h,
+                        'w': w,
+                        'scale': scale
+                    }
+                    logger.info(f"Loaded Anti-Spoof model: {model_name}")
+                except Exception as e:
+                    logger.error(f"Error loading {model_name}: {e}")
+
+    def _parse_model_name(self, model_name):
+        # 2.7_80x80_MiniFASNetV2.pth -> scale=2.7, h=80, w=80, type=MiniFASNetV2
+        info = model_name.split('_')
+        scale = float(info[0])
+        h, w = map(int, info[1].split('x'))
+        model_type = info[2].split('.pth')[0]
+        return h, w, model_type, scale
+
+    def _get_new_box(self, src_w, src_h, bbox, scale):
+        x, y, w, h = bbox[0], bbox[1], bbox[2], bbox[3]
+        
+        # Scale can be restricted by image boundaries
+        scale = min((src_h-1)/h, min((src_w-1)/w, scale))
+
+        new_width = w * scale
+        new_height = h * scale
+        center_x, center_y = w/2 + x, h/2 + y
+
+        left_top_x = center_x - new_width/2
+        left_top_y = center_y - new_height/2
+        right_bottom_x = center_x + new_width/2
+        right_bottom_y = center_y + new_height/2
+
+        if left_top_x < 0:
+            right_bottom_x -= left_top_x
+            left_top_x = 0
+        if left_top_y < 0:
+            right_bottom_y -= left_top_y
+            left_top_y = 0
+        if right_bottom_x > src_w-1:
+            left_top_x -= right_bottom_x - src_w + 1
+            right_bottom_x = src_w-1
+        if right_bottom_y > src_h-1:
+            left_top_y -= right_bottom_y - src_h + 1
+            right_bottom_y = src_h-1
+
+        return int(left_top_x), int(left_top_y), int(right_bottom_x), int(right_bottom_y)
+
+    def predict(self, frame, bbox):
+        """
+        bbox format: [x, y, w, h]
+        Returns: label (1=Real, 0=Fake), confidence
+        """
+        if not self.models:
+            return 1, 1.0 # Bypassed if no models
+
+        src_h, src_w = frame.shape[:2]
+        total_prediction = np.zeros((1, 3))
+        
+        for name, meta in self.models.items():
+            model = meta['model']
+            scale = meta['scale']
+            out_h, out_w = meta['h'], meta['w']
+            
+            x1, y1, x2, y2 = self._get_new_box(src_w, src_h, bbox, scale)
+            crop = frame[y1:y2+1, x1:x2+1]
+            crop = cv2.resize(crop, (out_w, out_h))
+            
+            # Preprocess
+            tensor = torch.from_numpy(crop.transpose((2, 0, 1))).float()
+            tensor = tensor.unsqueeze(0).to(self.device)
+            
+            with torch.no_grad():
+                out = model(tensor)
+                out = F.softmax(out, dim=1).cpu().numpy()
+                total_prediction += out
+        
+        # Average results
+        final_prediction = total_prediction / len(self.models)
+        label = np.argmax(final_prediction)
+        score = final_prediction[0][label]
+        
+        # In SFAS label mapping: 1 is Real, others (0, 2) are Fake/Spoof
+        return (1 if label == 1 else 0), float(score)
 
 class AntiSpoofing:
-    """
-    Advanced Anti-Spoofing using Blink Detection (Liveness) and Texture Analysis.
-    """
-    
-    def __init__(self, model_path: str = None, device_id: int = -1):
-        # {face_index: {'bbox': bbox, 'ear_history': [], 'blink_count': 0, 'is_real': False, 'last_seen': time}}
-        self.history = {}
-        self.max_history = 10
+    """Wrapper class to match existing API."""
+    def __init__(self):
+        self.detector = AntiSpoof()
         
-        # EAR thresholds
-        self.EAR_THRESHOLD = 0.22  # Below this, eye is considered closed
-        self.BLINK_FRAME_MIN = 1   # Minimum frames closed
-        self.BLINK_FRAME_MAX = 5   # Maximum frames closed (avoid slow blinks/static photos)
+    def predict(self, frame, face_obj):
+        # face_obj.bbox is [x1, y1, x2, y2]
+        bbox = face_obj.bbox.astype(int)
+        # Convert to [x, y, w, h]
+        x, y = bbox[0], bbox[1]
+        w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
         
-        logger.success("Blink-aware Anti-Spoofing initialized.")
-
-    def _get_iou(self, boxA, boxB):
-        xA = max(boxA[0], boxB[0])
-        yA = max(boxA[1], boxB[1])
-        xB = min(boxA[2], boxB[2])
-        yB = min(boxA[3], boxB[3])
-        interArea = max(0, xB - xA + 1) * max(0, yB - yA + 1)
-        boxAArea = (boxA[2] - boxA[0] + 1) * (boxA[3] - boxA[1] + 1)
-        boxBArea = (boxB[2] - boxB[0] + 1) * (boxB[3] - boxB[1] + 1)
-        return interArea / float(boxAArea + boxBArea - interArea)
-
-    def calculate_ear(self, landmarks):
-        """
-        Calculate Eye Aspect Ratio (EAR) using InsightFace 106 landmarks.
-        Left eye: 35(I), 39(O), 37(T1), 38(T2), 41(B1), 40(B2)
-        Right eye: 89(I), 93(O), 91(T1), 92(T2), 95(B1), 94(B2)
-        """
-        def eye_aspect_ratio(eye_pts):
-            # Vertical distances
-            v1 = np.linalg.norm(eye_pts[2] - eye_pts[5]) # 37-41
-            v2 = np.linalg.norm(eye_pts[3] - eye_pts[4]) # 38-40
-            # Horizontal distance
-            h = np.linalg.norm(eye_pts[0] - eye_pts[1])  # 35-39
-            return (v1 + v2) / (2.0 * h)
-
-        # Extract eye points
-        left_eye = landmarks[[35, 39, 37, 38, 40, 41]]
-        right_eye = landmarks[[89, 93, 91, 92, 94, 95]]
-        
-        ear_left = eye_aspect_ratio(left_eye)
-        ear_right = eye_aspect_ratio(right_eye)
-        
-        return (ear_left + ear_right) / 2.0
-
-    def predict(self, frame: np.ndarray, face_obj: Any) -> Tuple[int, float]:
-        """
-        Main anti-spoofing logic combining Blink Detection and Texture Analysis.
-        """
-        try:
-            bbox = face_obj.bbox
-            landmarks = getattr(face_obj, 'landmark_2d_106', None)
-            
-            if landmarks is None:
-                return 1, 0.5 # Fallback if no landmarks
-                
-            # --- 1. Texture/Glare Detection (Passive) ---
-            # Phone screens still produce glare and unnatural texture
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            x1, y1, x2, y2 = bbox.astype(int)
-            x1, y1 = max(0, x1), max(0, y1)
-            x2, y2 = min(frame.shape[1], x2), min(frame.shape[0], y2)
-            face_roi = gray[y1:y2, x1:x2]
-            
-            # Glare check
-            _, bright = cv2.threshold(face_roi, 240, 255, cv2.THRESH_BINARY)
-            glare_ratio = np.sum(bright == 255) / float(face_roi.size)
-            
-            # --- 2. Blink Detection (Active Liveness) ---
-            ear = self.calculate_ear(landmarks)
-            
-            # Match with history
-            best_match_id = None
-            for fid, h_data in list(self.history.items()):
-                if self._get_iou(bbox, h_data['bbox']) > 0.6:
-                    best_match_id = fid
-                    break
-            
-            is_blinked = False
-            if best_match_id is not None:
-                h = self.history[best_match_id]
-                h['bbox'] = bbox
-                h['last_seen'] = time.time()
-                
-                # Check for state transition (Open -> Closed -> Open)
-                # h['ear_state']: 0=open, 1=closed
-                prev_state = h.get('ear_state', 0)
-                current_state = 1 if ear < self.EAR_THRESHOLD else 0
-                
-                if prev_state == 0 and current_state == 1:
-                    # Closing
-                    h['closed_start_time'] = time.time()
-                    h['ear_state'] = 1
-                elif prev_state == 1 and current_state == 0:
-                    # Opening
-                    duration = time.time() - h.get('closed_start_time', 0)
-                    # A blink usually lasts 0.1 to 0.4 seconds
-                    if 0.05 < duration < 0.5:
-                        h['blink_count'] += 1
-                        logger.info(f"Blink detected! Total: {h['blink_count']}")
-                        if h['blink_count'] >= 1:
-                            h['is_real'] = True
-                    h['ear_state'] = 0
-                elif current_state == 1:
-                    # Stay closed too long? (Likely static photo or closed eyes)
-                    duration = time.time() - h.get('closed_start_time', 0)
-                    if duration > 1.0:
-                        h['is_real'] = False # Reset if eyes closed too long
-                
-                is_blinked = h['is_real']
-            else:
-                new_id = int(time.time() * 1000)
-                self.history[new_id] = {
-                    'bbox': bbox, 
-                    'ear_state': 0, 
-                    'blink_count': 0, 
-                    'is_real': False, 
-                    'last_seen': time.time()
-                }
-                # Cleanup old history
-                if len(self.history) > 10:
-                    oldest = min(self.history.keys(), key=lambda k: self.history[k]['last_seen'])
-                    self.history.pop(oldest)
-
-            # --- 3. Final Decision ---
-            # Level 1: Screen Glare = 100% SPOOF
-            if glare_ratio > 0.05:
-                label = 0 # Spoof
-                confidence = 0.95
-            # Level 2: Blink Detected = 100% REAL
-            elif is_blinked:
-                label = 1 # Real
-                confidence = 0.99
-            # Level 3: No blink yet = WAITING
-            else:
-                label = 2 # WAITING (New state)
-                confidence = 0.5
-                
-            return label, float(confidence)
-
-        except Exception as e:
-            logger.debug(f"Anti-Spoofing error: {e}")
-            return 1, 1.0
+        label, score = self.detector.predict(frame, [x, y, w, h])
+        return label, score
