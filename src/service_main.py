@@ -167,9 +167,9 @@ def main():
                 ai_frame = ai_queue.get()
                 if ai_frame is None: break
                 
-                # Heavy AI Tasks
-                detected = face_rec.detect_and_extract(ai_frame)
-                tracker.update(detected, attendance, ai_frame)
+                # Heavy AI Tasks (Detection only in fast mode)
+                detected = face_rec.detect_and_extract(ai_frame, fast=True)
+                tracker.update(detected, attendance, face_rec=face_rec, frame=ai_frame)
                 
                 # Update shared list
                 faces[:] = detected 

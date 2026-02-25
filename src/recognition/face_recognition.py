@@ -42,51 +42,78 @@ class FaceRecognition:
         
         try:
             # Initialize FaceAnalysis
-            # It will download models automatically to ~/.insightface/models/ if not present
             self.app = FaceAnalysis(
                 name=self.model_name,
                 root=str(MODELS_DIR),
-                allowed_modules=['detection', 'recognition', 'attribute'],
+                allowed_modules=['detection', 'landmark_2d_106'], # Removed 'recognition', 'attribute'
                 providers=['CPUExecutionProvider'] # Forcing CPU as requested
             )
             self.app.prepare(ctx_id=ctx_id, det_size=self.det_size, det_thresh=self.det_thresh)
-            # Anti-Spoofing Setup (Simple Non-AI Version)
+            
+            # Manual load of recognition model for the strict pipeline
+            from insightface.model_zoo import get_model
+            # Look for the .onnx file in the recognition folder of buffalo_l/buffalo_s
+            rec_model_name = "w600k_r50.onnx" if "buffalo_l" in self.model_name else "w600k_mbf.onnx"
+            rec_model_path = MODELS_DIR / "models" / self.model_name / rec_model_name
+            self.rec_model = get_model(str(rec_model_path), providers=['CPUExecutionProvider'])
+            self.rec_model.prepare(ctx_id=ctx_id)
+            logger.info("Recognition model loaded manually for strict pipeline.")
+            # Anti-Spoofing Setup (Silent-Face-Anti-Spoofing)
             from src.recognition.antispoofing import AntiSpoofing
             self.anti_spoof = AntiSpoofing()
-            logger.info("Anti-Spoofing (Texture Analysis) enabled.")
+            logger.info("Silent-Face-Anti-Spoofing (MiniFASNet) initialized.")
                 
         except Exception as e:
             logger.error(f"Failed to load InsightFace model: {e}")
             raise e
 
-    def detect_and_extract(self, frame: np.ndarray, max_faces: Optional[int] = None) -> List[Any]:
+    def detect_and_extract(self, frame: np.ndarray, max_faces: Optional[int] = None, fast: bool = False) -> List[Any]:
         """
-        Detect faces and extract embeddings from a frame.
-        Sorted by size (largest first).
+        Architecture:
+        1. InsightFace Detection -> 2. SFAS Anti-spoofing -> 3. InsightFace Recognition
+        
+        If fast=True, skips SFAS and Recognition (Defer to tracker).
         """
         try:
+            # 1. Detection & Landmarks only
             faces = self.app.get(frame)
             
-            # Sort by bbox area: (x2-x1)*(y2-y1) - largest first
-            if faces:
-                faces.sort(key=lambda x: (x.bbox[2]-x.bbox[0])*(x.bbox[3]-x.bbox[1]), reverse=True)
-                
-                # Limit number of faces if specified
-                if max_faces is not None:
-                    faces = faces[:max_faces]
-                
-                # Run Anti-Spoofing if model is available
+            if not faces:
+                return []
+
+            # Sort by size
+            faces.sort(key=lambda x: (x.bbox[2]-x.bbox[0])*(x.bbox[3]-x.bbox[1]), reverse=True)
+            if max_faces is not None:
+                faces = faces[:max_faces]
+
+            if fast:
+                # In fast mode, we just return the detections with placeholders
                 for face in faces:
-                    if self.anti_spoof:
-                        is_real, as_score = self.anti_spoof.predict(frame, face.bbox)
-                        face.is_real = bool(is_real)
-                        face.as_score = float(as_score)
-                    else:
-                        # Fallback to True if no model
-                        face.is_real = True
-                        face.as_score = 1.0
-                    
-            return faces
+                    face.is_real = True # Default to True so it enters tracker's stabilizing
+                    face.as_label = 2    # 2 = WAITING for analysis
+                    face.as_score = 0.0
+                return faces
+
+            real_faces = []
+            for face in faces:
+                # 2. Anti-Spoofing (SFAS)
+                if self.anti_spoof:
+                    as_label, as_score = self.anti_spoof.predict(frame, face)
+                    face.as_label = int(as_label)
+                    face.as_score = float(as_score)
+                    face.is_real = (face.as_label == 1)
+                else:
+                    face.is_real = True
+                    face.as_score = 1.0
+
+                # 3. Recognition (Only if Real)
+                if face.is_real:
+                    self.rec_model.get(frame, face)
+                
+                real_faces.append(face)
+
+            return real_faces
+            
         except Exception as e:
             logger.error(f"Error during face detection/extraction: {e}")
             return []
@@ -100,10 +127,15 @@ class FaceRecognition:
             bbox = face.bbox.astype(int)
             is_known = getattr(face, 'name', 'Unknown') != "Unknown"
             is_real = getattr(face, 'is_real', True)
+            as_label = getattr(face, 'as_label', 1) # 2 = WAITING
             
-            # Color logic: Red if Fake, Green if Known, Yellow if Unknown
-            if not is_real:
-                color = (0, 0, 255) # RED for spoof
+            # Color logic: Red if Fake or Spoof Warning, Green if Known, Yellow if Unknown
+            # Check for "CANH BAO", "SPOOF", or "TRUY CAP" in name/label to handle flicker
+            display_name = getattr(face, 'name', '')
+            if not is_real or any(kw in display_name for kw in ["CANH BAO", "SPOOF", "TRUY CAP"]):
+                color = (0, 0, 255) # RED for spoof/unauthorized
+            elif as_label == 2:
+                color = (0, 255, 255) # Yellow while waiting
             else:
                 color = (0, 255, 0) if is_known else (0, 255, 255)
             
@@ -111,12 +143,18 @@ class FaceRecognition:
             cv2.rectangle(res_frame, (bbox[0], bbox[1]), (bbox[2], bbox[3]), color, 2)
             
             # Main Label: Real/Fake status
-            liveness_label = "REAL" if is_real else "SPOOF / FAKE"
             as_score = getattr(face, 'as_score', 0.0)
+            if as_label == 2:
+                liveness_label = "ANALYZING LIVENESS..."
+            elif not is_real:
+                liveness_label = f"GIA MAO (FAKE) | Score: {as_score:.2f}"
+            else:
+                liveness_label = f"REAL | Score: {as_score:.2f}"
+            
             y_offset = bbox[1] - 10
             
-            cv2.putText(res_frame, f"{liveness_label} ({as_score:.2f})", (bbox[0], y_offset - 40), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+            cv2.putText(res_frame, liveness_label, (bbox[0], y_offset - 45), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
 
             if hasattr(face, 'name'):
                 # Main Label: Name (Score)
@@ -145,7 +183,6 @@ class FaceRecognition:
                     meta_info = [
                         f"ID: {getattr(face, 'user_id', 'Unknown') or 'Unknown'}",
                         f"N-sinh: {getattr(face, 'birthday', 'N/A') or 'N/A'}",
-                        f"G-tinh: {gender_val} ({age_val}t)",
                         f"Gio: {getattr(face, 'detect_time', 'N/A') or 'N/A'}",
                         f"Mau: {getattr(face, 'vector_count', 0) if getattr(face, 'vector_count', None) is not None else 0}"
                     ]
@@ -155,9 +192,15 @@ class FaceRecognition:
                         cv2.putText(res_frame, text, pos, 
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
             
-            # If SPOOF, add a big warning
-            if not is_real:
-                cv2.putText(res_frame, "WARNING: ANTI-SPOOFING TRIGGERED!", (bbox[0], bbox[3] + 30),
+            # If SPOOF or UNAUTHORIZED, add a big warning
+            if color == (0, 0, 255):
+                warning_msg = "WARNING: SECURITY ALERT!"
+                if "CANH BAO" in display_name or "SPOOF" in display_name:
+                    warning_msg = "WARNING: ANTI-SPOOFING TRIGGERED!"
+                elif "TRUY CAP" in display_name:
+                    warning_msg = "WARNING: UNAUTHORIZED ACCESS!"
+                    
+                cv2.putText(res_frame, warning_msg, (bbox[0], bbox[3] + 30),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
                 
         return res_frame

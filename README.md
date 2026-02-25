@@ -61,8 +61,10 @@ RECOGNITION_THRESHOLD=0.4     # Ngưỡng nhận diện (0.35 - 0.45 là tối �
 Hãy đảm bảo bạn đã kết nối Camera IP hoặc có luồng RTSP hợp lệ.
 
 ```bash
+python src/service_main.py
 python -m src.main
 python -m src.api
+pyinstaller bittech_all.spec --noconfirm
 ```
 
 ### Các phím điều khiển:

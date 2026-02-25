@@ -1,11 +1,23 @@
 import cv2
 import time
 import os
+import sys
 import warnings
 import numpy as np
 from loguru import logger
 import tkinter as tk
 from tkinter import filedialog
+
+# --- FIX: ADD PROJECT ROOT TO PATH ---
+if getattr(sys, 'frozen', False):
+    base_dir = sys._MEIPASS
+else:
+    # Get the parent directory of 'src'
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+if base_dir not in sys.path:
+    sys.path.append(base_dir)
+# -------------------------------------
 
 # 0. Suppress specific warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -517,55 +529,92 @@ def main():
                 last_heartbeat_check = time.time()
 
             if ui.current_state == STATE_MENU:
-                display_frame = ui.draw_main_menu(w=cur_w, h=cur_h, service_active=service_active)
-                if cur_w != last_w or cur_h != last_h:
-                    cv2.setMouseCallback(win_name, ui.handle_menu_click, param=(cur_w, cur_h))
-                    last_w, last_h = cur_w, cur_h
+                # Close OpenCV window temporarily to show modern Dashboard
+                cv2.destroyWindow(win_name)
+                # This call is BLOCKING until a button is clicked or window closed
+                next_state = ui.show_main_dashboard(mongo_db, attendance=attendance, face_rec=face_rec, camera=camera, service_active=service_active)
+                ui.current_state = next_state
+                # Re-create window for other states
+                cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
+                cv2.resizeWindow(win_name, 1280, 720)
+                cv2.setMouseCallback(win_name, ui.handle_menu_click, param=(cur_w, cur_h))
+                last_w, last_h = 1280, 720
+                continue
                 
             elif ui.current_state == STATE_DETECT:
-                if not service_active:
-                    from tkinter import messagebox
-                    import threading
-                    def show_warn():
-                        msg_root = tk.Tk(); msg_root.withdraw(); msg_root.attributes('-topmost', True)
-                        messagebox.showwarning("Dịch Vụ Đang Tắt", "Dịch vụ Camera ẩn chưa chạy.\n\nHướng dẫn:\n1. Vui lòng mở file 'service_main.exe' trước khi xem live.")
-                        msg_root.destroy()
-                    threading.Thread(target=show_warn, daemon=True).start()
-                    ui.current_state = STATE_MENU
-                    continue
+                # --- AUTO SWITCH MODE: DIRECT (DEV) vs PREVIEW (PROD/EXE) ---
+                if getattr(sys, 'frozen', False):
+                    # --- PRODUCTION MODE: SHOW PREVIEW FROM SERVICE (SHARED MEMORY) ---
+                    from multiprocessing import shared_memory
+                    SHM_NAME = "bittech_monitor_shm"
+                    SHM_SIZE_MAX = 5 * 1024 * 1024
+                    display_frame = np.zeros((cur_h, cur_w, 3), dtype=np.uint8)
+                    
+                    shm_frame = None
+                    try:
+                        existing_shm = shared_memory.SharedMemory(name=SHM_NAME)
+                        if existing_shm.buf[0] % 2 == 0 and existing_shm.buf[1] == 1:
+                            w = int(np.frombuffer(existing_shm.buf[2:4], dtype=np.uint16)[0])
+                            h = int(np.frombuffer(existing_shm.buf[4:6], dtype=np.uint16)[0])
+                            if 0 < w < 4000 and 0 < h < 4000:
+                                size = w * h * 3
+                                if 10 + size <= SHM_SIZE_MAX:
+                                    data = bytes(existing_shm.buf[10:10+size])
+                                    shm_frame = np.frombuffer(data, dtype=np.uint8).reshape((h, w, 3))
+                        existing_shm.close()
+                    except: pass
 
-                # --- LIVE PREVIEW FROM BACKGROUND SERVICE ---
-                from src.config import DATA_DIR
-                preview_path = DATA_DIR / "camera_preview.jpg"
-                
-                # Prepare Display Frame
-                display_frame = np.zeros((cur_h, cur_w, 3), dtype=np.uint8)
-                
-                if os.path.exists(preview_path) and service_active:
-                    preview_img = cv2.imread(str(preview_path))
-                    if preview_img is not None:
-                        p_h, p_w = preview_img.shape[:2]
+                    if shm_frame is not None:
+                        p_h, p_w = shm_frame.shape[:2]
                         scale = (cur_w - 60) / p_w
-                        target_w = int(p_w * scale)
-                        target_h = int(p_h * scale)
+                        target_w, target_h = int(p_w * scale), int(p_h * scale)
                         if target_h > cur_h - 200:
                             scale = (cur_h - 220) / p_h
-                            target_w = int(p_w * scale)
-                            target_h = int(p_h * scale)
-                        preview_img = cv2.resize(preview_img, (target_w, target_h))
-                        y_off, x_off = 100, (cur_w - target_w) // 2
-                        display_frame[y_off:y_off+target_h, x_off:x_off+target_w] = preview_img
+                            target_w, target_h = int(p_w * scale), int(p_h * scale)
+                        
+                        try:
+                            resized_preview = cv2.resize(shm_frame, (target_w, target_h))
+                            y_off, x_off = 100, (cur_w - target_w) // 2
+                            display_frame[y_off:y_off+target_h, x_off:x_off+target_w] = resized_preview
+                        except: pass
+                        
+                        cv2.rectangle(display_frame, (0, 0), (cur_w, 40), (40, 40, 40), -1)
+                        cv2.putText(display_frame, "SERVICE MONITOR (PRODUCTION MODE)", (20, 25), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                    else:
+                        cv2.putText(display_frame, "DANG DOI KET NOI VOI SERVICE...", (cur_w//2 - 250, cur_h//2), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
                 else:
-                    cv2.putText(display_frame, "DANG DOI ANH PREVIEW...", (cur_w//2 - 200, cur_h//2), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    # --- DEVELOPMENT MODE: DIRECT CAMERA CONNECTION FOR TESTING ---
+                    cam_ip = mongo_db.get_setting("camera_ip", CameraConfig.IP, username=ui.session_username)
+                    cam_port = mongo_db.get_setting("camera_port", CameraConfig.PORT, username=ui.session_username)
+                    cam_user = mongo_db.get_setting("camera_user", CameraConfig.USER, username=ui.session_username)
+                    cam_pass = mongo_db.get_setting("camera_pass", CameraConfig.PASS, username=ui.session_username)
+                    new_url = f"rtsp://{cam_user}:{cam_pass}@{cam_ip}:{cam_port}/ch1/main"
+                    if cam_ip.isdigit(): new_url = int(cam_ip)
+                    
+                    if str(camera.camera_source) != str(new_url):
+                        camera.disconnect()
+                        camera = RTSPCamera(rtsp_url=new_url)
 
-                # Status Bar inside monitor
-                cv2.rectangle(display_frame, (0, 0), (cur_w, 80), (30, 30, 30), -1)
-                cv2.putText(display_frame, "GIAM SAT DICH VU CAMERA (SERVICE MONITOR)", (20, 50), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-                cv2.circle(display_frame, (cur_w - 50, 45), 10, (0, 255, 0), -1)
-                cv2.putText(display_frame, "[M] Quay ve Menu", (20, cur_h - 20), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
+                    if not camera.is_connected:
+                        if not camera.connect():
+                            ui.current_state = STATE_MENU
+                            continue
+
+                    success, frame = camera.read_frame()
+                    if not success or frame is None:
+                        display_frame = np.zeros((cur_h, cur_w, 3), dtype=np.uint8)
+                        cv2.putText(display_frame, "DANG DOC DU LIEU TU CAMERA...", (cur_w//2 - 200, cur_h//2), 0, 0.7, (0, 255, 255), 2)
+                    else:
+                        faces = face_rec.detect_and_extract(frame, fast=True)
+                        tracker.update(faces, attendance, face_rec=face_rec, frame=frame, company_id=ui.session_company_id)
+                        display_frame = face_rec.draw_faces(frame, faces)
+                        
+                        cv2.rectangle(display_frame, (0, 0), (cur_w, 40), (0, 0, 100), -1)
+                        cv2.putText(display_frame, "DEV MODE (DIRECT CAMERA TEST)", (20, 25), 0, 0.6, (255, 255, 255), 2)
+
+                cv2.putText(display_frame, "[M] Thoat ve Menu", (20, cur_h - 20), 0, 0.6, (200, 200, 200), 1)
 
             elif ui.current_state == STATE_TEST_CAM:
                 # 1. Refresh camera config from DB before connecting (User-specific)
@@ -601,8 +650,8 @@ def main():
                         continue
                     
                     # Detection every few frames
-                    faces = face_rec.detect_and_extract(frame)
-                    tracker.update(faces, attendance, frame, company_id=ui.session_company_id)
+                    faces = face_rec.detect_and_extract(frame, fast=True)
+                    tracker.update(faces, attendance, face_rec=face_rec, frame=frame, company_id=ui.session_company_id)
                     display_frame = face_rec.draw_faces(frame, faces)
                     cv2.putText(display_frame, "CHEDO TEST CAMERA (TRUC TIEP)", (10, cur_h-50), 0, 0.7, (0, 0, 255), 2)
                     cv2.putText(display_frame, "[M] Quay ve Menu", (10, cur_h-20), 0, 0.6, (255,255,255), 1)
@@ -717,7 +766,8 @@ def main():
                     continue
                 
                 # 2. Chọn ngày cần xem
-                target_date = ui.get_date_form(title=f"Lịch sử [{target_company}]")
+                company_displayName = mongo_db.get_company_name(target_company)
+                target_date = ui.get_date_form(title=f"Lịch sử [{company_displayName}]", ok_button_text="LẤY DỮ LIỆU")
                 if not target_date:
                     ui.current_state = STATE_MENU
                     continue
@@ -736,11 +786,13 @@ def main():
                     ))
                 
                 ui.show_attendance_logs_ui(
-                    display_logs, 
+                    logs, 
                     title=f"Lịch sử ngày {target_date}",
                     session_role=ui.session_role,
                     session_user_id=ui.session_user_id,
-                    session_username=ui.session_username
+                    session_username=ui.session_username,
+                    mongo_db=mongo_db,
+                    target_company=target_company
                 )
                 ui.current_state = STATE_MENU
                 continue

@@ -98,7 +98,12 @@ class CameraConfig:
             if not raw_env_url:
                 cls.RTSP_URL = f"rtsp://{cls.USER}:{cls.PASS}@{cls.IP}:{cls.PORT}/ch1/main"
             
-            logger.info(f"CameraConfig: Updated settings from MongoDB -> {cls.IP}:{cls.PORT}")
+            # 4. Update Recognition & Cooldown Settings
+            from src.config import RecognitionConfig
+            cooldown_sec = mongo_db.get_setting("detection_cooldown", str(RecognitionConfig.COOLDOWN_SECONDS), username="GLOBAL")
+            RecognitionConfig.COOLDOWN_SECONDS = int(cooldown_sec)
+            
+            logger.info(f"CameraConfig: Updated settings from MongoDB -> {cls.IP}:{cls.PORT} | Cooldown: {cooldown_sec}s")
             return True
         except Exception as e:
             logger.error(f"Failed to load camera settings from MongoDB: {e}")
@@ -129,9 +134,9 @@ class RecognitionConfig:
     THRESHOLD: float = float(os.getenv("RECOGNITION_THRESHOLD", "0.4"))
     EMBEDDING_DIM: int = int(os.getenv("EMBEDDING_DIM", "512"))
     TEST_MODE: bool = os.getenv("TEST_MODE", "false").lower() == "true"
-    COOLDOWN_SECONDS: int = int(os.getenv("DETECTION_COOLDOWN", "900")) # Default 15 minutes
+    COOLDOWN_SECONDS: int = int(os.getenv("DETECTION_COOLDOWN", "3600")) # Default 1 hour
     MAX_FACES: int = int(os.getenv("MAX_FACES", "100")) 
-    CAPTURE_MAX_WIDTH: int = int(os.getenv("CAPTURE_MAX_WIDTH", "640"))
+    CAPTURE_MAX_WIDTH: int = int(os.getenv("CAPTURE_MAX_WIDTH", "1280"))
 
 
 class QdrantConfig:

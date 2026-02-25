@@ -7,6 +7,8 @@ onnxruntime==1.19.2
 
 # Face recognition (Requires C++ Builtools if wheel not found)
 insightface==0.7.3
+torch==2.0.1
+torchvision==0.15.2
 
 # Utilities
 loguru==0.7.2

@@ -2,11 +2,24 @@ import cv2
 import numpy as np
 import os
 import sys
+
+# --- FIX: ADD PROJECT ROOT TO PATH ---
+if getattr(sys, 'frozen', False):
+    base_dir = sys._MEIPASS
+else:
+    # Get the parent directory of 'src'
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+if base_dir not in sys.path:
+    sys.path.append(base_dir)
+# -------------------------------------
+
 from loguru import logger
 from src.attendance.mongodb_mgr import mongo_db
 import customtkinter as ctk
 import tkinter as tk
 from tkinter import ttk, messagebox
+from src.ui.date_picker import CTkDatePicker, CTkDateEntry
 
 def _apply_icon(window):
     """Utility to apply app icon to any tkinter/customtkinter window."""
@@ -188,18 +201,22 @@ class AttendanceUI:
                     if str(emp['user_id']) not in seen_ids:
                         all_employees.append({'user_id': emp['user_id'], 'user_name': emp['name'], 'birthday': emp.get('birthday', 'N/A'), 'has_face': False})
                         seen_ids.add(str(emp['user_id']))
-                self.show_user_list_ui(all_employees, parent=root)
+                company_name = mongo_db.get_company_name(target_cid)
+                self.show_user_list_ui(all_employees, title=f"Nhân viên - {company_name}", parent=root)
 
         def open_history():
             from src.main import get_target_company
             target_cid = get_target_company(self, mongo_db, allow_selection=True, parent=root)
             if target_cid:
-                target_date = self.get_date_form(title=f"Lịch sử [{target_cid}]", parent=root)
+                company_displayName = mongo_db.get_company_name(target_cid)
+                target_date = self.get_date_form(title=f"Lịch sử [{company_displayName}]", ok_button_text="LẤY DỮ LIỆU", parent=root)
                 if target_date:
                     logs = mongo_db.get_logs(company_id=target_cid, date=target_date)
-                    self.show_attendance_logs_ui(logs, title=f"Lịch sử - {target_date}", 
+                    self.show_attendance_logs_ui(logs, title=f"Lịch sử [{company_displayName}] - {target_date}", 
                                                session_role=self.session_role, 
                                                session_username=self.session_username, 
+                                               mongo_db=mongo_db,
+                                               target_company=target_cid,
                                                parent=root)
 
         def open_edit():
@@ -282,14 +299,20 @@ class AttendanceUI:
         grid_frame.grid_rowconfigure((0, 1, 2), weight=1)
 
         # 1. Monitor (All users)
-        def handle_monitor_click():
-            if not service_active:
-                messagebox.showwarning("Dịch Vụ Đang Tắt", "Dịch vụ Camera ẩn chưa chạy.\n\nHướng dẫn:\n1. Vui lòng mở file 'service_main.exe' trước khi xem live.")
+        def watch_live():
+            # In DEV mode (not frozen), allow watching live even if service is off
+            # because main.py will connect directly to the camera.
+            if getattr(sys, 'frozen', False) and not service_active:
+                messagebox.showwarning("Dịch Vụ Đang Tắt", 
+                                     "Dịch vụ Camera ẩn chưa chạy.\n\nHướng dẫn:\n1. Vui lòng mở file 'service_main.exe' trước khi xem live.")
                 return
-            set_state(STATE_DETECT)
+            
+            selected_state[0] = STATE_DETECT
+            self.current_state = STATE_DETECT # Also update self.current_state
+            root.destroy()
 
         btn_monitor = ctk.CTkButton(grid_frame, text="XEM CAMERA TRỰC TIẾP", 
-                                   command=handle_monitor_click,
+                                   command=watch_live,
                                    height=90, font=("Arial", 15, "bold"),
                                    corner_radius=12, fg_color="#1f6aa5", hover_color="#154c75")
         btn_monitor.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
@@ -351,28 +374,29 @@ class AttendanceUI:
     @staticmethod
     def get_user_form(include_upload=False, session_role=None, mongo_db=None, parent=None):
         """
-        Opens a centered tkinter dialog to collect User ID, Name, Birthday, Company, and optionally Photos.
-        Returns: (ID, Name, Birthday, file_paths, company_id) or None if cancelled.
+        Modernized enrollment form using CustomTkinter and CTkDateEntry.
         """
         import tkinter as tk
         from tkinter import messagebox, filedialog, ttk
         
         logger.info("Initializing enrollment form UI...")
+        
         if parent:
-            root = tk.Toplevel(parent)
+            root = ctk.CTkToplevel(parent)
+            root.transient(parent)
             _apply_icon(root)
         else:
-            root = tk.Tk()
+            root = ctk.CTk()
             _apply_icon(root)
             
         root.title("Form Đăng Ký Người Dùng")
         
         # Center the window
-        base_h = 300
-        if include_upload: base_h += 100
-        if str(session_role).lower() == 'admin': base_h += 60
+        base_h = 350
+        if include_upload: base_h += 120
+        if str(session_role).lower() == 'admin': base_h += 80
         
-        window_width, window_height = 380, base_h
+        window_width, window_height = 420, base_h
         try:
             screen_width = root.winfo_screenwidth()
             screen_height = root.winfo_screenheight()
@@ -388,27 +412,33 @@ class AttendanceUI:
         form_data = {"id": None, "name": None, "bday": None, "files": [], "company_id": None}
 
         # UI Elements
-        tk.Label(root, text="ĐĂNG KÝ THÔNG TIN", font=("Arial", 12, "bold")).pack(pady=10)
+        ctk.CTkLabel(root, text="ĐĂNG KÝ THÔNG TIN", font=("Arial", 18, "bold"), text_color="#1f6aa5").pack(pady=20)
         
-        # ID Selection / Entry
-        tk.Label(root, text="Mã nhân viên *:").pack()
-        entry_id = tk.Entry(root, width=30)
-        entry_id.pack(pady=2)
+        # Form container
+        f = ctk.CTkFrame(root, fg_color="transparent")
+        f.pack(fill="both", expand=True, padx=40)
 
-        tk.Label(root, text="Họ và tên *:").pack()
-        entry_name = tk.Entry(root, width=30)
-        entry_name.pack(pady=2)
+        # ID 
+        ctk.CTkLabel(f, text="Mã nhân viên (ID) *:", font=("Arial", 12)).pack(anchor="w")
+        entry_id = ctk.CTkEntry(f, width=340, height=35)
+        entry_id.pack(pady=(2, 10))
 
-        tk.Label(root, text="Ngày sinh (DD/MM/YYYY):").pack()
-        entry_bday = tk.Entry(root, width=30)
-        entry_bday.pack(pady=2)
+        # Name
+        ctk.CTkLabel(f, text="Họ và tên *:", font=("Arial", 12)).pack(anchor="w")
+        entry_name = ctk.CTkEntry(f, width=340, height=35)
+        entry_name.pack(pady=(2, 10))
+
+        # Birthday using new CTkDateEntry
+        ctk.CTkLabel(f, text="Ngày sinh (DD-MM-YYYY):", font=("Arial", 12)).pack(anchor="w")
+        date_entry = CTkDateEntry(f, width=340, height=35, placeholder="Chọn ngày sinh")
+        date_entry.pack(pady=(2, 10))
 
         # Company selection for admin
         combo_cid = None
         company_map = {}
         
         if str(session_role).lower() == 'admin' and mongo_db:
-            tk.Label(root, text="Phân quyền Công ty *:").pack(pady=(5, 0))
+            ctk.CTkLabel(f, text="Phân quyền Công ty *:", font=("Arial", 12)).pack(anchor="w")
             try:
                 companies = mongo_db.get_all_companies()
                 company_map["Admin (admin)"] = "admin"
@@ -420,39 +450,34 @@ class AttendanceUI:
                     company_map[display_name] = cid
                     company_display_list.append(display_name)
                 
-                combo_cid = ttk.Combobox(root, values=company_display_list, width=27, state="readonly")
+                combo_cid = ctk.CTkComboBox(f, values=company_display_list, width=340, height=35)
                 combo_cid.set("Admin (admin)")
-                combo_cid.pack(pady=2)
+                combo_cid.pack(pady=(2, 10))
             except Exception as e:
                 logger.error(f"UI: Error loading companies: {e}")
 
         # File upload section
         lbl_file_count = None
         if include_upload:
-            tk.Label(root, text="Ảnh khuôn mặt *:").pack(pady=(10, 0))
+            ctk.CTkLabel(f, text="Ảnh khuôn mặt *:", font=("Arial", 12)).pack(anchor="w", pady=(10,0))
             
             def on_select_files():
-                logger.info("Opening file dialog for image selection...")
                 files = filedialog.askopenfilenames(
                     title="Chọn ảnh khuôn mặt",
                     filetypes=[("Image files", "*.jpg *.jpeg *.png *.bmp *.webp")]
                 )
                 if files:
                     form_data["files"] = list(files)
-                    lbl_file_count.config(text=f"Đã chọn {len(files)} ảnh", fg="green")
-                    logger.info(f"User selected {len(files)} files.")
-                else:
-                    logger.info("File selection cancelled.")
+                    lbl_file_count.configure(text=f"Đã chọn {len(files)} ảnh", text_color="#28a745")
             
-            tk.Button(root, text="Chọn ảnh", command=on_select_files).pack(pady=2)
-            lbl_file_count = tk.Label(root, text="Chưa chọn ảnh", fg="gray")
+            ctk.CTkButton(f, text="Chọn ảnh", command=on_select_files, width=340, height=35, fg_color="#5D6D7E").pack(pady=5)
+            lbl_file_count = ctk.CTkLabel(f, text="Chưa chọn ảnh", text_color="gray", font=("Arial", 11))
             lbl_file_count.pack()
 
         def on_submit():
-            logger.info("Enrollment form submit clicked.")
             u_id = entry_id.get().strip()
             u_name = entry_name.get().strip()
-            u_bday = entry_bday.get().strip()
+            u_bday = date_entry.get().strip()
             
             if not u_id or not u_name:
                 messagebox.showwarning("Cảnh báo", "Vui lòng nhập đầy đủ Mã nhân viên và Họ tên!")
@@ -466,16 +491,16 @@ class AttendanceUI:
                 display_name = combo_cid.get()
                 form_data["company_id"] = company_map.get(display_name, "admin")
             else:
-                form_data["company_id"] = None # Will be set by caller or session
+                form_data["company_id"] = None
             
             form_data["id"] = u_id
             form_data["name"] = u_name
             form_data["bday"] = u_bday or "N/A"
-            logger.info(f"Form data validated for {u_name}. Closing form.")
             root.destroy()
 
         # Submit button
-        tk.Button(root, text="XÁC NHẬN", command=on_submit, width=15, bg="#28a745", fg="white").pack(pady=15)
+        ctk.CTkButton(root, text="XÁC NHẬN ĐĂNG KÝ", command=on_submit, width=250, height=45, 
+                     fg_color="#28a745", hover_color="#218838", font=("Arial", 14, "bold")).pack(pady=30)
         
         root.protocol("WM_DELETE_WINDOW", root.destroy)
         if not parent:
@@ -484,7 +509,6 @@ class AttendanceUI:
             parent.wait_window(root)
         
         if form_data["id"] is None:
-            logger.info("Enrollment form closed without submission.")
             return None
             
         return form_data["id"], form_data["name"], form_data["bday"], form_data["files"], form_data["company_id"]
@@ -504,30 +528,24 @@ class AttendanceUI:
         return u_id
 
     @staticmethod
+    @staticmethod
     def get_edit_user_form(current_id, current_name, current_bday, session_role=None, parent=None):
         """
-        Dialog to edit Name, Birthday, and optionally enroll face.
+        Modernized edit form using CustomTkinter and CTkDateEntry.
         """
         import tkinter as tk
         from tkinter import messagebox
 
         if parent:
-            root = tk.Toplevel(parent)
+            root = ctk.CTkToplevel(parent)
             root.transient(parent)
             _apply_icon(root)
         else:
-            root = tk.Tk()
+            root = ctk.CTk()
             _apply_icon(root)
             
         root.title("Chỉnh sửa thông tin")
-        
-        window_width, window_height = 400, 420
-        screen_width = root.winfo_screenwidth()
-        screen_height = root.winfo_screenheight()
-        pos_x = (screen_width // 2) - (window_width // 2)
-        pos_y = (screen_height // 2) - (window_height // 2)
-        root.geometry(f"{window_width}x{window_height}+{pos_x}+{pos_y}")
-        
+        root.geometry("450x550")
         root.attributes('-topmost', True)
         root.focus_force()
 
@@ -541,7 +559,7 @@ class AttendanceUI:
         
         def on_save():
             result["name"] = entry_name.get().strip()
-            result["bday"] = entry_bday.get().strip()
+            result["bday"] = date_entry.get().strip()
             if not result["name"]:
                 messagebox.showwarning("Cảnh báo", "Họ tên không được để trống!")
                 return
@@ -553,9 +571,8 @@ class AttendanceUI:
                 root.destroy()
         
         def on_enroll_camera():
-            """Mark for camera enrollment after saving."""
             result["name"] = entry_name.get().strip()
-            result["bday"] = entry_bday.get().strip()
+            result["bday"] = date_entry.get().strip()
             if not result["name"]:
                 messagebox.showwarning("Cảnh báo", "Họ tên không được để trống!")
                 return
@@ -563,9 +580,8 @@ class AttendanceUI:
             root.destroy()
         
         def on_enroll_upload():
-            """Mark for file upload enrollment after saving."""
             result["name"] = entry_name.get().strip()
-            result["bday"] = entry_bday.get().strip()
+            result["bday"] = date_entry.get().strip()
             if not result["name"]:
                 messagebox.showwarning("Cảnh báo", "Họ tên không được để trống!")
                 return
@@ -574,46 +590,49 @@ class AttendanceUI:
 
         is_company = (str(session_role).lower() == 'company')
 
-        tk.Label(root, text=f"ID: {current_id}", font=("Arial", 10, "bold")).pack(pady=10)
+        ctk.CTkLabel(root, text="CHỈNH SỬA NHÂN VIÊN", font=("Arial", 18, "bold"), text_color="#1f6aa5").pack(pady=20)
         
-        tk.Label(root, text="Họ và tên:").pack()
-        entry_name = tk.Entry(root, width=35)
-        entry_name.insert(0, current_name)
-        if is_company: entry_name.config(state='readonly')
-        entry_name.pack(pady=2)
+        f = ctk.CTkFrame(root, fg_color="transparent")
+        f.pack(fill="both", expand=True, padx=40)
 
-        tk.Label(root, text="Ngày sinh (DD/MM/YYYY):").pack()
-        entry_bday = tk.Entry(root, width=35)
-        entry_bday.insert(0, current_bday)
-        if is_company: entry_bday.config(state='readonly')
-        entry_bday.pack(pady=2)
+        ctk.CTkLabel(f, text=f"Mã nhân viên: {current_id}", font=("Arial", 13, "bold"), text_color="gray").pack(anchor="w", pady=(0, 15))
+        
+        ctk.CTkLabel(f, text="Họ và tên:", font=("Arial", 12)).pack(anchor="w")
+        entry_name = ctk.CTkEntry(f, width=370, height=35)
+        entry_name.insert(0, current_name)
+        if is_company: entry_name.configure(state='readonly')
+        entry_name.pack(pady=(2, 10))
+
+        ctk.CTkLabel(f, text="Ngày sinh (DD-MM-YYYY):", font=("Arial", 12)).pack(anchor="w")
+        date_entry = CTkDateEntry(f, width=370, height=35, initial_date=current_bday)
+        if is_company: 
+            date_entry.entry.configure(state='readonly')
+            date_entry.btn.configure(state='disabled')
+        date_entry.pack(pady=(2, 10))
 
         # Separator
-        tk.Label(root, text="─" * 50, fg="gray").pack(pady=10)
-        tk.Label(root, text="ĐĂNG KÝ KHUÔN MẶT", font=("Arial", 9, "bold"), fg="#17a2b8").pack()
+        ctk.CTkLabel(f, text="──────────────────────────────────", text_color="gray").pack(pady=10)
+        ctk.CTkLabel(f, text="ĐĂNG KÝ KHUÔN MẶT", font=("Arial", 11, "bold"), text_color="#17a2b8").pack()
         
         # Face enrollment buttons
-        face_btn_frame = tk.Frame(root)
-        face_btn_frame.pack(pady=5)
+        face_btn_row = ctk.CTkFrame(f, fg_color="transparent")
+        face_btn_row.pack(pady=10, fill="x")
         
-        tk.Button(face_btn_frame, text="📷 Chụp bằng Camera", command=on_enroll_camera, 
-                 width=18, bg="#007bff", fg="white", font=("Arial", 9)).pack(side=tk.LEFT, padx=5)
-        tk.Button(face_btn_frame, text="📁 Upload từ File", command=on_enroll_upload, 
-                 width=18, bg="#6c757d", fg="white", font=("Arial", 9)).pack(side=tk.LEFT, padx=5)
-        
-        # Separator
-        tk.Label(root, text="─" * 50, fg="gray").pack(pady=10)
+        ctk.CTkButton(face_btn_row, text="📷 Camera", command=on_enroll_camera, 
+                     width=165, height=35, fg_color="#007bff", hover_color="#0056b3").pack(side="left", padx=(0, 10))
+        ctk.CTkButton(face_btn_row, text="📁 File Ảnh", command=on_enroll_upload, 
+                     width=165, height=35, fg_color="#6c757d", hover_color="#5a6268").pack(side="left")
         
         # Action buttons
-        btn_save = tk.Button(root, text="LƯU THAY ĐỔI", command=on_save, width=25, bg="#28a745", fg="white")
-        btn_delete = tk.Button(root, text="XÓA NHÂN VIÊN", command=on_delete, width=25, bg="#dc3545", fg="white")
+        btn_save = ctk.CTkButton(root, text="LƯU THAY ĐỔI", command=on_save, width=300, height=45, fg_color="#28a745", hover_color="#218838", font=("Arial", 13, "bold"))
+        btn_delete = ctk.CTkButton(root, text="XÓA NHÂN VIÊN", command=on_delete, width=300, height=45, fg_color="#dc3545", hover_color="#c82333", font=("Arial", 13, "bold"))
         
         if is_company:
-            btn_save.config(state='disabled', bg='#6c757d')
-            btn_delete.config(state='disabled', bg='#6c757d')
-            tk.Label(root, text="* Quyền Company chỉ được phép cập nhật Ảnh Detect", fg="red", font=("Arial", 8)).pack()
+            btn_save.configure(state='disabled', fg_color='#555555')
+            btn_delete.configure(state='disabled', fg_color='#555555')
+            ctk.CTkLabel(root, text="* Quyền Company không được sửa tên/ngày sinh", text_color="#e74c3c", font=("Arial", 11)).pack()
 
-        btn_save.pack(pady=5)
+        btn_save.pack(pady=(20, 10))
         btn_delete.pack(pady=5)
         
         if not parent:
@@ -624,7 +643,7 @@ class AttendanceUI:
         return result if result["name"] or result["delete"] or result["enroll_camera"] or result["enroll_upload"] else None
 
     @staticmethod
-    def show_user_list_ui(user_list, parent=None):
+    def show_user_list_ui(user_list, title="Danh sách nhân viên", parent=None):
         """
         Modernized list of users using CustomTkinter.
         """
@@ -640,11 +659,11 @@ class AttendanceUI:
             root = ctk.CTk()
             _apply_icon(root)
             
-        root.title("Bittech AI - Danh sách nhân viên")
+        root.title(f"Bittech AI - {title}")
         root.geometry("800x600")
         root.attributes('-topmost', True)
 
-        ctk.CTkLabel(root, text=f"DANH SÁCH NHÂN VIÊN ({len(user_list)})", font=("Arial", 20, "bold"), text_color="#1f6aa5").pack(pady=20)
+        ctk.CTkLabel(root, text=title.upper(), font=("Arial", 20, "bold"), text_color="#1f6aa5").pack(pady=20)
 
         tree_frame = ctk.CTkFrame(root)
         tree_frame.pack(fill="both", expand=True, padx=20, pady=10)
@@ -791,59 +810,12 @@ class AttendanceUI:
         return selected["id"]
 
     @staticmethod
-    def get_date_form(title="Chọn ngày", parent=None):
+    def get_date_form(title="Chọn ngày", parent=None, ok_button_text=None):
         """
-        Dialog to select a date. Returns string YYYY-MM-DD or None.
+        Dialog to select a date using CTkDatePicker. Returns YYYY-MM-DD or None.
         """
-        import tkinter as tk
-        from datetime import datetime
-        
-        if parent:
-            root = tk.Toplevel(parent)
-            root.transient(parent)
-            _apply_icon(root)
-        else:
-            root = tk.Tk()
-            _apply_icon(root)
-            
-        root.title(title)
-        root.geometry("300x180")
-        root.attributes('-topmost', True)
-        
-        result = {"date": None}
-        today = datetime.now().strftime("%Y-%m-%d")
-        
-        tk.Label(root, text="NHẬP NGÀY CẦN XEM", font=("Arial", 11, "bold")).pack(pady=15)
-        
-        tk.Label(root, text="Định dạng: YYYY-MM-DD").pack()
-        entry_date = tk.Entry(root, width=20)
-        entry_date.insert(0, today)
-        entry_date.pack(pady=5)
-        
-        def on_ok():
-            date_str = entry_date.get().strip()
-            # Simple validation
-            try:
-                datetime.strptime(date_str, "%Y-%m-%d")
-                result["date"] = date_str
-                root.destroy()
-            except ValueError:
-                from tkinter import messagebox
-                messagebox.showerror("Lỗi", "Định dạng ngày không hợp lệ! Vui lòng nhập YYYY-MM-DD")
-
-        def on_cancel():
-            root.destroy()
-
-        btn_frame = tk.Frame(root)
-        btn_frame.pack(pady=15)
-        tk.Button(btn_frame, text="XÁC NHẬN", command=on_ok, bg="green", fg="white", width=12).pack(side=tk.LEFT, padx=5)
-        tk.Button(btn_frame, text="HỦY", command=on_cancel, width=12).pack(side=tk.LEFT, padx=5)
-        
-        if not parent:
-            root.mainloop()
-        else:
-            parent.wait_window(root)
-        return result["date"]
+        picker = CTkDatePicker(parent=parent, title=title, ok_button_text=ok_button_text)
+        return picker.get_date()
 
     @staticmethod
     def pick_system_for_upload(systems, parent=None):
@@ -908,9 +880,18 @@ class AttendanceUI:
             
         return selected["system"]
 
-    def show_attendance_logs_ui(self, logs, title="Lịch sử điểm danh", session_role=None, session_username="GLOBAL", session_user_id=1, parent=None):
+    def show_attendance_logs_ui(self, logs, title="Lịch sử điểm danh", session_role=None, session_username="GLOBAL", session_user_id=1, parent=None, mongo_db=None, target_company=None):
         """Modernized UI to view attendance logs using CustomTkinter."""
         from src.services.hkb_service import hkb_service
+        
+        # Determine initial date from title if possible (Lịch sử ngày YYYY-MM-DD)
+        initial_date = ""
+        if "ngày " in title:
+            initial_date = title.split("ngày ")[-1]
+        elif "- " in title:
+            initial_date = title.split("- ")[-1]
+            
+        current_view_date = [initial_date] # Use a list to make it mutable in nested functions
         
         if parent:
             root = ctk.CTkToplevel(parent)
@@ -921,10 +902,93 @@ class AttendanceUI:
             _apply_icon(root)
             
         root.title(f"Bittech AI - {title}")
-        root.geometry("1000x650")
+        root.geometry("1100x700")
         root.attributes('-topmost', True)
 
-        ctk.CTkLabel(root, text=title.upper(), font=("Arial", 22, "bold"), text_color="#1f6aa5").pack(pady=20)
+        try:
+            display_initial = datetime.strptime(initial_date, "%Y-%m-%d").strftime("%d-%m-%Y") if initial_date else "CHƯA CHỌN"
+        except:
+            display_initial = initial_date or "CHƯA CHỌN"
+
+        title_label = ctk.CTkLabel(root, text=f"LỊCH SỬ NGÀY {display_initial}", font=("Arial", 22, "bold"), text_color="#1f6aa5")
+        title_label.pack(pady=(20, 10))
+
+        # --- Filter Panel ---
+        filter_frame = ctk.CTkFrame(root, fg_color="transparent")
+        filter_frame.pack(fill="x", padx=20, pady=10)
+        
+        ctk.CTkLabel(filter_frame, text="Xem dữ liệu ngày:", font=("Arial", 14, "bold")).pack(side="left", padx=(10, 5))
+        
+        date_entry = CTkDateEntry(filter_frame, width=200, height=35, initial_date=initial_date)
+        date_entry.pack(side="left", padx=5)
+
+        def on_filter():
+            new_date = date_entry.get().strip()
+            if not new_date: return
+            # Try to convert DD-MM-YYYY to YYYY-MM-DD for mongo query if needed
+            db_date = new_date
+            if "-" in new_date:
+                try:
+                    parts = new_date.split("-")
+                    if len(parts[0]) == 2: # DD-MM-YYYY
+                        db_date = f"{parts[2]}-{parts[1]}-{parts[0]}"
+                except: pass
+            refresh_data(db_date)
+
+        ctk.CTkButton(filter_frame, text="LẤY DỮ LIỆU", command=on_filter, width=120, height=35, 
+                     fg_color="#1f6aa5", hover_color="#154c75", font=("Arial", 13, "bold")).pack(side="left", padx=10)
+        # --------------------------
+
+        # To store original data for batch processing
+        log_items_batch = {}
+
+        def refresh_data(new_date):
+            if not mongo_db or not target_company:
+                return
+                
+            # Fetch new logs
+            new_logs = mongo_db.get_logs(company_id=target_company, date=new_date)
+            
+            # Clear tree
+            for item in tree.get_children():
+                tree.delete(item)
+            
+            log_items_batch.clear()
+            
+            # Fill tree
+            for log in new_logs:
+                l_id = str(log.get('_id', ''))
+                ts = log.get('timestamp', 'N/A')
+                try:
+                    date_part = ts.split(' ')[0]
+                    time_part = ts.split(' ')[1]
+                except:
+                    date_part, time_part = ts, ts
+                
+                is_up = 1 if log.get('uploaded_to') else 0
+                up_str = "✓" if is_up else "x"
+                
+                tree.insert("", tk.END, values=(
+                    l_id, 
+                    log.get('user_id', 'N/A'), 
+                    log.get('user_name', 'N/A'), 
+                    time_part, 
+                    date_part, 
+                    log.get('status', 'IN'), 
+                    up_str
+                ))
+                log_items_batch[l_id] = log
+            
+            # Update UI indicators
+            current_view_date[0] = new_date
+            try:
+                display_date = datetime.strptime(new_date, "%Y-%m-%d").strftime("%d-%m-%Y")
+            except:
+                display_date = new_date
+                
+            title_text = f"LỊCH SỬ NGÀY {display_date}"
+            title_label.configure(text=title_text)
+            root.title(f"Bittech AI - {title_text}")
 
         tree_frame = ctk.CTkFrame(root)
         tree_frame.pack(fill="both", expand=True, padx=20, pady=10)
@@ -950,9 +1014,7 @@ class AttendanceUI:
         tree.column("uploaded", width=100, anchor="center")
         tree.pack(fill="both", expand=True)
 
-        # To store original data for batch processing
-        log_items_batch = {}
-
+        # Initial Load from logs passed in constructor
         for log in logs:
             l_id = str(log.get('_id', ''))
             ts = log.get('timestamp', 'N/A')
@@ -982,6 +1044,7 @@ class AttendanceUI:
             l_id = str(tree.item(sel[0])['values'][0])
             user_name = tree.item(sel[0])['values'][2]
             
+            if not mongo_db: return
             img_bytes = mongo_db.get_log_image(l_id)
             if img_bytes:
                 nparr = np.frombuffer(img_bytes, np.uint8)
@@ -990,7 +1053,11 @@ class AttendanceUI:
                     win_img = f"Anh Diem Danh: {user_name}"
                     cv2.namedWindow(win_img, cv2.WINDOW_NORMAL)
                     cv2.imshow(win_img, img)
-                    cv2.waitKey(1)
+                    # Force window to top
+                    try:
+                        cv2.setWindowProperty(win_img, cv2.WND_PROP_TOPMOST, 1)
+                    except: pass
+                    cv2.waitKey(10) 
                 else: messagebox.showerror("Lỗi", "Không thể giải mã hình ảnh")
             else: messagebox.showwarning("Thông báo", "Log này không chứa dữ liệu ảnh")
 
@@ -1021,9 +1088,10 @@ class AttendanceUI:
                         "user_name": log_data.get('user_name'),
                         "timestamp": log_data.get('timestamp'),
                         "status": log_data.get('status', 'IN'),
-                        "image_webp": mongo_db.get_log_image(l_id)
+                        "image_webp": mongo_db.get_log_image(l_id) if mongo_db else None
                     })
 
+            if not mongo_db: return
             auth_data = mongo_db.auth_services.find_one({"uuid": selected_system["system_id"]})
             if not auth_data: return messagebox.showerror("Lỗi", "Không tìm thấy Auth Key cho hệ thống này")
 
@@ -1040,7 +1108,9 @@ class AttendanceUI:
             if res and res.success:
                 mongo_db.mark_logs_uploaded(log_ids, selected_system["system_id"])
                 messagebox.showinfo("Hoàn tất", f"Đã tải {len(upload_logs)} dữ liệu lên {selected_system['name']}")
-                root.destroy()
+                # REFRESH list after solid upload using the CURRENT date
+                if current_view_date[0]:
+                    refresh_data(current_view_date[0])
             else: messagebox.showerror("Lỗi Upload", res.message if res else "Không phản hồi từ server")
 
         def on_double_click(event):
@@ -1089,6 +1159,13 @@ class AttendanceUI:
 
         tree.bind("<Double-1>", on_double_click)
 
+        def on_ui_close():
+            try: cv2.destroyAllWindows()
+            except: pass
+            root.destroy()
+
+        root.protocol("WM_DELETE_WINDOW", on_ui_close)
+
         # Action Buttons
         btn_frame = ctk.CTkFrame(root, fg_color="transparent")
         btn_frame.pack(pady=20)
@@ -1096,7 +1173,7 @@ class AttendanceUI:
         ctk.CTkButton(btn_frame, text="XEM ẢNH", command=on_view_image, width=150, fg_color="#f39c12", hover_color="#d35400").pack(side="left", padx=10)
         if session_role and str(session_role).lower() in ['admin', 'company']:
             ctk.CTkButton(btn_frame, text="TẢI LÊN HKB", command=on_batch_upload, width=180, fg_color="#28a745", hover_color="#218838").pack(side="left", padx=10)
-        ctk.CTkButton(btn_frame, text="ĐÓNG", command=root.destroy, width=120, fg_color="gray").pack(side="left", padx=10)
+        ctk.CTkButton(btn_frame, text="ĐÓNG", command=on_ui_close, width=120, fg_color="gray").pack(side="left", padx=10)
 
         if not parent:
             root.mainloop()
@@ -1567,6 +1644,18 @@ class AttendanceUI:
         e_pass.grid(row=2, column=3, padx=5, sticky="w")
         e_pass.insert(0, mongo_db.get_setting("camera_pass", "password", username=session_username))
 
+        # Recognition & Cooldown Settings
+        ctk.CTkLabel(cam_group, text="NHẬN DIỆN & KHÓA", font=("Arial", 13, "bold")).grid(row=3, column=0, columnspan=2, sticky="w", pady=(15, 10))
+        
+        ctk.CTkLabel(cam_group, text="Thời gian khóa (phút):").grid(row=4, column=0, sticky="w", pady=5)
+        e_cooldown = ctk.CTkEntry(cam_group, width=180, placeholder_text="60")
+        e_cooldown.grid(row=4, column=1, padx=5, sticky="w")
+        
+        # Get current cooldown (stored in SECONDS, display in MINUTES)
+        from src.config import RecognitionConfig
+        current_cooldown_sec = int(mongo_db.get_setting("detection_cooldown", str(RecognitionConfig.COOLDOWN_SECONDS), username=session_username))
+        e_cooldown.insert(0, str(current_cooldown_sec // 60))
+
         # --- B. GROUP KEYS ---
         keys_group = ctk.CTkFrame(main_frame, fg_color="transparent")
         keys_group.pack(fill="both", expand=True, padx=20, pady=10)
@@ -1584,6 +1673,7 @@ class AttendanceUI:
             port = e_port.get().strip()
             user = e_user.get().strip()
             pwd = e_pass.get().strip()
+            cooldown_min = e_cooldown.get().strip()
             
             success = True
             success &= mongo_db.set_setting("group_keys", new_keys, username=session_username)
@@ -1591,6 +1681,17 @@ class AttendanceUI:
             success &= mongo_db.set_setting("camera_port", port, username=session_username)
             success &= mongo_db.set_setting("camera_user", user, username=session_username)
             success &= mongo_db.set_setting("camera_pass", pwd, username=session_username)
+            
+            # Save cooldown (convert MINUTES to SECONDS for backend)
+            try:
+                cooldown_sec = int(cooldown_min) * 60
+                success &= mongo_db.set_setting("detection_cooldown", str(cooldown_sec), username=session_username)
+                # Update global config immediately
+                from src.config import RecognitionConfig
+                RecognitionConfig.COOLDOWN_SECONDS = cooldown_sec
+            except ValueError:
+                messagebox.showerror("Lỗi", "Thời gian khóa phải là một con số!")
+                return
             
             if success:
                 messagebox.showinfo("Thành công", "Đã lưu cài đặt hệ thống!\nBạn cần khởi động lại dịch vụ Camera để áp dụng thay đổi.")
