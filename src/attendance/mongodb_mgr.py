@@ -242,11 +242,13 @@ class MongoDBManager:
 
         threading.Thread(target=sync_task, daemon=True).start()
 
-    def get_logs(self, company_id=None, date=None):
-        """Fetch logs for a specific date and company."""
+    def get_logs(self, company_id=None, date=None, start_date=None, end_date=None):
+        """Fetch logs for a specific date, or date range, and company."""
         cid = company_id or MongoDbConfig.COMPANY_ID
         query = {"company_id": cid}
-        if date:
+        if start_date and end_date:
+            query["date"] = {"$gte": start_date, "$lte": end_date}
+        elif date:
             query["date"] = date
         
         return list(self.logs.find(query).sort("_id", -1))

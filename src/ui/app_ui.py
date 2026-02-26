@@ -926,22 +926,36 @@ class AttendanceUI:
         date_frame = ctk.CTkFrame(filter_frame, fg_color="transparent")
         date_frame.pack(fill="x", pady=0)
         
-        ctk.CTkLabel(date_frame, text="Xem dữ liệu ngày:", font=("Arial", 14, "bold")).pack(side="left", padx=(10, 5))
+        ctk.CTkLabel(date_frame, text="Từ ngày:", font=("Arial", 14, "bold")).pack(side="left", padx=(10, 5))
+        date_from_entry = CTkDateEntry(date_frame, width=150, height=35, initial_date=initial_date)
+        date_from_entry.pack(side="left", padx=5)
         
-        date_entry = CTkDateEntry(date_frame, width=200, height=35, initial_date=initial_date)
-        date_entry.pack(side="left", padx=5)
+        ctk.CTkLabel(date_frame, text="Đến ngày:", font=("Arial", 14, "bold")).pack(side="left", padx=(20, 5))
+        date_to_entry = CTkDateEntry(date_frame, width=150, height=35, initial_date=initial_date)
+        date_to_entry.pack(side="left", padx=5)
 
         def on_filter():
-            new_date = date_entry.get().strip()
-            if not new_date: return
-            db_date = new_date
-            if "-" in new_date:
-                try:
-                    parts = new_date.split("-")
-                    if len(parts[0]) == 2: # DD-MM-YYYY
-                        db_date = f"{parts[2]}-{parts[1]}-{parts[0]}"
-                except: pass
-            refresh_data(db_date)
+            start_date_str = date_from_entry.get().strip()
+            end_date_str = date_to_entry.get().strip()
+            if not start_date_str or not end_date_str: return
+            
+            def convert_date(d_str):
+                if "-" in d_str:
+                    try:
+                        parts = d_str.split("-")
+                        if len(parts[0]) == 2: # DD-MM-YYYY
+                            return f"{parts[2]}-{parts[1]}-{parts[0]}"
+                    except: pass
+                return d_str
+                
+            db_start = convert_date(start_date_str)
+            db_end = convert_date(end_date_str)
+            
+            # Ensure start <= end
+            if db_start > db_end:
+                db_start, db_end = db_end, db_start
+                
+            refresh_data_range(db_start, db_end)
 
         ctk.CTkButton(date_frame, text="LẤY DỮ LIỆU", command=on_filter, width=120, height=35, 
                      fg_color="#1f6aa5", hover_color="#154c75", font=("Arial", 13, "bold")).pack(side="left", padx=10)
@@ -1025,29 +1039,31 @@ class AttendanceUI:
                 
             render_tree(filtered)
 
-        ctk.CTkButton(search_frame, text="LỌC", command=apply_filters, width=80, height=30, 
-                     fg_color="#28B463", hover_color="#1D8348", font=("Arial", 12, "bold")).pack(side="left", padx=20)
-                     
-        # Bind events
+        # Bind events for instant filtering without DB hit
         search_entry.bind("<Return>", apply_filters)
         cloud_dropdown.configure(command=apply_filters)
         status_dropdown.configure(command=apply_filters)
 
-        def refresh_data(new_date):
+        def refresh_data_range(start_date_str, end_date_str):
             if not mongo_db or not target_company:
                 return
-            new_logs = mongo_db.get_logs(company_id=target_company, date=new_date)
+            new_logs = mongo_db.get_logs(company_id=target_company, start_date=start_date_str, end_date=end_date_str)
             nonlocal all_current_logs
             all_current_logs = list(new_logs)
-            apply_filters() # Render with current filters selected
+            apply_filters()
             
-            # Update UI indicators
-            current_view_date[0] = new_date
+            current_view_date[0] = f"{start_date_str} - {end_date_str}"
             try:
-                display_date = datetime.strptime(new_date, "%Y-%m-%d").strftime("%d-%m-%Y")
+                d_start = datetime.strptime(start_date_str, "%Y-%m-%d").strftime("%d-%m-%Y")
+                d_end = datetime.strptime(end_date_str, "%Y-%m-%d").strftime("%d-%m-%Y")
+                if d_start == d_end:
+                    display_text = f"NGÀY {d_start}"
+                else:
+                    display_text = f"TỪ {d_start} ĐẾN {d_end}"
             except:
-                display_date = new_date
-            title_text = f"LỊCH SỬ NGÀY {display_date}"
+                display_text = f"{start_date_str} ĐẾN {end_date_str}"
+                
+            title_text = f"LỊCH SỬ {display_text}"
             title_label.configure(text=title_text)
             root.title(f"Bittech AI - {title_text}")
 
@@ -1056,7 +1072,13 @@ class AttendanceUI:
 
         # Columns for modern viewing
         columns = ("id", "user_id", "user_name", "time", "date", "status", "uploaded")
-        tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="extended")
+        
+        # Thêm vertical scrollbar
+        scrollbar = ttk.Scrollbar(tree_frame)
+        scrollbar.pack(side="right", fill="y")
+        
+        tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="extended", yscrollcommand=scrollbar.set)
+        scrollbar.config(command=tree.yview)
         
         tree.heading("id", text="Mã Log")
         tree.heading("user_id", text="Mã NV")
