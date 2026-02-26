@@ -202,9 +202,9 @@ class MongoDBManager:
                 cid = log_entry.get("company_id")
                 attempt = log_entry.get("unknown_attempt", 0)
                 
-                if user_id == "Unknown":
-                    # STRANGER SYNC POLICY: LOCAL ONLY (Do not sync to cloud)
-                    logger.debug(f"Sync: Stranger detected (Attempt {attempt}). Saving locally only, skipping cloud sync.")
+                if user_id in ["Unknown", "Spoof"]:
+                    # STRANGER/SPOOF SYNC POLICY: LOCAL ONLY (Do not sync to cloud)
+                    logger.debug(f"Sync: Stranger/Spoof detected (Attempt {attempt}). Saving locally only, skipping cloud sync.")
                     return
                 else:
                     # Known User Sync

@@ -340,7 +340,7 @@ class HKBService:
             
             # --- AUTO RE-AUTHENTICATION LOGIC ---
             # If result is None or failed with a token error, try to re-authenticate and retry once
-            token_error_keywords = ["token", "expired", "unauthorized", "401", "403", "truy cập bị từ chối", "hết hạn"]
+            token_error_keywords = ["token", "expired", "unauthorized", "401", "403", "truy cập bị từ chối", "hết hạn", "xác thực"]
             is_token_error = False
             if result and not result.success and result.message:
                 msg_lower = result.message.lower()

@@ -480,6 +480,9 @@ def handle_edit_logic(attendance, face_rec, ui, camera, parent=None):
 def main():
     setup_logger()
     logger.info("Initializing Face Attendance System...")
+    
+    # Load config from MongoDB so that Cooldown/Anti-Spoofing settings take effect immediately
+    CameraConfig.load_from_mongodb(mongo_db)
 
     try:
         face_rec = FaceRecognition()
@@ -586,16 +589,19 @@ def main():
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
                 else:
                     # --- DEVELOPMENT MODE: DIRECT CAMERA CONNECTION FOR TESTING ---
-                    cam_ip = mongo_db.get_setting("camera_ip", CameraConfig.IP, username=ui.session_username)
-                    cam_port = mongo_db.get_setting("camera_port", CameraConfig.PORT, username=ui.session_username)
-                    cam_user = mongo_db.get_setting("camera_user", CameraConfig.USER, username=ui.session_username)
-                    cam_pass = mongo_db.get_setting("camera_pass", CameraConfig.PASS, username=ui.session_username)
-                    new_url = f"rtsp://{cam_user}:{cam_pass}@{cam_ip}:{cam_port}/ch1/main"
-                    if cam_ip.isdigit(): new_url = int(cam_ip)
+                    if getattr(ui, 'use_local_webcam', False):
+                        new_url = "0"
+                    else:
+                        cam_ip = mongo_db.get_setting("camera_ip", CameraConfig.IP, username=ui.session_username)
+                        cam_port = mongo_db.get_setting("camera_port", CameraConfig.PORT, username=ui.session_username)
+                        cam_user = mongo_db.get_setting("camera_user", CameraConfig.USER, username=ui.session_username)
+                        cam_pass = mongo_db.get_setting("camera_pass", CameraConfig.PASS, username=ui.session_username)
+                        new_url = f"rtsp://{cam_user}:{cam_pass}@{cam_ip}:{cam_port}/ch1/main"
+                        if cam_ip.isdigit(): new_url = str(cam_ip)
                     
                     if str(camera.camera_source) != str(new_url):
                         camera.disconnect()
-                        camera = RTSPCamera(rtsp_url=new_url)
+                        camera = RTSPCamera(rtsp_url=str(new_url))
 
                     if not camera.is_connected:
                         if not camera.connect():

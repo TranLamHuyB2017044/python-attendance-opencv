@@ -302,10 +302,15 @@ class AttendanceUI:
         def watch_live():
             # In DEV mode (not frozen), allow watching live even if service is off
             # because main.py will connect directly to the camera.
-            if getattr(sys, 'frozen', False) and not service_active:
-                messagebox.showwarning("Dịch Vụ Đang Tắt", 
-                                     "Dịch vụ Camera ẩn chưa chạy.\n\nHướng dẫn:\n1. Vui lòng mở file 'service_main.exe' trước khi xem live.")
-                return
+            if getattr(sys, 'frozen', False):
+                if not service_active:
+                    messagebox.showwarning("Dịch Vụ Đang Tắt", 
+                                         "Dịch vụ Camera ẩn chưa chạy.\n\nHướng dẫn:\n1. Vui lòng mở file 'service_main.exe' trước khi xem live.")
+                    return
+                self.use_local_webcam = False
+            else:
+                self.use_local_webcam = messagebox.askyesno("Nguồn Camera (Debug Mode)", 
+                                                            "Bạn có muốn mở Webcam máy tính (Camera 0) thay vì luồng RTSP không?")
             
             selected_state[0] = STATE_DETECT
             self.current_state = STATE_DETECT # Also update self.current_state
@@ -917,15 +922,18 @@ class AttendanceUI:
         filter_frame = ctk.CTkFrame(root, fg_color="transparent")
         filter_frame.pack(fill="x", padx=20, pady=10)
         
-        ctk.CTkLabel(filter_frame, text="Xem dữ liệu ngày:", font=("Arial", 14, "bold")).pack(side="left", padx=(10, 5))
+        # Row 1: Date Fetch
+        date_frame = ctk.CTkFrame(filter_frame, fg_color="transparent")
+        date_frame.pack(fill="x", pady=0)
         
-        date_entry = CTkDateEntry(filter_frame, width=200, height=35, initial_date=initial_date)
+        ctk.CTkLabel(date_frame, text="Xem dữ liệu ngày:", font=("Arial", 14, "bold")).pack(side="left", padx=(10, 5))
+        
+        date_entry = CTkDateEntry(date_frame, width=200, height=35, initial_date=initial_date)
         date_entry.pack(side="left", padx=5)
 
         def on_filter():
             new_date = date_entry.get().strip()
             if not new_date: return
-            # Try to convert DD-MM-YYYY to YYYY-MM-DD for mongo query if needed
             db_date = new_date
             if "-" in new_date:
                 try:
@@ -935,28 +943,37 @@ class AttendanceUI:
                 except: pass
             refresh_data(db_date)
 
-        ctk.CTkButton(filter_frame, text="LẤY DỮ LIỆU", command=on_filter, width=120, height=35, 
+        ctk.CTkButton(date_frame, text="LẤY DỮ LIỆU", command=on_filter, width=120, height=35, 
                      fg_color="#1f6aa5", hover_color="#154c75", font=("Arial", 13, "bold")).pack(side="left", padx=10)
-        # --------------------------
-
-        # To store original data for batch processing
+                     
+        # Row 2: Local Filters
+        search_frame = ctk.CTkFrame(filter_frame, fg_color="transparent")
+        search_frame.pack(fill="x", pady=(10, 0))
+        
+        ctk.CTkLabel(search_frame, text="Tìm kiếm:", font=("Arial", 13)).pack(side="left", padx=(10, 5))
+        search_entry = ctk.CTkEntry(search_frame, width=150, height=30, placeholder_text="Tên hoặc Mã NV...")
+        search_entry.pack(side="left", padx=5)
+        
+        ctk.CTkLabel(search_frame, text="Đã tải lên:", font=("Arial", 13)).pack(side="left", padx=(20, 5))
+        cloud_var = ctk.StringVar(value="Tất cả")
+        cloud_dropdown = ctk.CTkOptionMenu(search_frame, variable=cloud_var, values=["Tất cả", "Rồi (✓)", "Chưa (x)"], width=110, height=30)
+        cloud_dropdown.pack(side="left", padx=5)
+        
+        ctk.CTkLabel(search_frame, text="Trạng thái:", font=("Arial", 13)).pack(side="left", padx=(20, 5))
+        status_var = ctk.StringVar(value="Tất cả")
+        status_dropdown = ctk.CTkOptionMenu(search_frame, variable=status_var, values=["Tất cả", "IN", "OUT", "FAILED", "SPOOF"], width=110, height=30)
+        status_dropdown.pack(side="left", padx=5)
+        
+        # We need a shared list to hold the currently fetched logs
+        all_current_logs = list(logs)
         log_items_batch = {}
-
-        def refresh_data(new_date):
-            if not mongo_db or not target_company:
-                return
-                
-            # Fetch new logs
-            new_logs = mongo_db.get_logs(company_id=target_company, date=new_date)
-            
-            # Clear tree
+        
+        def render_tree(logs_to_render):
             for item in tree.get_children():
                 tree.delete(item)
-            
             log_items_batch.clear()
             
-            # Fill tree
-            for log in new_logs:
+            for log in logs_to_render:
                 l_id = str(log.get('_id', ''))
                 ts = log.get('timestamp', 'N/A')
                 try:
@@ -978,6 +995,51 @@ class AttendanceUI:
                     up_str
                 ))
                 log_items_batch[l_id] = log
+
+        def apply_filters(*args):
+            keyword = search_entry.get().strip().lower()
+            cloud_filter = cloud_var.get()
+            status_filter = status_var.get()
+            
+            filtered = []
+            for log in all_current_logs:
+                # 1. Search text
+                name = str(log.get('user_name', '')).lower()
+                uid = str(log.get('user_id', '')).lower()
+                if keyword and (keyword not in name and keyword not in uid):
+                    continue
+                
+                # 2. Cloud Filter
+                is_up = 1 if log.get('uploaded_to') else 0
+                if cloud_filter == "Rồi (✓)" and not is_up:
+                    continue
+                if cloud_filter == "Chưa (x)" and is_up:
+                    continue
+                    
+                # 3. Status Filter
+                log_st = str(log.get('status', 'IN')).upper()
+                if status_filter != "Tất cả" and log_st != status_filter:
+                    continue
+                    
+                filtered.append(log)
+                
+            render_tree(filtered)
+
+        ctk.CTkButton(search_frame, text="LỌC", command=apply_filters, width=80, height=30, 
+                     fg_color="#28B463", hover_color="#1D8348", font=("Arial", 12, "bold")).pack(side="left", padx=20)
+                     
+        # Bind events
+        search_entry.bind("<Return>", apply_filters)
+        cloud_dropdown.configure(command=apply_filters)
+        status_dropdown.configure(command=apply_filters)
+
+        def refresh_data(new_date):
+            if not mongo_db or not target_company:
+                return
+            new_logs = mongo_db.get_logs(company_id=target_company, date=new_date)
+            nonlocal all_current_logs
+            all_current_logs = list(new_logs)
+            apply_filters() # Render with current filters selected
             
             # Update UI indicators
             current_view_date[0] = new_date
@@ -985,7 +1047,6 @@ class AttendanceUI:
                 display_date = datetime.strptime(new_date, "%Y-%m-%d").strftime("%d-%m-%Y")
             except:
                 display_date = new_date
-                
             title_text = f"LỊCH SỬ NGÀY {display_date}"
             title_label.configure(text=title_text)
             root.title(f"Bittech AI - {title_text}")
@@ -1015,28 +1076,7 @@ class AttendanceUI:
         tree.pack(fill="both", expand=True)
 
         # Initial Load from logs passed in constructor
-        for log in logs:
-            l_id = str(log.get('_id', ''))
-            ts = log.get('timestamp', 'N/A')
-            try:
-                date_part = ts.split(' ')[0]
-                time_part = ts.split(' ')[1]
-            except:
-                date_part, time_part = ts, ts
-            
-            is_up = 1 if log.get('uploaded_to') else 0
-            up_str = "✓" if is_up else "x"
-            
-            tree.insert("", tk.END, values=(
-                l_id, 
-                log.get('user_id', 'N/A'), 
-                log.get('user_name', 'N/A'), 
-                time_part, 
-                date_part, 
-                log.get('status', 'IN'), 
-                up_str
-            ))
-            log_items_batch[l_id] = log
+        apply_filters()
 
         def on_view_image():
             sel = tree.selection()
@@ -1598,6 +1638,11 @@ class AttendanceUI:
     @staticmethod
     def show_system_settings_ui(mongo_db, session_username="GLOBAL", parent=None):
         """Modernized UI to manage settings like Group Keys and Camera using CustomTkinter."""
+        from src.config import MongoDbConfig
+        
+        # Use COMPANY_ID to ensure that settings are physical-machine scoped in DB instead of user-session scoped.
+        config_scope = MongoDbConfig.COMPANY_ID
+        
         if parent:
             root = ctk.CTkToplevel(parent)
             root.transient(parent)
@@ -1626,23 +1671,23 @@ class AttendanceUI:
         ctk.CTkLabel(cam_group, text="IP Camera:").grid(row=1, column=0, sticky="w", pady=5)
         e_ip = ctk.CTkEntry(cam_group, width=180, placeholder_text="192.168.1.100")
         e_ip.grid(row=1, column=1, padx=5, sticky="w")
-        e_ip.insert(0, mongo_db.get_setting("camera_ip", "192.168.1.1", username=session_username))
+        e_ip.insert(0, mongo_db.get_setting("camera_ip", "192.168.1.1", username=config_scope))
         
         ctk.CTkLabel(cam_group, text="Port:").grid(row=1, column=2, sticky="w", pady=5, padx=(10, 0))
         e_port = ctk.CTkEntry(cam_group, width=80, placeholder_text="554")
         e_port.grid(row=1, column=3, padx=5, sticky="w")
-        e_port.insert(0, mongo_db.get_setting("camera_port", "554", username=session_username))
+        e_port.insert(0, mongo_db.get_setting("camera_port", "554", username=config_scope))
         
         # User & Pass row
         ctk.CTkLabel(cam_group, text="Tài khoản:").grid(row=2, column=0, sticky="w", pady=5)
         e_user = ctk.CTkEntry(cam_group, width=180, placeholder_text="admin")
         e_user.grid(row=2, column=1, padx=5, sticky="w")
-        e_user.insert(0, mongo_db.get_setting("camera_user", "admin", username=session_username))
+        e_user.insert(0, mongo_db.get_setting("camera_user", "admin", username=config_scope))
         
         ctk.CTkLabel(cam_group, text="Mật khẩu:").grid(row=2, column=2, sticky="w", pady=5, padx=(10, 0))
         e_pass = ctk.CTkEntry(cam_group, width=180, placeholder_text="password", show="*")
         e_pass.grid(row=2, column=3, padx=5, sticky="w")
-        e_pass.insert(0, mongo_db.get_setting("camera_pass", "password", username=session_username))
+        e_pass.insert(0, mongo_db.get_setting("camera_pass", "password", username=config_scope))
 
         # Recognition & Cooldown Settings
         ctk.CTkLabel(cam_group, text="NHẬN DIỆN & KHÓA", font=("Arial", 13, "bold")).grid(row=3, column=0, columnspan=2, sticky="w", pady=(15, 10))
@@ -1653,8 +1698,15 @@ class AttendanceUI:
         
         # Get current cooldown (stored in SECONDS, display in MINUTES)
         from src.config import RecognitionConfig
-        current_cooldown_sec = int(mongo_db.get_setting("detection_cooldown", str(RecognitionConfig.COOLDOWN_SECONDS), username=session_username))
+        current_cooldown_sec = int(mongo_db.get_setting("detection_cooldown", str(RecognitionConfig.COOLDOWN_SECONDS), username=config_scope))
         e_cooldown.insert(0, str(current_cooldown_sec // 60))
+
+        # Anti-spoofing toggle
+        anti_spoof_var = ctk.StringVar()
+        is_anti_spoof_enabled = str(mongo_db.get_setting("anti_spoofing_enabled", str(RecognitionConfig.ANTI_SPOOFING_ENABLED), username=config_scope)).lower() == "true"
+        anti_spoof_var.set("True" if is_anti_spoof_enabled else "False")
+        chk_anti_spoof = ctk.CTkCheckBox(cam_group, text="Bật chống giả mạo (Anti-Spoofing)", variable=anti_spoof_var, onvalue="True", offvalue="False", font=("Arial", 12))
+        chk_anti_spoof.grid(row=4, column=2, columnspan=2, padx=(10, 0), pady=5, sticky="w")
 
         # --- B. GROUP KEYS ---
         keys_group = ctk.CTkFrame(main_frame, fg_color="transparent")
@@ -1662,7 +1714,7 @@ class AttendanceUI:
         
         ctk.CTkLabel(keys_group, text="GROUP KEYS (Phân cách bởi dấu phẩy)", font=("Arial", 13, "bold")).pack(anchor="w", pady=(0, 5))
         
-        current_keys = mongo_db.get_setting("group_keys", "", username=session_username)
+        current_keys = mongo_db.get_setting("group_keys", "", username=config_scope)
         text_keys = ctk.CTkTextbox(keys_group, height=120, font=("Consolas", 12))
         text_keys.pack(fill="both", expand=True, pady=5)
         text_keys.insert("1.0", current_keys)
@@ -1676,25 +1728,39 @@ class AttendanceUI:
             cooldown_min = e_cooldown.get().strip()
             
             success = True
-            success &= mongo_db.set_setting("group_keys", new_keys, username=session_username)
-            success &= mongo_db.set_setting("camera_ip", ip, username=session_username)
-            success &= mongo_db.set_setting("camera_port", port, username=session_username)
-            success &= mongo_db.set_setting("camera_user", user, username=session_username)
-            success &= mongo_db.set_setting("camera_pass", pwd, username=session_username)
+            success &= mongo_db.set_setting("group_keys", new_keys, username=config_scope)
+            success &= mongo_db.set_setting("camera_ip", ip, username=config_scope)
+            success &= mongo_db.set_setting("camera_port", port, username=config_scope)
+            success &= mongo_db.set_setting("camera_user", user, username=config_scope)
+            success &= mongo_db.set_setting("camera_pass", pwd, username=config_scope)
             
             # Save cooldown (convert MINUTES to SECONDS for backend)
             try:
                 cooldown_sec = int(cooldown_min) * 60
-                success &= mongo_db.set_setting("detection_cooldown", str(cooldown_sec), username=session_username)
+                success &= mongo_db.set_setting("detection_cooldown", str(cooldown_sec), username=config_scope)
                 # Update global config immediately
                 from src.config import RecognitionConfig
                 RecognitionConfig.COOLDOWN_SECONDS = cooldown_sec
             except ValueError:
                 messagebox.showerror("Lỗi", "Thời gian khóa phải là một con số!")
                 return
+                
+            # Save anti-spoofing config
+            is_anti_spoof = anti_spoof_var.get() == "True"
+            success &= mongo_db.set_setting("anti_spoofing_enabled", str(is_anti_spoof), username=config_scope)
+            RecognitionConfig.ANTI_SPOOFING_ENABLED = is_anti_spoof
             
             if success:
-                messagebox.showinfo("Thành công", "Đã lưu cài đặt hệ thống!\nBạn cần khởi động lại dịch vụ Camera để áp dụng thay đổi.")
+                # Force apply camera configs immediately
+                from src.config import CameraConfig
+                CameraConfig.IP = ip
+                CameraConfig.PORT = int(port)
+                CameraConfig.USER = user
+                CameraConfig.PASS = pwd
+                CameraConfig.RTSP_URL = f"rtsp://{user}:{pwd}@{ip}:{port}/ch1/main"
+
+                # Attempt to restart background service if needed, but for now we apply the config
+                messagebox.showinfo("Thành công", "Đã lưu cài đặt hệ thống và cập nhật cấu hình trực tiếp (Live).\nNếu dùng dịch vụ ngầm (Service), Camera sẽ tự nhận luồng mới ở lần kết nối lại tiếp theo.")
                 root.destroy()
             else:
                 messagebox.showerror("Lỗi", "Không thể lưu cài đặt!")
@@ -1703,8 +1769,28 @@ class AttendanceUI:
         btn_frame = ctk.CTkFrame(root, fg_color="transparent")
         btn_frame.pack(pady=20, side=tk.BOTTOM)
         
-        ctk.CTkButton(btn_frame, text="LƯU CÀI ĐẶT", command=save_settings, width=180, height=40, font=("Arial", 13, "bold")).pack(side=tk.LEFT, padx=10)
-        ctk.CTkButton(btn_frame, text="ĐÓNG", command=root.destroy, width=120, height=40, fg_color="gray", hover_color="#555555").pack(side=tk.LEFT, padx=10)
+        def restart_service():
+            import subprocess
+            import os
+            try:
+                # Tìm và kill tiến trình service_main.exe
+                if os.name == 'nt':
+                    subprocess.run(["taskkill", "/F", "/IM", "service_main.exe"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    # Thử mở lại service (nếu ở cùng thư mục)
+                    service_path = os.path.join(os.getcwd(), "service_main.exe")
+                    if os.path.exists(service_path):
+                        subprocess.Popen([service_path])
+                        messagebox.showinfo("Thành công", "Đã gửi lệnh khởi động lại Camera Service!")
+                    else:
+                        messagebox.showinfo("Thông báo", "Đã đóng Camera Service cũ. Vui lòng mở lại file 'service_main.exe' thủ công nếu cần tính năng ngầm.")
+                else:
+                    messagebox.showinfo("Thông báo", "Chức năng này hiện chỉ hỗ trợ trên Windows.")
+            except Exception as e:
+                messagebox.showerror("Lỗi", f"Không thể khởi động lại service: {e}")
+
+        ctk.CTkButton(btn_frame, text="KHỞI ĐỘNG LẠI SERVICE", command=restart_service, width=180, height=40, font=("Arial", 11, "bold"), fg_color="#e67e22", hover_color="#d35400").pack(side=tk.LEFT, padx=10)
+        ctk.CTkButton(btn_frame, text="LƯU CÀI ĐẶT", command=save_settings, width=150, height=40, font=("Arial", 13, "bold"), fg_color="#28a745", hover_color="#218838").pack(side=tk.LEFT, padx=10)
+        ctk.CTkButton(btn_frame, text="ĐÓNG", command=root.destroy, width=100, height=40, fg_color="gray", hover_color="#555555").pack(side=tk.LEFT, padx=10)
 
         if not parent:
             root.mainloop()

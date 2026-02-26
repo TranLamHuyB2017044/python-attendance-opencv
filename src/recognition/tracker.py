@@ -59,18 +59,20 @@ class FaceTracker:
                 else:
                     # Known user - check 15 minute cooldown (Database Persistent + Local Memory)
                     if status == 'COOLDOWN':
-                        # Allow webhook to proceed but log it. 
-                        # Deduplication (15m) will still apply.
                         logger.debug(f"Handling COOLDOWN webhook for {user_name}")
 
                     if user_id in self.webhook_sent_time:
                         last_sent = self.webhook_sent_time[user_id]
                         elapsed = current_time - last_sent
                         
-                        # Only block if it's NOT a COOLDOWN status. 
-                        # We want the "Ban da truy cap gan day" voice feedback to work immediately.
-                        if status != 'COOLDOWN' and elapsed < 900:  # 15 minutes = 900 seconds
-                            remaining = int(900 - elapsed)
+                        # Check against global cooldown config instead of hardcoded 15 minutes
+                        from src.config import RecognitionConfig
+                        
+                        # Only block if it's NOT a COOLDOWN status AND the elapsed time is less than Detection Cooldown.
+                        # Since the Tracker already checks Cooldown before invoking IN/OUT, any IN/OUT sent here is legitimate.
+                        # We just maintain a small 5-second anti-spam window just to be safe from duplicate events.
+                        if status != 'COOLDOWN' and elapsed < 5: 
+                            remaining = int(5 - elapsed)
                             logger.debug(f"Webhook blocked for {user_name} (sent {int(elapsed)}s ago, {remaining}s remaining)")
                             return
                     
@@ -367,12 +369,18 @@ class FaceTracker:
                     x1, y1, x2, y2 = bbox[0], bbox[1], bbox[2], bbox[3]
                     
                     # 1. RUN ANTI-SPOOFING (Sequential check after stability)
-                    logger.debug(f"Triggering Anti-Spoofing for ID: {matched_id}")
-                    as_label, as_score = face_rec.anti_spoof.predict(frame, face)
-                    
-                    face.is_real = (as_label == 1)
-                    face.as_label = int(as_label)
-                    face.as_score = float(as_score)
+                    if face_rec.anti_spoof and RecognitionConfig.ANTI_SPOOFING_ENABLED:
+                        logger.debug(f"Triggering Anti-Spoofing for ID: {matched_id}")
+                        as_label, as_score = face_rec.anti_spoof.predict(frame, face)
+                        
+                        face.is_real = (as_label == 1)
+                        face.as_label = int(as_label)
+                        face.as_score = float(as_score)
+                    else:
+                        face.is_real = True
+                        face.as_label = 1
+                        face.as_score = 1.0
+                        
                     f_data['liveness_verified'] = True
                     
                     if not face.is_real:

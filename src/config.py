@@ -80,11 +80,14 @@ class CameraConfig:
         This allows the app and background service to be configured via the Management UI.
         """
         try:
+            from src.config import MongoDbConfig, RecognitionConfig
+            cid = MongoDbConfig.COMPANY_ID
+            
             # 1. Get settings from DB, fallback to current class values (from .env)
-            ip = mongo_db.get_setting("camera_ip", cls.IP)
-            port = mongo_db.get_setting("camera_port", str(cls.PORT))
-            user = mongo_db.get_setting("camera_user", cls.USER)
-            pwd = mongo_db.get_setting("camera_pass", cls.PASS)
+            ip = mongo_db.get_setting("camera_ip", cls.IP, username=cid)
+            port = mongo_db.get_setting("camera_port", str(cls.PORT), username=cid)
+            user = mongo_db.get_setting("camera_user", cls.USER, username=cid)
+            pwd = mongo_db.get_setting("camera_pass", cls.PASS, username=cid)
 
             # 2. Update class attributes
             cls.IP = ip
@@ -99,11 +102,14 @@ class CameraConfig:
                 cls.RTSP_URL = f"rtsp://{cls.USER}:{cls.PASS}@{cls.IP}:{cls.PORT}/ch1/main"
             
             # 4. Update Recognition & Cooldown Settings
-            from src.config import RecognitionConfig
-            cooldown_sec = mongo_db.get_setting("detection_cooldown", str(RecognitionConfig.COOLDOWN_SECONDS), username="GLOBAL")
+            cooldown_sec = mongo_db.get_setting("detection_cooldown", str(RecognitionConfig.COOLDOWN_SECONDS), username=cid)
             RecognitionConfig.COOLDOWN_SECONDS = int(cooldown_sec)
             
-            logger.info(f"CameraConfig: Updated settings from MongoDB -> {cls.IP}:{cls.PORT} | Cooldown: {cooldown_sec}s")
+            # Anti-spoofing config
+            anti_spoofing = mongo_db.get_setting("anti_spoofing_enabled", str(RecognitionConfig.ANTI_SPOOFING_ENABLED), username=cid)
+            RecognitionConfig.ANTI_SPOOFING_ENABLED = str(anti_spoofing).lower() == "true"
+            
+            logger.info(f"CameraConfig: Updated settings from MongoDB -> {cls.IP}:{cls.PORT} | Cooldown: {cooldown_sec}s | Anti-Spoof: {RecognitionConfig.ANTI_SPOOFING_ENABLED}")
             return True
         except Exception as e:
             logger.error(f"Failed to load camera settings from MongoDB: {e}")
@@ -134,6 +140,7 @@ class RecognitionConfig:
     THRESHOLD: float = float(os.getenv("RECOGNITION_THRESHOLD", "0.4"))
     EMBEDDING_DIM: int = int(os.getenv("EMBEDDING_DIM", "512"))
     TEST_MODE: bool = os.getenv("TEST_MODE", "false").lower() == "true"
+    ANTI_SPOOFING_ENABLED: bool = os.getenv("ANTI_SPOOFING_ENABLED", "true").lower() == "true"
     COOLDOWN_SECONDS: int = int(os.getenv("DETECTION_COOLDOWN", "3600")) # Default 1 hour
     MAX_FACES: int = int(os.getenv("MAX_FACES", "100")) 
     CAPTURE_MAX_WIDTH: int = int(os.getenv("CAPTURE_MAX_WIDTH", "1280"))

@@ -64,11 +64,16 @@ class RTSPCamera:
         
         def _try_connect():
             try:
-                cap = cv2.VideoCapture(self.camera_source)
                 if self.is_webcam:
+                    import os
+                    if os.name == 'nt':
+                        cap = cv2.VideoCapture(self.camera_source, cv2.CAP_DSHOW)
+                    else:
+                        cap = cv2.VideoCapture(self.camera_source)
                     # Webcam settings
                     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
                 else:
+                    cap = cv2.VideoCapture(self.camera_source)
                     # RTSP settings
                     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
                     cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000)  # 5 second timeout

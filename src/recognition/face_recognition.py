@@ -9,7 +9,7 @@ from insightface.app import FaceAnalysis
 from loguru import logger
 from typing import List, Optional, Tuple, Any
 
-from src.config import InsightFaceConfig, MODELS_DIR
+from src.config import InsightFaceConfig, MODELS_DIR, RecognitionConfig
 
 
 class FaceRecognition:
@@ -97,7 +97,7 @@ class FaceRecognition:
             real_faces = []
             for face in faces:
                 # 2. Anti-Spoofing (SFAS)
-                if self.anti_spoof:
+                if self.anti_spoof and RecognitionConfig.ANTI_SPOOFING_ENABLED:
                     as_label, as_score = self.anti_spoof.predict(frame, face)
                     face.as_label = int(as_label)
                     face.as_score = float(as_score)
