@@ -110,8 +110,8 @@ def main():
     faces = []
     ai_busy = False
     last_preview_time = 0
-    # Match camera FPS for preview (limit to 15-25 for stability)
-    preview_fps = max(15, min(25, CameraConfig.FPS))
+    # Match camera FPS for preview (limit to up to 60 for ultra-smoothness)
+    preview_fps = max(15, min(60, CameraConfig.FPS))
     preview_interval = 1.0 / preview_fps 
 
     try:
@@ -201,11 +201,31 @@ def main():
             if current_time - last_preview_time >= preview_interval:
                 try:
                     # DRAW FIRST on original resolution to keep boxes correct
+                    import numpy as np
+                    
                     if faces:
                         annotated_full = face_rec.draw_faces(frame.copy(), faces)
                     else:
-                        annotated_full = frame
+                        annotated_full = frame.copy()
+                        
+                    # DRAW ROI BOX IF CONFIGURED (Rectangle for "Active Area")
+                    if CameraConfig.ROI:
+                        x1, y1, x2, y2 = CameraConfig.ROI
+                        cv2.rectangle(annotated_full, (x1, y1), (x2, y2), (255, 255, 0), 3) # Teal
+                        cv2.putText(annotated_full, "VUNG CHAM CONG", (x1 + 10, y1 + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
+                        
+                    # Calculate FPS
+                    fps = 0
+                    if hasattr(camera, 'last_frame_time') and camera.last_frame_time:
+                        fps = 1.0 / (current_time - camera.last_frame_time) if current_time > camera.last_frame_time else 0
+                    camera.last_frame_time = current_time
                     
+                    # Display HUD
+                    import socket
+                    ping_str = getattr(camera, 'current_ping', 'N/A')
+                    cv2.putText(annotated_full, f"FPS: {int(fps)} | Ping: {ping_str}", (20, 40),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 3)
+
                     # THEN RESIZE for monitor performance
                     preview_frame = cv2.resize(annotated_full, (960, 540))
                     
@@ -216,7 +236,24 @@ def main():
             # 4. ASYNC AI TRIGGER (Queue based)
             if ai_queue.empty():
                 try:
-                    ai_queue.put_nowait(frame.copy())
+                    ai_frame_obj = frame.copy()
+                    
+                    # Apply ROI filtering - Black out everything outside the ROI
+                    # This guarantees the AI only detects faces inside the drawn box
+                    # AND the bounding box coordinates will still match the full frame!
+                    if CameraConfig.ROI:
+                        import numpy as np
+                        x1, y1, x2, y2 = CameraConfig.ROI
+                        mask = np.zeros_like(ai_frame_obj)
+                        # Ensure coordinates are within bounds
+                        h, w = ai_frame_obj.shape[:2]
+                        x1, y1 = max(0, x1), max(0, y1)
+                        x2, y2 = min(w, x2), min(h, y2)
+                        
+                        mask[y1:y2, x1:x2] = 255
+                        ai_frame_obj = cv2.bitwise_and(ai_frame_obj, mask)
+                        
+                    ai_queue.put_nowait(ai_frame_obj)
                 except: pass
 
             time.sleep(0.001) 

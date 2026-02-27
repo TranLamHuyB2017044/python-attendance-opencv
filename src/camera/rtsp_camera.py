@@ -45,7 +45,11 @@ class RTSPCamera:
         self.is_connected = False
         self.running = False
         self.thread: Optional[threading.Thread] = None
+        self.ping_thread: Optional[threading.Thread] = None
         self.lock = threading.Lock()
+        
+        self.current_ping = "N/A"
+        self.last_frame_time = 0
         
         if self.is_webcam:
             logger.info(f"RTSPCamera initialized with WEBCAM mode: index {self.camera_source}")
@@ -119,12 +123,41 @@ class RTSPCamera:
                 self.thread = threading.Thread(target=self._update, daemon=True)
                 self.thread.start()
                 
+                if not self.is_webcam:
+                    self.ping_thread = threading.Thread(target=self._ping_loop, daemon=True)
+                    self.ping_thread.start()
+                
             logger.success(f"Successfully connected to {'webcam' if self.is_webcam else 'RTSP stream'} and started background thread.")
             return True
             
         except Exception as e:
             logger.error(f"Error connecting to {'webcam' if self.is_webcam else 'RTSP'}: {e}")
             return False
+
+    def _ping_loop(self):
+        """Background thread to check actual latency to the camera IP."""
+        import socket
+        try:
+            url = str(self.camera_source)
+            if "rtsp://" in url:
+                host_part = url.split("rtsp://")[1].split("/")[0]
+                if "@" in host_part:
+                    host_part = host_part.split("@")[1]
+                ip = host_part.split(":")[0]
+                port = int(host_part.split(":")[1]) if ":" in host_part else 554
+                
+                while self.running:
+                    try:
+                        s_time = time.time()
+                        with socket.create_connection((ip, port), timeout=2.0):
+                            pass
+                        e_time = time.time()
+                        self.current_ping = f"{int((e_time - s_time) * 1000)}ms"
+                    except Exception:
+                        self.current_ping = "Timeout"
+                    time.sleep(2)
+        except Exception:
+            self.current_ping = "Err"
 
     def _update(self):
         """Background thread: continuously grab frames from the stream."""

@@ -147,7 +147,7 @@ class MongoDBManager:
                         
                         if last_time:
                             elapsed = (datetime.datetime.utcnow() - last_time).total_seconds()
-                            if elapsed < RecognitionConfig.COOLDOWN_SECONDS:
+                            if elapsed < RecognitionConfig.COOLDOWN_SECONDS and RecognitionConfig.COOLDOWN_SECONDS > 0:
                                 logger.warning(f"MongoDB: Cooldown active for {user_name} ({int(elapsed)}s < {RecognitionConfig.COOLDOWN_SECONDS}s). Skip saving log.")
                                 return last_record.get("status")
                 
@@ -234,7 +234,18 @@ class MongoDBManager:
                         logger.success(f"Sync: Successfully synced to {service['app_name']}")
                     else:
                         msg = res.message if res else 'No response'
-                        self.mark_logs_uploaded([log_entry["_id"]], service["uuid"], details={"status": "FAILED", "message": msg})
+                        err_detail = None
+                        if res:
+                            try:
+                                # Extract raw data or details from the auth SDK response, if present
+                                err_detail = getattr(res, 'data', None) or getattr(res, 'raw', None)
+                            except: pass
+                            
+                        details_obj = {"status": "FAILED", "message": msg}
+                        if err_detail:
+                            details_obj["error_detail"] = err_detail
+                            
+                        self.mark_logs_uploaded([log_entry["_id"]], service["uuid"], details=details_obj)
                         logger.warning(f"Sync: Failed to sync to {service['app_name']}: {msg}")
             
             except Exception as e:

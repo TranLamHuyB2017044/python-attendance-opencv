@@ -15,7 +15,7 @@ class FaceTracker:
     Tracks faces across frames to ensure stability before recognition.
     Includes a cooldown mechanism and unknown-face attempt logic with audio.
     """
-    def __init__(self, threshold_seconds=1.5):
+    def __init__(self, threshold_seconds=0):
         self.active_faces: Dict[int, Dict[str, Any]] = {} # {id: data}
         self.face_id_counter = 0
         self.threshold_seconds = threshold_seconds
@@ -26,6 +26,9 @@ class FaceTracker:
         # Webhook cooldown for known users: {user_id: last_webhook_time}
         # Prevents sending duplicate webhooks within 15 minutes
         self.webhook_sent_time: Dict[str, float] = {}
+        
+        # Track successful webhook counts per user session
+        self.successful_webhook_counts: Dict[str, int] = {}
         
         # Unknown face webhook counter (max 10, reset on successful checkin)
         self.unknown_webhook_count = 0
@@ -39,52 +42,43 @@ class FaceTracker:
         - Known users: Max 1 webhook per 15 minutes per user_id
         - Unknown faces: Max 10 webhooks total, reset when any known user checks in
         """
+        # === CROSS-PROCESS DEDUPLICATION LOGIC TO PREVENT MULTI-PROCESS RACE CONDITIONS ===
+        if is_unknown:
+            if self.unknown_webhook_count >= self.unknown_webhook_limit:
+                return
+            self.unknown_webhook_count += 1
+        else:
+            if status == 'COOLDOWN':
+                pass
+            
+            # OS Cross-Process File Lock (Data Dir Shared Between All Instances)
+            from src.config import DATA_DIR
+            import os
+            
+            # Use safe generic naming for the lock to handle spaces/symbols in user_id just in case
+            safe_id = "".join(x for x in str(user_id) if x.isalnum())
+            lock_file = DATA_DIR / f"webhook_lock_{safe_id}.txt"
+            
+            try:
+                if lock_file.exists():
+                    last_mtime = os.path.getmtime(lock_file)
+                    elapsed = current_time - last_mtime
+                    if status != 'COOLDOWN' and elapsed < 5: 
+                        return # Block perfectly
+                        
+                # Touch the lock file strictly before creating thread
+                with open(lock_file, "w") as f:
+                    f.write(str(current_time))
+            except Exception as e:
+                pass
+            
+            if self.unknown_webhook_count > 0:
+                self.unknown_webhook_count = 0
+
         def thread_task():
             try:
                 from src.utils.string_utils import remove_accents
                 from src.utils.time_manager import time_mgr
-                
-                current_time = time.time()
-                
-                # === DEDUPLICATION LOGIC ===
-                if is_unknown:
-                    # Check if unknown webhook limit reached
-                    if self.unknown_webhook_count >= self.unknown_webhook_limit:
-                        logger.debug(f"Unknown webhook limit reached ({self.unknown_webhook_count}/{self.unknown_webhook_limit}). Skipping.")
-                        return
-                    
-                    # Increment counter
-                    self.unknown_webhook_count += 1
-                    logger.warning(f"Sending unknown webhook #{self.unknown_webhook_count}/{self.unknown_webhook_limit}")
-                else:
-                    # Known user - check 15 minute cooldown (Database Persistent + Local Memory)
-                    if status == 'COOLDOWN':
-                        logger.debug(f"Handling COOLDOWN webhook for {user_name}")
-
-                    if user_id in self.webhook_sent_time:
-                        last_sent = self.webhook_sent_time[user_id]
-                        elapsed = current_time - last_sent
-                        
-                        # Check against global cooldown config instead of hardcoded 15 minutes
-                        from src.config import RecognitionConfig
-                        
-                        # Only block if it's NOT a COOLDOWN status AND the elapsed time is less than Detection Cooldown.
-                        # Since the Tracker already checks Cooldown before invoking IN/OUT, any IN/OUT sent here is legitimate.
-                        # We just maintain a small 5-second anti-spam window just to be safe from duplicate events.
-                        if status != 'COOLDOWN' and elapsed < 5: 
-                            remaining = int(5 - elapsed)
-                            logger.debug(f"Webhook blocked for {user_name} (sent {int(elapsed)}s ago, {remaining}s remaining)")
-                            return
-                    
-                    # Record this webhook send
-                    self.webhook_sent_time[user_id] = current_time
-                    
-                    # Reset unknown counter when a known user checks in successfully
-                    if self.unknown_webhook_count > 0:
-                        logger.info(f"Resetting unknown webhook counter (was {self.unknown_webhook_count})")
-                        self.unknown_webhook_count = 0
-                    
-                    logger.info(f"Webhook allowed for {user_name}")
                 
                 # === PREPARE PAYLOAD ===
                 # 1. Format time HH:MM:SS from VN Time
@@ -98,8 +92,6 @@ class FaceTracker:
                 if status in ["IN", "OUT"]:
                     action_vn = "vào" if status == "IN" else "ra"
                     voice_text = f"Xin chào {user_name}, bạn đã chấm công {action_vn} thành công"
-                elif status == "COOLDOWN":
-                    voice_text = f"Bạn {user_name} đã truy cập gần đây"
                 elif status == "SPOOF":
                     voice_text = "Cảnh báo: Phát hiện hành vi giả mạo khuôn mặt"
                 else:
@@ -120,9 +112,14 @@ class FaceTracker:
                     timeout=5
                 )
                 if response.status_code == 200:
-                    logger.debug(f"Webhook sent successfully for {user_name}")
+                    self.successful_webhook_counts[user_id] = self.successful_webhook_counts.get(user_id, 0) + 1
+                    count = self.successful_webhook_counts[user_id]
+                    logger.success(f"=====================================================")
+                    logger.success(f"🚀 WEBHOOK GỬI THÀNH CÔNG -> [ {user_name} ] - Status: {status}")
+                    logger.success(f"📊 Đây là webhook thành công lần thứ {count} của nhân viên này.")
+                    logger.success(f"=====================================================")
                 else:
-                    logger.warning(f"Webhook failed for {user_name}: {response.status_code}")
+                    logger.warning(f"WEBHOOK FAILED -> [ {user_name} ] - Code: {response.status_code}")
             except Exception as e:
                 logger.error(f"Error sending webhook: {e}")
 
@@ -140,13 +137,39 @@ class FaceTracker:
         # 1. IMMEDIATE SYNC CHECK (Fast)
         final_status = status
         if is_known and status is None:
-            # Important: pass company_id to check the correct log collection
             final_status = mongo_db.get_attendance_status(user_id, company_id=company_id) 
             
         # --- BLOCK NEW SAVES IF IN COOLDOWN ---
         if final_status == 'COOLDOWN':
-            logger.debug(f"Bỏ qua lưu ảnh/log cho {user_id} ({user_name}) vì đang trong thời gian chặn (Cooldown).")
             return None, final_status
+            
+        # =========================================================================
+        # --- CROSS-PROCESS HARD-LOCK FOR DB WRITES & WEBHOOKS ---
+        # Ngăn chặn hoàn toàn việc ghi log DB đúp và bắn webhook đúp do chạy nền song song với UI
+        # =========================================================================
+        if is_known and final_status in ['IN', 'OUT']:
+            from src.config import DATA_DIR
+            import os
+            import time
+            
+            safe_id = "".join(x for x in str(user_id) if x.isalnum())
+            lock_file = DATA_DIR / f"attendance_lock_{safe_id}.txt"
+            current_time = time.time()
+            
+            try:
+                if lock_file.exists():
+                    last_mtime = os.path.getmtime(lock_file)
+                    elapsed = current_time - last_mtime
+                    # Khoá chặt trong 5 giây cho mọi nỗ lực IN/OUT
+                    if elapsed < 5:
+                        logger.warning(f"[RACE CONDITION BLOCKED] Rejected duplicate {final_status} for {user_name} (locked {int(elapsed)}s ago).")
+                        return None, 'COOLDOWN'
+                
+                # Chiếm quyền ghi (Acquire Lock)
+                with open(lock_file, "w") as f:
+                    f.write(str(current_time))
+            except Exception:
+                pass
         
         # 2. Visual Prep: SMART CROP (Maintain 16:9 Aspect Ratio centered on face)
         log_frame = frame.copy()
@@ -251,6 +274,7 @@ class FaceTracker:
                 
                 target_dir.mkdir(parents=True, exist_ok=True)
 
+                import time
                 # Tên ảnh chỉ cần timestamp vì đã nằm trong thư mục tên
                 img_name = f"{int(time.time())}.webp"
                 img_path = str(target_dir / img_name)
@@ -258,7 +282,7 @@ class FaceTracker:
                 # Heavy Disk Write with quality 50 to target ~10KB
                 cv2.imwrite(img_path, final_img, [int(cv2.IMWRITE_WEBP_QUALITY), 50])
                 # Actual DB Commit
-                mongo_db.log_attendance(user_id, user_name, status=status, frame=final_img, company_id=company_id, unknown_attempt=unknown_attempt)
+                mongo_db.log_attendance(user_id, user_name, status=final_status, frame=final_img, company_id=company_id, unknown_attempt=unknown_attempt)
             except Exception as e:
                 logger.error(f"Async log error: {e}")
 
@@ -293,11 +317,19 @@ class FaceTracker:
             # ... (matching logic remains the same)
             # Sort active faces by distance to current center to find the best match first
             potential_matches = []
+            
+            # Tính giới hạn khoảng cách (dynamic threshold) dựa trên kích thước khuôn mặt thực tế
+            face_w = face.bbox[2] - face.bbox[0]
+            face_h = face.bbox[3] - face.bbox[1]
+            # Mở rộng giới hạn lên tối thiểu 250 pixels, hoặc gấp 1.5 lần size mặt (nếu mặt quá to do đứng gần)
+            max_dist = max(250, max(face_w, face_h) * 1.5)
+
             for f_id, f_data in self.active_faces.items():
                 if f_id in used_ids_in_frame: continue
                 prev_center = f_data['center']
                 dist = np.sqrt((center[0] - prev_center[0])**2 + (center[1] - prev_center[1])**2)
-                if dist < 80: 
+                
+                if dist < max_dist: 
                     potential_matches.append((dist, f_id))
             
             if potential_matches:
@@ -309,7 +341,7 @@ class FaceTracker:
                 matched_id = self.face_id_counter
                 self.face_id_counter += 1
                 
-                # Initial status: FORCED TO STABILIZING FOR BYPASS
+                # Initial status: STABILIZING but force immediate recognition this frame
                 initial_status = 'STABILIZING'
                 
                 updated_faces_map[matched_id] = {
@@ -321,10 +353,15 @@ class FaceTracker:
                     'cooldown_remaining': 0,
                     'unknown_attempts': 0,
                     'last_attempt_time': 0,
-                    'liveness_verified': False
+                    'liveness_verified': False,
+                    'force_immediate_attempt': True # Track new faces
                 }
             else:
                 f_data = self.active_faces[matched_id]
+                # Preserve the force_immediate_attempt flag if it exists, otherwise False
+                if 'force_immediate_attempt' not in f_data:
+                    f_data['force_immediate_attempt'] = False
+                    
                 f_data['last_seen'] = current_time
                 f_data['center'] = center
 
@@ -336,25 +373,29 @@ class FaceTracker:
                     if f_data['user_data']:
                         face.name = remove_accents(f_data['user_data'].get('name', 'Unknown'))
                         face.as_score = f_data['user_data'].get('as_score', 1.0)
+                        pass
                 
                 # Update status if not in a final state
                 if f_data['status'] not in ['RECOGNIZED', 'COOLDOWN', 'RETRY_WAIT', 'UNAUTHORIZED', 'SPOOF_DETECTED']:
-                    f_data['status'] = 'STABILIZING'
+                    pass # Don't rewrite status. We handle recognition via the force_immediate flag now.
 
                 time_stayed = current_time - f_data['start_time']
                 wait_time = current_time - f_data['last_attempt_time']
                 can_attempt = False
                 
-                # Check if we can attempt recognition, but ONLY if none done this frame yet
+                # Check if we can attempt recognition
                 # Note: Already recognized or cooldown faces do NOT block others
                 if not is_real or f_data['status'] in ['RECOGNIZED', 'COOLDOWN', 'SPOOF_DETECTED']:
                     can_attempt = False
-                elif not recognition_done_this_frame:
-                    if f_data['status'] == 'STABILIZING':
-                        if time_stayed >= 1.5:  # Increased from 0.5s to 1.5s for better stability
-                            can_attempt = True
+                else:
+                    if f_data.get('force_immediate_attempt', False):
+                        can_attempt = True
+                        f_data['force_immediate_attempt'] = False # Reset flag after first attempt
+                    elif f_data['status'] == 'STABILIZING':
+                        can_attempt = True # In case they were caught mid-transition
+                        f_data['status'] = 'PROCESSING'
                     elif f_data['status'] in ['RETRY_WAIT', 'UNAUTHORIZED']:
-                        if f_data['unknown_attempts'] < 5 or wait_time >= 5.0:
+                        if f_data['unknown_attempts'] < 5 or wait_time >= 2.0:
                             can_attempt = True
                 
                 # ... (rest of recognition logic)
@@ -364,7 +405,6 @@ class FaceTracker:
                         f_data['status'] = 'MONITORING'
                         continue
                     
-                    recognition_done_this_frame = True # Rate limit
                     bbox = face.bbox.astype(int)
                     x1, y1, x2, y2 = bbox[0], bbox[1], bbox[2], bbox[3]
                     
@@ -412,11 +452,11 @@ class FaceTracker:
                             target_cid = user_data.get('company_id') or active_company
                             if not RecognitionConfig.TEST_MODE and user_id in self.user_cooldowns:
                                 elapsed = current_time - self.user_cooldowns[user_id]
-                                if elapsed < RecognitionConfig.COOLDOWN_SECONDS:
+                                if elapsed < RecognitionConfig.COOLDOWN_SECONDS and RecognitionConfig.COOLDOWN_SECONDS > 0:
                                     f_data['status'] = 'COOLDOWN'
                                     f_data['user_data'] = user_data
                                     f_data['cooldown_remaining'] = int(RecognitionConfig.COOLDOWN_SECONDS - elapsed)
-                                    self._send_user_webhook(user_id, user_name, 'COOLDOWN', is_unknown=False)
+                                    # Disabled webhook for COOLDOWN to prevent spam
                                 else:
                                     f_data['status'] = 'RECOGNIZED'
                                     f_data['user_data'] = user_data
@@ -450,8 +490,8 @@ class FaceTracker:
                             else:
                                 f_data['status'] = 'RETRY_WAIT'
                         
-                        # Các lần thử khác chỉ log console để theo dõi
-                        logger.warning(f"Unknown face. Attempt {f_data['unknown_attempts']} in progress.")
+                            # Các lần thử khác chỉ log console để theo dõi
+                            logger.warning(f"Unknown face. Attempt {f_data['unknown_attempts']} in progress.")
                 
                 updated_faces_map[matched_id] = f_data
 
@@ -466,14 +506,26 @@ class FaceTracker:
                     face.detect_time = (u_d.get('detect_time') or '').split(' ')[-1] or 'N/A'
                     face.vector_count = u_d.get('vector_count') if u_d.get('vector_count') is not None else 0
                     
-                    if data['status'] == 'COOLDOWN':
+                    if data['status'] in ['COOLDOWN', 'RECOGNIZED']:
                         name = remove_accents(u_d.get('name'))
-                        face.name = f"{name} (Khoa {data['cooldown_remaining'] // 60}p)"
+                        uid = u_d.get('user_id')
+                        if uid in self.user_cooldowns:
+                            elapsed = current_time - self.user_cooldowns[uid]
+                            remain_sec = int(max(0, RecognitionConfig.COOLDOWN_SECONDS - elapsed))
+                            if remain_sec > 0:
+                                if remain_sec >= 60:
+                                    face.name = f"{name} (Cho: {remain_sec // 60}p {remain_sec % 60}s)"
+                                else:
+                                    face.name = f"{name} (Cho: {remain_sec}s)"
+                            else:
+                                face.name = f"{name} (Da san sang)"
+                        else:
+                            face.name = f"{name} (Dang Cho)"
                     elif data['status'] == 'RETRY_WAIT':
-                        wait_left = int(5 - (current_time - data['last_attempt_time']))
+                        wait_left = int(2 - (current_time - data['last_attempt_time']))
                         face.name = f"Chua ro (Thu lai {max(0, wait_left)}s)"
                     elif data['status'] == 'UNAUTHORIZED':
-                        face.name = "!!! TRUY CAP LAI !!!"
+                        face.name = "!!! TRUY CAP LA !!!"
                     elif data['status'] == 'SPOOF_DETECTED':
                         face.name = "!!! CANH BAO GIA MAO!!!"
                     else:

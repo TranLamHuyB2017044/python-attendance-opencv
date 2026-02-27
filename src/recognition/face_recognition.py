@@ -80,6 +80,19 @@ class FaceRecognition:
             
             if not faces:
                 return []
+                
+            # Filter out faces that are too small or too far away
+            valid_faces = []
+            min_size = getattr(RecognitionConfig, "MIN_FACE_SIZE", 80)
+            for face in faces:
+                w = face.bbox[2] - face.bbox[0]
+                h = face.bbox[3] - face.bbox[1]
+                if w >= min_size and h >= min_size:
+                    valid_faces.append(face)
+            faces = valid_faces
+            
+            if not faces:
+                return []
 
             # Sort by size
             faces.sort(key=lambda x: (x.bbox[2]-x.bbox[0])*(x.bbox[3]-x.bbox[1]), reverse=True)

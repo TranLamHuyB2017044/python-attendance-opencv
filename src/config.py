@@ -109,7 +109,17 @@ class CameraConfig:
             anti_spoofing = mongo_db.get_setting("anti_spoofing_enabled", str(RecognitionConfig.ANTI_SPOOFING_ENABLED), username=cid)
             RecognitionConfig.ANTI_SPOOFING_ENABLED = str(anti_spoofing).lower() == "true"
             
-            logger.info(f"CameraConfig: Updated settings from MongoDB -> {cls.IP}:{cls.PORT} | Cooldown: {cooldown_sec}s | Anti-Spoof: {RecognitionConfig.ANTI_SPOOFING_ENABLED}")
+            # ROI Configuration
+            roi_str = mongo_db.get_setting("camera_roi", "", username=cid)
+            try:
+                if roi_str and len(roi_str.split(',')) == 4:
+                    cls.ROI = tuple(map(int, roi_str.split(',')))
+                else:
+                    cls.ROI = None
+            except:
+                cls.ROI = None
+            
+            logger.info(f"CameraConfig: Updated settings from MongoDB -> {cls.IP}:{cls.PORT} | Cooldown: {cooldown_sec}s | Anti-Spoof: {RecognitionConfig.ANTI_SPOOFING_ENABLED} | ROI: {cls.ROI}")
             return True
         except Exception as e:
             logger.error(f"Failed to load camera settings from MongoDB: {e}")
@@ -144,6 +154,7 @@ class RecognitionConfig:
     COOLDOWN_SECONDS: int = int(os.getenv("DETECTION_COOLDOWN", "3600")) # Default 1 hour
     MAX_FACES: int = int(os.getenv("MAX_FACES", "100")) 
     CAPTURE_MAX_WIDTH: int = int(os.getenv("CAPTURE_MAX_WIDTH", "1280"))
+    MIN_FACE_SIZE: int = int(os.getenv("MIN_FACE_SIZE", "80")) # Kích thước tối thiểu để lấy ảnh nét
 
 
 class QdrantConfig:

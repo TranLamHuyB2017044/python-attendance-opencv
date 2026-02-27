@@ -1221,6 +1221,53 @@ class AttendanceUI:
 
         tree.bind("<Double-1>", on_double_click)
 
+        def on_view_log():
+            sel = tree.selection()
+            if not sel: return messagebox.showwarning("!", "Vui lòng chọn 1 dòng để xem log")
+            if len(sel) > 1: return messagebox.showwarning("!", "Chỉ chọn 1 dòng để xem chi tiết log lỗi")
+            
+            l_id = str(tree.item(sel[0])['values'][0])
+            log_data = log_items_batch.get(l_id)
+            if not log_data: return
+            
+            detail_win = ctk.CTkToplevel(root)
+            detail_win.title(f"Chi tiết Log Lỗi: {l_id}")
+            detail_win.geometry("600x600")
+            detail_win.attributes('-topmost', True)
+            
+            ctk.CTkLabel(detail_win, text="CHI TIẾT ĐỒNG BỘ ĐẾN HKB", font=("Arial", 16, "bold"), text_color="#e74c3c").pack(pady=15)
+            
+            hist_box = ctk.CTkTextbox(detail_win)
+            hist_box.pack(fill="both", expand=True, padx=20, pady=(0, 20))
+            
+            history = log_data.get('upload_history', [])
+            if not history:
+                hist_box.insert("1.0", "Không có lịch sử upload hoặc chưa từng đẩy lên máy chủ.")
+            else:
+                import json
+                text_content = ""
+                for idx, h in enumerate(reversed(history)):  # Xem log mới nhất trước
+                    text_content += f"--- LẦN THỬ THỨ {len(history)-idx} ---\n"
+                    text_content += f"Thời gian: {h.get('timestamp')}\n"
+                    text_content += f"Hệ thống (UUID): {h.get('system_id')}\n"
+                    text_content += f"Trạng thái: {h.get('status')}\n"
+                    text_content += f"Lời nhắn: {h.get('message')}\n"
+                    if 'error_detail' in h:
+                        try:
+                            # Thử parse chuỗi JSON string nếu có
+                            err_data = h['error_detail']
+                            if isinstance(err_data, str):
+                                try: err_data = json.loads(err_data)
+                                except: pass
+                            err_str = json.dumps(err_data, indent=2, ensure_ascii=False)
+                            text_content += f"Chi tiết kỹ thuật (Raw):\n{err_str}\n"
+                        except:
+                            text_content += f"Chi tiết kỹ thuật (Raw): {h['error_detail']}\n"
+                    text_content += "\n"
+                hist_box.insert("1.0", text_content)
+                
+            hist_box.configure(state="disabled")
+
         def on_ui_close():
             try: cv2.destroyAllWindows()
             except: pass
@@ -1233,6 +1280,7 @@ class AttendanceUI:
         btn_frame.pack(pady=20)
         
         ctk.CTkButton(btn_frame, text="XEM ẢNH", command=on_view_image, width=150, fg_color="#f39c12", hover_color="#d35400").pack(side="left", padx=10)
+        ctk.CTkButton(btn_frame, text="XEM LỖI (LOG)", command=on_view_log, width=150, fg_color="#e74c3c", hover_color="#c0392b").pack(side="left", padx=10)
         if session_role and str(session_role).lower() in ['admin', 'company']:
             ctk.CTkButton(btn_frame, text="TẢI LÊN HKB", command=on_batch_upload, width=180, fg_color="#28a745", hover_color="#218838").pack(side="left", padx=10)
         ctk.CTkButton(btn_frame, text="ĐÓNG", command=on_ui_close, width=120, fg_color="gray").pack(side="left", padx=10)
@@ -1729,6 +1777,110 @@ class AttendanceUI:
         anti_spoof_var.set("True" if is_anti_spoof_enabled else "False")
         chk_anti_spoof = ctk.CTkCheckBox(cam_group, text="Bật chống giả mạo (Anti-Spoofing)", variable=anti_spoof_var, onvalue="True", offvalue="False", font=("Arial", 12))
         chk_anti_spoof.grid(row=4, column=2, columnspan=2, padx=(10, 0), pady=5, sticky="w")
+        
+        # ROI config
+        ctk.CTkLabel(cam_group, text="Vùng quét thẻ (ROI):").grid(row=5, column=0, sticky="w", pady=5)
+        e_roi = ctk.CTkEntry(cam_group, width=180, placeholder_text="Mặc định (Toàn màn hình)")
+        e_roi.grid(row=5, column=1, padx=5, sticky="w")
+        e_roi.insert(0, mongo_db.get_setting("camera_roi", "", username=config_scope))
+        
+        def pick_roi():
+            import cv2
+            from src.camera.rtsp_camera import RTSPCamera
+            
+            # Use current text box values to connect
+            ip = e_ip.get().strip()
+            port = e_port.get().strip()
+            user = e_user.get().strip()
+            pwd = e_pass.get().strip()
+            test_url = f"rtsp://{user}:{pwd}@{ip}:{port}/ch1/main"
+            if ip.isdigit(): test_url = ip
+            
+            try:
+                cam = RTSPCamera(rtsp_url=str(test_url))
+                if not cam.connect():
+                    messagebox.showerror("Lỗi", "Không thể kết nối Camera để vẽ ROI!")
+                    return
+                print("Dang doc hinh anh de ve ROI live...")
+                
+                # Biến lưu trạng thái vẽ
+                drawing = False
+                roi_rect = [0, 0, 0, 0] # x, y, w, h
+                drag_start_pt = None
+                win_name_roi = "Ve ROI (Keo chuot trai de ve, ENTER/SPACE lap xong, C tao lai, ESC huy)"
+                
+                def draw_roi_event(event, x, y, flags, param):
+                    nonlocal drawing, roi_rect, drag_start_pt
+                    if event == cv2.EVENT_LBUTTONDOWN:
+                        drawing = True
+                        drag_start_pt = (x, y)
+                        roi_rect = [x, y, 0, 0]
+                    elif event == cv2.EVENT_MOUSEMOVE:
+                        if drawing:
+                            roi_rect[2] = x - drag_start_pt[0]
+                            roi_rect[3] = y - drag_start_pt[1]
+                    elif event == cv2.EVENT_LBUTTONUP:
+                        drawing = False
+                        roi_rect[2] = x - drag_start_pt[0]
+                        roi_rect[3] = y - drag_start_pt[1]
+                        
+                        # Normalize negative width/height
+                        if roi_rect[2] < 0:
+                            roi_rect[0] += roi_rect[2]
+                            roi_rect[2] = abs(roi_rect[2])
+                        if roi_rect[3] < 0:
+                            roi_rect[1] += roi_rect[3]
+                            roi_rect[3] = abs(roi_rect[3])
+                
+                cv2.namedWindow(win_name_roi, cv2.WINDOW_NORMAL)
+                cv2.setWindowProperty(win_name_roi, cv2.WND_PROP_TOPMOST, 1)
+                cv2.setMouseCallback(win_name_roi, draw_roi_event)
+                
+                selected = False
+                while True:
+                    success, frame = cam.read_frame()
+                    if not success or frame is None:
+                        continue
+                    
+                    display = frame.copy()
+                    
+                    # Draw current rect
+                    x, y, w, h = roi_rect
+                    if w > 0 and h > 0:
+                        cv2.rectangle(display, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                    
+                    cv2.putText(display, "[Keo chuot de ban] [ENTER/SPACE] Xong  [C] Xoa Ve Lai  [ESC] Huy", (10, 30), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                                
+                    cv2.imshow(win_name_roi, display)
+                    key = cv2.waitKey(1) & 0xFF
+                    
+                    if key in [13, 32]: # ENTER or SPACE
+                        if w > 0 and h > 0:
+                            selected = True
+                        break
+                    elif key == 27: # ESC
+                        break
+                    elif key == ord('c'):
+                        roi_rect = [0, 0, 0, 0]
+                
+                cam.disconnect()
+                cv2.destroyWindow(win_name_roi)
+                
+                if selected:
+                    x, y, w, h = roi_rect
+                    x2, y2 = x + w, y + h
+                    roi_string = f"{x},{y},{x2},{y2}"
+                    e_roi.delete(0, 'end')
+                    e_roi.insert(0, roi_string)
+                    messagebox.showinfo("ROI", f"Đã nhận vùng quét: ({x},{y}) đến ({x2},{y2})")
+                else:
+                    messagebox.showinfo("ROI", "Đã hủy thao tác vẽ khu vực.")
+            except Exception as e:
+                messagebox.showerror("Lỗi OpenCV", f"Không thể vẽ ROI: {e}")
+                
+        roi_btn = ctk.CTkButton(cam_group, text="Vẽ khung Camera", command=pick_roi, width=120, fg_color="#2196F3")
+        roi_btn.grid(row=5, column=2, columnspan=2, padx=(10, 0), pady=5, sticky="w")
 
         # --- B. GROUP KEYS ---
         keys_group = ctk.CTkFrame(main_frame, fg_color="transparent")
@@ -1748,6 +1900,7 @@ class AttendanceUI:
             user = e_user.get().strip()
             pwd = e_pass.get().strip()
             cooldown_min = e_cooldown.get().strip()
+            roi_val = e_roi.get().strip()
             
             success = True
             success &= mongo_db.set_setting("group_keys", new_keys, username=config_scope)
@@ -1772,6 +1925,9 @@ class AttendanceUI:
             success &= mongo_db.set_setting("anti_spoofing_enabled", str(is_anti_spoof), username=config_scope)
             RecognitionConfig.ANTI_SPOOFING_ENABLED = is_anti_spoof
             
+            # Save ROI
+            success &= mongo_db.set_setting("camera_roi", roi_val, username=config_scope)
+            
             if success:
                 # Force apply camera configs immediately
                 from src.config import CameraConfig
@@ -1780,6 +1936,14 @@ class AttendanceUI:
                 CameraConfig.USER = user
                 CameraConfig.PASS = pwd
                 CameraConfig.RTSP_URL = f"rtsp://{user}:{pwd}@{ip}:{port}/ch1/main"
+                
+                try:
+                    if roi_val and len(roi_val.split(',')) == 4:
+                        CameraConfig.ROI = tuple(map(int, roi_val.split(',')))
+                    else:
+                        CameraConfig.ROI = None
+                except:
+                    CameraConfig.ROI = None
 
                 # Attempt to restart background service if needed, but for now we apply the config
                 messagebox.showinfo("Thành công", "Đã lưu cài đặt hệ thống và cập nhật cấu hình trực tiếp (Live).\nNếu dùng dịch vụ ngầm (Service), Camera sẽ tự nhận luồng mới ở lần kết nối lại tiếp theo.")
