@@ -182,90 +182,78 @@ def main():
                     ui.current_state = STATE_MENU
                     continue
 
-                # --- LIVE PREVIEW FROM BACKGROUND SERVICE (MJPEG STREAM) ---
-                from src.config import DATA_DIR
-                preview_path = DATA_DIR / "camera_preview.jpg"
-                
-                # Prepare Display Frame
-                display_frame = np.zeros((cur_h, cur_w, 3), dtype=np.uint8)
-                preview_img = None
+                # --- LIVE PREVIEW FROM SHARED MEMORY ---
+                # Khởi tạo một lần cho STATE_DETECT session
+                if not hasattr(main, '_shm_seq'):
+                    main._shm_seq     = -1      # sequence tracker
+                    main._shm_obj     = None    # SHM handle
+                    main._last_frame  = None    # cache frame hợp lệ cuối
 
-                # --- LIVE PREVIEW FROM SHARED MEMORY (ULTRA STABLE) ---
-                from src.config import DATA_DIR
-                preview_path = DATA_DIR / "camera_preview.jpg"
-                
-                # Prepare Display Frame
-                display_frame = np.zeros((cur_h, cur_w, 3), dtype=np.uint8)
-                preview_img = None
-
-                if service_active:
+                # Kết nối SHM nếu chưa có
+                if main._shm_obj is None and service_active:
                     try:
                         from multiprocessing import shared_memory
-                        # Connect or Reset SHM
-                        if not hasattr(main, 'shm_obj') or main.shm_obj is None:
-                            try: main.shm_obj = shared_memory.SharedMemory(name="bittech_monitor_shm")
-                            except: main.shm_obj = None
-                        
-                        if main.shm_obj is not None:
-                            seq1 = int(main.shm_obj.buf[0])
-                            # Only read if sequence is EVEN and NOT zero (Service has written at least once)
-                            if seq1 % 2 == 0 and seq1 > 0:
-                                fmt = main.shm_obj.buf[1]
-                                seq2 = int(main.shm_obj.buf[0])
-                                
-                                if seq1 == seq2:
-                                    if fmt == 1: # RAW MODE (Ultra Smooth)
-                                        # Cast to standard int to prevent numpy overflow
-                                        w = int(np.frombuffer(main.shm_obj.buf[2:4], dtype=np.uint16)[0])
-                                        h = int(np.frombuffer(main.shm_obj.buf[4:6], dtype=np.uint16)[0])
-                                        
-                                        # Validate resolution before processing
-                                        if 100 < w < 4000 and 100 < h < 4000:
-                                            size = w * h * 3
-                                            if 0 < size < 4.8 * 1024 * 1024:
-                                                img_data = bytes(main.shm_obj.buf[10:10+size])
-                                                preview_img = np.frombuffer(img_data, dtype=np.uint8).reshape((h, w, 3))
-                                                main.last_valid_frame = preview_img
-                                    else: # JPEG FALLBACK
-                                        size = int(np.frombuffer(main.shm_obj.buf[1:5], dtype=np.uint32)[0])
-                                        if 100 < size < 4.8 * 1024 * 1024:
-                                            img_data = bytes(main.shm_obj.buf[5:5+size])
-                                            nparr = np.frombuffer(img_data, dtype=np.uint8)
-                                            decoded = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                                            if decoded is not None:
-                                                preview_img = decoded
-                                                main.last_valid_frame = preview_img
-                    except Exception as e:
-                        main.shm_obj = None
-                else:
-                    # Cleanup SHM
-                    main.shm_obj = None
+                        main._shm_obj = shared_memory.SharedMemory(name="bittech_monitor_shm")
+                    except Exception:
+                        main._shm_obj = None
 
-                # --- ULTIMATE FLICKER & FREEZE PREVENTION ---
-                if preview_img is None and hasattr(main, 'last_valid_frame'):
-                    preview_img = main.last_valid_frame
-                
+                preview_img = None
+                new_frame   = False
+
+                if main._shm_obj is not None:
+                    try:
+                        seq1 = int(main._shm_obj.buf[0])
+                        # Chỉ xử lý khi sequence EVEN (service đã viết xong) VÀ là frame MỚI
+                        if seq1 % 2 == 0 and seq1 > 0 and seq1 != main._shm_seq:
+                            seq2 = int(main._shm_obj.buf[0])        # double-check không race
+                            if seq1 == seq2:
+                                fmt = main._shm_obj.buf[1]
+                                if fmt == 1:  # RAW pixels
+                                    w = int(np.frombuffer(bytes(main._shm_obj.buf[2:4]), dtype=np.uint16)[0])
+                                    h = int(np.frombuffer(bytes(main._shm_obj.buf[4:6]), dtype=np.uint16)[0])
+                                    if 100 < w < 4000 and 100 < h < 4000:
+                                        size = w * h * 3
+                                        if 0 < size < 4_800_000:
+                                            # Zero-copy view → reshape (không cần bytes() copy)
+                                            raw = np.frombuffer(
+                                                bytes(main._shm_obj.buf[10:10+size]),
+                                                dtype=np.uint8
+                                            ).reshape((h, w, 3))
+                                            preview_img = raw.copy()    # copy nhỏ để tránh SHM race
+                                            main._shm_seq    = seq1     # đánh dấu đã đọc
+                                            main._last_frame = preview_img
+                                            new_frame = True
+                    except Exception:
+                        main._shm_obj = None
+
+                # Không có frame mới → giữ frame cũ, sleep ngắn để nhường CPU cho service
+                if not new_frame:
+                    if main._last_frame is not None:
+                        preview_img = main._last_frame
+                    cv2.waitKey(16)     # ~60fps ceiling + nhường CPU cho service_main
+                else:
+                    cv2.waitKey(1)
+
+                # Dựng khung hiển thị
+                display_frame = np.zeros((cur_h, cur_w, 3), dtype=np.uint8)
+
                 if preview_img is not None:
                     p_h, p_w = preview_img.shape[:2]
-                    # True Full screen scaling (fit to window)
-                    scale_w = cur_w / p_w
-                    scale_h = cur_h / p_h 
-                    scale = min(scale_w, scale_h)
-                    
+                    scale = min(cur_w / p_w, cur_h / p_h)
                     target_w = int(p_w * scale)
                     target_h = int(p_h * scale)
-                    preview_img = cv2.resize(preview_img, (target_w, target_h))
-                    
-                    y_off = (cur_h - target_h) // 2
-                    x_off = (cur_w - target_w) // 2
-                    display_frame[y_off:y_off+target_h, x_off:x_off+target_w] = preview_img
+                    resized   = cv2.resize(preview_img, (target_w, target_h))
+                    y_off     = (cur_h - target_h) // 2
+                    x_off     = (cur_w - target_w) // 2
+                    display_frame[y_off:y_off+target_h, x_off:x_off+target_w] = resized
                 else:
-                    cv2.putText(display_frame, "DANG KET NOI MONITOR...", (cur_w//2 - 150, cur_h//2), 
+                    cv2.putText(display_frame, "DANG KET NOI MONITOR...",
+                                (cur_w//2 - 150, cur_h//2),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
 
-                # Subtle hint at the bottom
-                cv2.putText(display_frame, "[M] Thoat", (10, cur_h - 10), 
+                cv2.putText(display_frame, "[M] Thoat", (10, cur_h - 10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.4, (80, 80, 80), 1)
+
 
 
             elif ui.current_state == STATE_ENROLL_CAM:

@@ -515,9 +515,21 @@ def main():
         last_w, last_h = 0, 0
         
         while True:
-            # Get actual window size for responsive drawing
-            _, _, cur_w, cur_h = cv2.getWindowImageRect(win_name)
-            if cur_w <= 0 or cur_h <= 0:
+            # Get actual window size for responsive drawing (with safety checks)
+            try:
+                # Check if window exists first
+                if cv2.getWindowProperty(win_name, cv2.WND_PROP_VISIBLE) < 1:
+                    # If window was closed by user, default to menu or reset
+                    if ui.current_state not in [STATE_MENU]:
+                        ui.current_state = STATE_MENU
+                        continue
+                    cur_w, cur_h = 1280, 720
+                else:
+                    _, _, cur_w, cur_h = cv2.getWindowImageRect(win_name)
+                    if cur_w <= 0 or cur_h <= 0:
+                        cur_w, cur_h = 1280, 720
+            except:
+                # Fallback if window is being destroyed or not yet created
                 cur_w, cur_h = 1280, 720
             
             # Periodically check service heartbeat (every 2 seconds)

@@ -5,10 +5,11 @@ from typing import List, Dict, Any
 import cv2
 import requests
 import threading
-from src.config import RecognitionConfig, CAPTURES_DIR, ApiConfig, CameraConfig, WebhookConfig
+from src.config import RecognitionConfig, CAPTURES_DIR, MODELS_DIR, ApiConfig, CameraConfig, WebhookConfig
 from src.attendance.mongodb_mgr import mongo_db
 from src.utils.string_utils import remove_accents
 from src.utils.time_manager import time_mgr
+from src.recognition.async_spoof import AsyncSpoofChecker
 
 class FaceTracker:
     """
@@ -36,6 +37,16 @@ class FaceTracker:
         # Unknown face webhook counter (max 10, reset on successful checkin)
         self.unknown_webhook_count = 0
         self.unknown_webhook_limit = 10
+
+        # ─── Async Anti-Spoofing ────────────────────────────────────────────
+        # Chạy MiniFASNet song song với GATHERING — không block recognition
+        self.spoof_checker = AsyncSpoofChecker(
+            model_dir=str(MODELS_DIR / "anti_spoof")
+        ) if RecognitionConfig.ANTI_SPOOFING_ENABLED else None
+        if self.spoof_checker:
+            logger.info("[Tracker] Async Anti-Spoofing ENABLED (parallel mode)")
+        else:
+            logger.info("[Tracker] Anti-Spoofing DISABLED")
 
     def _send_user_webhook(self, user_id, user_name, status, is_unknown=False):
         """
@@ -366,20 +377,18 @@ class FaceTracker:
                 # Trạng thái khởi đầu: GATHERING — thu thập embedding từ nhiều frame
                 # trước khi kết luận để tránh sai do mặt nhìn từ xa/mờ
                 updated_faces_map[matched_id] = {
-                    'start_time': current_time,
-                    'last_seen': current_time,
-                    'center': center,
-                    'status': 'GATHERING',
-                    'user_data': None,
+                    'start_time':         current_time,
+                    'last_seen':          current_time,
+                    'center':             center,
+                    'status':             'GATHERING',
+                    'user_data':          None,
                     'cooldown_remaining': 0,
-                    'unknown_attempts': 0,
-                    'spoof_attempts': 0,
-                    'last_attempt_time': 0,
-                    'liveness_verified': False,
-                    'force_immediate_attempt': False,
-                    # === GATHERING STATE ===
-                    'gathering_votes': [],   # List các kết quả từng frame
-                    'gather_count': 0,       # Số frame đã phân tích
+                    'unknown_attempts':   0,
+                    'last_attempt_time':  0,
+                    # === EMBEDDING ACCUMULATOR ===
+                    # Lưu raw embedding mỗi frame, cuối gọi Qdrant 1 lần duy nhất
+                    'gathering_embeddings': [],  # List[np.ndarray] 512D
+                    'gather_count':         0,
                 }
             else:
                 f_data = self.active_faces[matched_id]
@@ -410,138 +419,107 @@ class FaceTracker:
                 # Thời gian kể từ lần thử cuối (dùng cho RETRY_WAIT cooldown)
                 wait_time = current_time - f_data.get('last_attempt_time', 0)
 
+                # Chỉ bỏ qua khi đã có kết luận cuối (RECOGNIZED/COOLDOWN)
                 can_attempt = False
-                if not is_real or f_data['status'] in ['RECOGNIZED', 'COOLDOWN', 'SPOOF_DETECTED']:
+                if f_data['status'] in ['RECOGNIZED', 'COOLDOWN']:
                     can_attempt = False
-                else:
-                    if f_data['status'] == 'GATHERING':
-                        # Trong phase thu thập: luôn attempt mà không cần chờ
-                        can_attempt = True
-                    elif f_data.get('force_immediate_attempt', False):
-                        can_attempt = True
-                        f_data['force_immediate_attempt'] = False
-                    elif f_data['status'] == 'STABILIZING':
-                        can_attempt = True
+                elif f_data['status'] == 'GATHERING':
+                    can_attempt = True
+                elif f_data['status'] == 'STABILIZING':
+                    can_attempt = True
+                    f_data['status'] = 'GATHERING'
+                    f_data.setdefault('gathering_votes', [])
+                    f_data.setdefault('gather_count', 0)
+                elif f_data['status'] in ['RETRY_WAIT', 'UNAUTHORIZED', 'SPOOF_DETECTED']:
+                    # Reset sau 3s nếu là unknown/unauth, hoặc 5s nếu là spoof để khắt khe hơn
+                    retry_delay = 5.0 if f_data['status'] == 'SPOOF_DETECTED' else 3.0
+                    if wait_time >= retry_delay:
                         f_data['status'] = 'GATHERING'
-                        f_data.setdefault('gathering_votes', [])
-                        f_data.setdefault('gather_count', 0)
-                    elif f_data['status'] in ['RETRY_WAIT', 'UNAUTHORIZED']:
-                        # Sau khi kết luận unknown: chờ 3 giây mới thử lại với 5 frame mới
-                        if wait_time >= 3.0:
-                            # Reset gathering để thử lại
-                            f_data['status'] = 'GATHERING'
-                            f_data['gathering_votes'] = []
-                            f_data['gather_count'] = 0
-                            can_attempt = True
+                        f_data['gathering_embeddings'] = []  # reset accumulator
+                        f_data['gather_count'] = 0
+                        can_attempt = True
 
                 if can_attempt:
                     if face_rec is None or attendance_mgr is None:
                         f_data['status'] = 'MONITORING'
                         continue
-                    
-                    bbox = face.bbox.astype(int)
-                    x1, y1, x2, y2 = bbox[0], bbox[1], bbox[2], bbox[3]
-                    
-                    # 1. ANTI-SPOOFING — chỉ chạy khi bật VÀ model đã load
-                    if RecognitionConfig.ANTI_SPOOFING_ENABLED and face_rec.anti_spoof is not None:
-                        logger.debug(f"[Anti-Spoof] Checking ID: {matched_id}")
-                        as_label, as_score = face_rec.anti_spoof.predict(frame, face)
-                        face.is_real = (as_label == 1)
-                        face.as_label = int(as_label)
-                        face.as_score = float(as_score)
+
+                    # ———————————————————————————
+                    # BEST-OF-N GATHERING: Thu thập GATHER_FRAMES embedding
+                    # rồi mới kết luận — tránh sai khi mặt nhìn từ xa/mờ
+                    # ———————————————————————————
+                    GATHER_FRAMES = getattr(RecognitionConfig, 'GATHER_FRAMES', 5)
+
+                    # Bước 1: Extract ArcFace embedding (không gọi Qdrant ở đây)
+                    logger.debug(f"[Gathering] ID={matched_id} frame {f_data.get('gather_count',0)+1}/{GATHER_FRAMES}")
+                    face_rec.rec_model.get(frame, face)
+                    emb = face.normed_embedding.copy()  # unit-norm 512D vector
+                    # (Spoof check sẽ chạy ĐỒNG BỘ tại bước kết luận — không async submit nữa)
+
+                    # Bước 2: Lưu embedding vào accumulator
+                    f_data.setdefault('gathering_embeddings', [])
+                    f_data['gathering_embeddings'].append(emb)
+                    f_data['gather_count'] = len(f_data['gathering_embeddings'])
+
+                    # Bước 3: Chưa đủ frame → tiếp tục GATHERING (không tốn Qdrant)
+                    if f_data['gather_count'] < GATHER_FRAMES:
+                        f_data['status'] = 'GATHERING'
+                        face.name = f"Dang phan tich... ({f_data['gather_count']}/{GATHER_FRAMES})"
+                        face.score = 0.0
                     else:
-                        # Anti-spoofing TẮT → bỏ qua hoàn toàn, coi là người thật
-                        face.is_real = True
-                        face.as_label = 1
-                        face.as_score = 1.0
-                        logger.debug(f"[Anti-Spoof] DISABLED — ID {matched_id} treated as REAL")
-                        
-                    if not face.is_real:
-                        # Chỉ vào nhánh SPOOF khi anti-spoofing đang bật
-                        if is_frame_static:
-                            f_data['spoof_attempts'] = 5
-                            logger.warning(f"[Anti-Spoof] Static image detected for ID {matched_id}.")
-                        else:
-                            f_data['spoof_attempts'] = f_data.get('spoof_attempts', 0) + 1
-                            logger.warning(f"[Anti-Spoof] Failed (Attempt {f_data['spoof_attempts']}/3) ID {matched_id}. Score: {face.as_score:.2f}")
+                        # Bước 4: Đủ GATHER_FRAMES → Average embeddings → 1 Qdrant query
+                        embs = np.array(f_data['gathering_embeddings'])   # shape (N, 512)
+                        avg_emb = embs.mean(axis=0)                       # average
+                        norm = np.linalg.norm(avg_emb)
+                        if norm > 0:
+                            avg_emb = avg_emb / norm                      # L2 normalize
 
-                        if f_data['spoof_attempts'] >= 3:
-                            f_data['liveness_verified'] = True
-                            f_data['status'] = 'SPOOF_DETECTED'
-                            if f_data.get('last_spoof_log', 0) < current_time - 30:
-                                self._save_log_with_bbox(frame, face, "Spoof", "Ke gia mao",
-                                                        score=face.as_score, is_known=False,
-                                                        status="SPOOF", company_id=active_company)
-                                self._send_user_webhook("Spoof", "Ke gia mao", "SPOOF", is_unknown=True)
-                                f_data['last_spoof_log'] = current_time
-                        else:
-                            f_data['status'] = 'LIVENESS_WAITING'
-                            f_data['last_attempt_time'] = current_time
-                    else:
-                        # Người thật → tiến hành GATHERING (thu thập embedding)
-                        f_data['liveness_verified'] = True
-                        f_data['spoof_attempts'] = 0
+                        logger.debug(
+                            f"[Gathering] ID={matched_id}: {GATHER_FRAMES} embeddings averaged "
+                            f"→ 1 Qdrant query (noise reduced)"
+                        )
+                        vote = attendance_mgr.recognize(avg_emb)  # 1 network call thay vì 3
 
-                        # ———————————————————————————
-                        # BEST-OF-N GATHERING: Thu thập đến đủ GATHER_FRAMES
-                        # mới kết luận để tránh sai khi mặt còn xa/mờ
-                        # ———————————————————————————
-                        GATHER_FRAMES = getattr(RecognitionConfig, 'GATHER_FRAMES', 5)
+                        # Reset accumulator cho lần tiếp theo
+                        f_data['gathering_embeddings'] = []
+                        f_data['gather_count'] = 0
 
-                        # Bước 1: Trích xuất embedding và nhận diện frame hiện tại
-                        logger.debug(f"[Gathering] ID={matched_id} frame {f_data.get('gather_count',0)+1}/{GATHER_FRAMES}")
-                        face_rec.rec_model.get(frame, face)  # ArcFace embedding
-                        vote = attendance_mgr.recognize(face.normed_embedding)
-                        vote['as_score'] = face.as_score
+                        # Bước 5: Kết luận từ 1 vote của averaged embedding
+                        is_known = vote.get('name', 'Unknown') != 'Unknown'
 
-                        # Bước 2: Lưu kết quả vào danh sách phiếu
-                        f_data.setdefault('gathering_votes', [])
-                        f_data['gathering_votes'].append(vote)
-                        f_data['gather_count'] = len(f_data['gathering_votes'])
+                        if is_known:
+                            # ── Anti-Spoof check ĐỒNG BỘ — chạy ngay, có kết quả chắc chắn ──
+                            # check_sync() dùng frame + face hiện tại, timeout 150ms
+                            if self.spoof_checker and frame is not None:
+                                spoof_real, spoof_score = self.spoof_checker.check_sync(
+                                    frame, face, timeout=0.15
+                                )
+                                if not spoof_real:
+                                    logger.warning(f"[Spoof] ❌ GIẢ MẠO phát hiện — ID={matched_id} score={spoof_score:.2f}")
+                                    f_data['status'] = 'SPOOF_DETECTED'
+                                    f_data['last_attempt_time'] = current_time # Gán để cooldown retry
+                                    self._send_user_webhook("Spoof", "Ke gia mao", "SPOOF", is_unknown=True)
+                                    updated_faces_map[matched_id] = f_data
+                                    continue  # Không log chấm công
+                            # ── RECOGNIZED ──────────────────────────────────────
+                            user_data = vote
+                            user_id   = user_data.get('user_id', 'Unknown')
+                            user_name = user_data.get('name', 'Unknown')
+                            logger.info(f"[Gathering] ✅ {user_name} (avg score={vote.get('score',0):.3f}, {GATHER_FRAMES} frames)")
 
-                        # Bước 3: Chưa đủ frame → tiếp tục GATHERING
-                        if f_data['gather_count'] < GATHER_FRAMES:
-                            f_data['status'] = 'GATHERING'
-                            # Hiển thị progress để user biết hệ thống đang phân tích
-                            face.name = f"Dang thu... ({f_data['gather_count']}/{GATHER_FRAMES})"
-                            face.score = 0.0
-                        else:
-                            # Bước 4: Đủ GATHER_FRAMES → Kết luận
-                            all_votes = f_data['gathering_votes']
-                            known_votes = [v for v in all_votes if v.get('name', 'Unknown') != 'Unknown']
-
-                            if known_votes:
-                                # BEST-OF-N: lấy kết quả có similarity score cao nhất
-                                best_vote = max(known_votes, key=lambda v: v.get('score', 0.0))
-                                user_data = best_vote
-                                user_id   = user_data.get('user_id', 'Unknown')
-                                user_name = user_data.get('name', 'Unknown')
-                                logger.info(f"[Gathering] ✅ Kết luận: {user_name} (best score={best_vote.get('score',0):.3f}, được xác nhận {len(known_votes)}/{GATHER_FRAMES} frame)")
-
-                                # Reset gathering cho lần tiếp theo
-                                f_data['gathering_votes'] = []
-                                f_data['gather_count'] = 0
-
-                                if only_recognize:
-                                    f_data['status'] = 'RECOGNIZED'
-                                    f_data['user_name'] = user_name
-                                    f_data['user_id']   = user_id
-                                    f_data['user_data'] = user_data
-                                else:
-                                    target_cid = user_data.get('company_id') or active_company
-                                    if not RecognitionConfig.TEST_MODE and user_id in self.user_cooldowns:
-                                        elapsed = current_time - self.user_cooldowns[user_id]
-                                        if elapsed < RecognitionConfig.COOLDOWN_SECONDS and RecognitionConfig.COOLDOWN_SECONDS > 0:
-                                            f_data['status'] = 'COOLDOWN'
-                                            f_data['user_data'] = user_data
-                                            f_data['cooldown_remaining'] = int(RecognitionConfig.COOLDOWN_SECONDS - elapsed)
-                                        else:
-                                            f_data['status'] = 'RECOGNIZED'
-                                            f_data['user_data'] = user_data
-                                            self.user_cooldowns[user_id] = current_time
-                                            url, status = self._save_log_with_bbox(frame, face, user_id, user_name, user_data.get('score', 0.0),
-                                                                                   company_id=target_cid, birthday=user_data.get('birthday', 'N/A'), vector_count=user_data.get('vector_count', 0))
-                                            self._send_user_webhook(user_id, user_name, status, is_unknown=False)
+                            if only_recognize:
+                                f_data['status']    = 'RECOGNIZED'
+                                f_data['user_name'] = user_name
+                                f_data['user_id']   = user_id
+                                f_data['user_data'] = user_data
+                            else:
+                                target_cid = user_data.get('company_id') or active_company
+                                if not RecognitionConfig.TEST_MODE and user_id in self.user_cooldowns:
+                                    elapsed = current_time - self.user_cooldowns[user_id]
+                                    if elapsed < RecognitionConfig.COOLDOWN_SECONDS and RecognitionConfig.COOLDOWN_SECONDS > 0:
+                                        f_data['status'] = 'COOLDOWN'
+                                        f_data['user_data'] = user_data
+                                        f_data['cooldown_remaining'] = int(RecognitionConfig.COOLDOWN_SECONDS - elapsed)
                                     else:
                                         f_data['status'] = 'RECOGNIZED'
                                         f_data['user_data'] = user_data
@@ -549,43 +527,42 @@ class FaceTracker:
                                         url, status = self._save_log_with_bbox(frame, face, user_id, user_name, user_data.get('score', 0.0),
                                                                                company_id=target_cid, birthday=user_data.get('birthday', 'N/A'), vector_count=user_data.get('vector_count', 0))
                                         self._send_user_webhook(user_id, user_name, status, is_unknown=False)
-
-                                    # Auto-enrichment
-                                    vector_count = user_data.get('vector_count', 0)
-                                    if vector_count < 10:
-                                        attendance_mgr.upsert_user(user_name=user_name, user_id=user_id,
-                                                                   birthday=user_data.get('birthday', 'N/A'),
-                                                                   embeddings=[face.normed_embedding], company_id=target_cid)
-                                    f_data['unknown_attempts'] = 0
-
-                            else:
-                                # Tất cả GATHER_FRAMES frame đều trả về Unknown
-                                f_data['unknown_attempts'] += 1
-                                f_data['last_attempt_time'] = current_time
-                                f_data['user_data'] = all_votes[-1]  # Dùng vote cuối để hiển thị
-
-                                # Reset gathering cho lần thử lại tiếp theo
-                                f_data['gathering_votes'] = []
-                                f_data['gather_count'] = 0
-
-                                logger.warning(f"[Gathering] ❌ Tất cả {GATHER_FRAMES} frame đều Unknown (lần {f_data['unknown_attempts']}).")
-
-                                if f_data['unknown_attempts'] >= 5:
-                                    # Sau 5 lần gathering đều thất bại → kết luận trây trua
-                                    f_data['status'] = 'UNAUTHORIZED'
-                                    self._send_user_webhook("Unknown", f"Nguoi la", "unknown", is_unknown=True)
-                                    self._save_log_with_bbox(frame, face, "Unknown", "Nguoi la", score=0.0,
-                                                             is_known=False, status="FAILED", company_id=active_company,
-                                                             unknown_attempt=f_data['unknown_attempts'])
                                 else:
-                                    # Chưa phải UNAUTHORIZED → chờ 3s rồi thử lại 5 frame mới
-                                    f_data['status'] = 'RETRY_WAIT'
+                                    f_data['status'] = 'RECOGNIZED'
+                                    f_data['user_data'] = user_data
+                                    self.user_cooldowns[user_id] = current_time
+                                    url, status = self._save_log_with_bbox(frame, face, user_id, user_name, user_data.get('score', 0.0),
+                                                                           company_id=target_cid, birthday=user_data.get('birthday', 'N/A'), vector_count=user_data.get('vector_count', 0))
+                                    self._send_user_webhook(user_id, user_name, status, is_unknown=False)
+
+                                # Auto-enrich nếu chưa đủ mẫu
+                                if user_data.get('vector_count', 0) < 10:
+                                    attendance_mgr.upsert_user(user_name=user_name, user_id=user_id,
+                                                               birthday=user_data.get('birthday', 'N/A'),
+                                                               embeddings=[face.normed_embedding], company_id=target_cid)
+                                f_data['unknown_attempts'] = 0
+
+                        else:
+                            # Unknown → "Xin vui lòng thử lại"
+                            f_data['unknown_attempts'] += 1
+                            f_data['last_attempt_time'] = current_time
+                            f_data['user_data'] = vote
+                            logger.warning(f"[Gathering] ❌ Unknown avg embedding (lần {f_data['unknown_attempts']}/5).")
+                            self._send_user_webhook("Unknown", "Nguoi la", "unknown", is_unknown=True)
+                            if f_data['unknown_attempts'] >= 5:
+                                f_data['status'] = 'UNAUTHORIZED'
+                            else:
+                                f_data['status'] = 'RETRY_WAIT'
+
                 
                 updated_faces_map[matched_id] = f_data
 
-            # Update visualization attributes
             if matched_id in updated_faces_map:
                 data = updated_faces_map[matched_id]
+                # Flag cho draw_faces() biết màu nào cần tô
+                face.recognized = data['status'] in ['RECOGNIZED', 'COOLDOWN']
+                face.is_spoof   = data['status'] == 'SPOOF_DETECTED'
+
                 if data['user_data']:
                     u_d = data['user_data']
                     face.user_id = u_d.get('user_id') or 'Unknown'
@@ -615,27 +592,36 @@ class FaceTracker:
                     elif data['status'] == 'UNAUTHORIZED':
                         face.name = "!!! TRUY CAP LA !!!"
                     elif data['status'] == 'SPOOF_DETECTED':
-                        face.name = "!!! CANH BAO GIA MAO!!!"
+                        face.name = "!!! GIA MAO !!!"
                     else:
                         face.name = remove_accents(u_d.get('name', 'Chua ro'))
                 else:
-                    if data['status'] == 'SPOOF_DETECTED':
-                        face.name = "MAT GIA / SPOOF"
-                    elif data['status'] == 'LIVENESS_WAITING':
-                        face.name = "VUI LONG NHAY MAT..."
-                    elif data['status'] == 'GATHERING':
-                        # Hiển thị tiến trình thu thập embedding
+                    if data['status'] == 'GATHERING':
                         count = data.get('gather_count', 0)
                         total = getattr(RecognitionConfig, 'GATHER_FRAMES', 5)
                         face.name = f"Dang phan tich... ({count}/{total})"
                     elif data['status'] == 'RETRY_WAIT':
                         wait_left = int(3 - (current_time - data['last_attempt_time']))
                         attempts = data.get('unknown_attempts', 0)
-                        max_attempts = 5
-                        face.name = f"Chua nhan ra (Lần {attempts}/{max_attempts}, thu lại sau {max(0, wait_left)}s)"
+                        face.name = f"Chua nhan ra (lan {attempts}/5, thu lai sau {max(0, wait_left)}s)"
+                    elif data['status'] == 'UNAUTHORIZED':
+                        face.name = "Nguoi la"
                     else:
                         face.name = "Dang phan tich..."
                     face.score = 0.0
 
-        self.active_faces = {k: v for k, v in updated_faces_map.items() if current_time - v['last_seen'] < 1.0}
+        # ─── SYNC & CLEANUP ─────────────────────────────────────────────────
+        # 1. Cập nhật self.active_faces với các thay đổi trong frame này
+        for fid, fdata in updated_faces_map.items():
+            self.active_faces[fid] = fdata
+
+        # 2. Xóa các face ID không xuất hiện trong vòng 1 giây (để giữ ổn định khi mất frame)
+        self.active_faces = {
+            k: v for k, v in self.active_faces.items() 
+            if current_time - v['last_seen'] < 1.0
+        }
+        
+        # 3. Cleanup spoof sync records cho các face đã biến mất hoàn toàn
+        if self.spoof_checker:
+            self.spoof_checker.cleanup_stale(set(self.active_faces.keys()))
 

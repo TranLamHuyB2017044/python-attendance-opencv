@@ -169,9 +169,13 @@ def main():
                 ai_frame = ai_queue.get()
                 if ai_frame is None: break
                 
-                # Heavy AI Tasks (Detection only in fast mode)
-                detected = face_rec.detect_and_extract(ai_frame, fast=True)
+                # Heavy AI Tasks (Detection only in fast mode, ROI crop nếu cấu hình)
+                detected = face_rec.detect_and_extract(
+                    ai_frame, fast=True,
+                    roi=CameraConfig.ROI  # None → full frame, tuple → crop trước detect
+                )
                 tracker.update(detected, attendance, face_rec=face_rec, frame=ai_frame)
+
                 
                 # Update shared list
                 faces[:] = detected 
@@ -181,7 +185,72 @@ def main():
                 ai_queue.task_done()
 
     threading.Thread(target=ai_worker_persistent, daemon=True).start()
-    logger.info("System initialized. Processing camera at high speed...")
+
+    # --- PREVIEW WORKER: draw + HUD + resize + SHM trong thread riêng ---
+    # Main thread chỉ push (frame, faces snapshot) → preview thread xử lý async
+    # → Camera read loop không bao giờ bị block bởi annotation/SHM
+    preview_queue = queue.Queue(maxsize=1)
+
+    def preview_worker():
+        import datetime, numpy as np
+        last_ts = time.time()
+        fps_smooth = 0.0
+
+        def _shadow(img, text, pos, scale, color, thick):
+            cv2.putText(img, text, (pos[0]+1, pos[1]+1), cv2.FONT_HERSHEY_SIMPLEX, scale, (0,0,0), thick+1)
+            cv2.putText(img, text, pos,              cv2.FONT_HERSHEY_SIMPLEX, scale, color,   thick)
+
+        while True:
+            try:
+                item = preview_queue.get()
+                if item is None:
+                    break
+                pframe, pfaces, ts = item
+
+                # FPS smooth
+                dt = ts - last_ts if ts > last_ts else 0.001
+                last_ts = ts
+                fps_smooth = 0.8 * fps_smooth + 0.2 * (1.0 / dt)
+
+                # Draw bounding boxes
+                annotated = face_rec.draw_faces(pframe, pfaces) if pfaces else pframe
+
+                # ROI box
+                if CameraConfig.ROI:
+                    x1, y1, x2, y2 = CameraConfig.ROI
+                    cv2.rectangle(annotated, (x1,y1), (x2,y2), (0,220,220), 2)
+                    _shadow(annotated, "VUNG CHAM CONG", (x1+8, y1+26), 0.6, (0,220,220), 2)
+
+                # HUD
+                h_f, w_f = annotated.shape[:2]
+                ping_str  = getattr(camera, 'current_ping', 'N/A')
+                try:
+                    ping_ms = int(ping_str.replace('ms','')) if 'ms' in ping_str else -1
+                except Exception:
+                    ping_ms = -1
+                fps       = fps_smooth
+                fps_color  = (0,230,0) if fps  >= 12 else (0,200,255) if fps  >= 7 else (0,60,255)
+                ping_color = (0,230,0) if ping_ms < 50 else (0,200,255) if ping_ms < 150 else (0,60,255)
+                if ping_ms < 0: ping_color = (160,160,160)
+
+                now_str = datetime.datetime.now().strftime("%H:%M:%S")
+                _shadow(annotated, f"FPS {int(fps)}", (10,26),      0.65, fps_color,    2)
+                _shadow(annotated, f"| {ping_str}",   (95,26),      0.65, ping_color,   2)
+                _shadow(annotated, now_str,           (w_f-95,26),  0.55, (200,200,200),1)
+                if len(pfaces) > 0:
+                    _shadow(annotated, f"Faces: {len(pfaces)}", (10,h_f-12), 0.5, (160,220,160), 1)
+
+                # Thu nhỏ preview → SHM (640×360 = 675KB, SHM 5MB ok)
+                preview_frame = cv2.resize(annotated, (640, 360))
+                write_frame_to_shm(preview_frame)
+
+            except Exception as e:
+                logger.debug(f"[PreviewWorker] {e}")
+            finally:
+                preview_queue.task_done()
+
+    threading.Thread(target=preview_worker, daemon=True, name="preview_worker").start()
+    logger.info("System initialized. Camera service running (preview offloaded to thread)...")
 
     try:
         while True:
@@ -199,91 +268,27 @@ def main():
             if not success or frame is None:
                 continue
 
-            # 3. PRIORITY PREVIEW (Syncing boxes with correct resolution)
-            if current_time - last_preview_time >= preview_interval:
+            # 3. PUSH FRAME TO PREVIEW THREAD (non-blocking, ≤ SHM write cost)
+            # Preview worker sẽ draw + HUD + write SHM — không block camera read
+            if not preview_queue.full():
                 try:
-                    # DRAW FIRST on original resolution to keep boxes correct
-                    import numpy as np
-                    
-                    if faces:
-                        annotated_full = face_rec.draw_faces(frame.copy(), faces)
-                    else:
-                        annotated_full = frame.copy()
-                        
-                    # DRAW ROI BOX IF CONFIGURED (Rectangle for "Active Area")
-                    if CameraConfig.ROI:
-                        x1, y1, x2, y2 = CameraConfig.ROI
-                        cv2.rectangle(annotated_full, (x1, y1), (x2, y2), (255, 255, 0), 3) # Teal
-                        cv2.putText(annotated_full, "VUNG CHAM CONG", (x1 + 10, y1 + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
-                        
-                    # Calculate FPS
-                    fps = 0
-                    if hasattr(camera, 'last_frame_time') and camera.last_frame_time:
-                        fps = 1.0 / (current_time - camera.last_frame_time) if current_time > camera.last_frame_time else 0
-                    camera.last_frame_time = current_time
-                    
-                    # === RICH HUD ===
-                    ping_str = getattr(camera, 'current_ping', 'N/A')
-                    try:
-                        ping_ms = int(ping_str.replace('ms', '')) if 'ms' in ping_str else -1
-                    except:
-                        ping_ms = -1
-
-                    fps_color  = (0, 230, 0) if fps >= 12 else (0, 200, 255) if fps >= 7 else (0, 60, 255)
-                    ping_color = (0, 230, 0) if ping_ms < 50 else (0, 200, 255) if ping_ms < 150 else (0, 60, 255)
-                    if ping_ms < 0: ping_color = (120, 120, 120)
-
-                    # Background panel (semi-transparent)
-                    h_f, w_f = annotated_full.shape[:2]
-                    overlay = annotated_full.copy()
-                    cv2.rectangle(overlay, (0, 0), (w_f, 62), (15, 15, 15), -1)
-                    cv2.addWeighted(overlay, 0.65, annotated_full, 0.35, 0, annotated_full)
-
-                    import datetime
-                    now_str = datetime.datetime.now().strftime("%H:%M:%S")
-                    cv2.putText(annotated_full, f"FPS: {int(fps)}",  (12, 24),  cv2.FONT_HERSHEY_SIMPLEX, 0.7, fps_color,  2)
-                    cv2.putText(annotated_full, f"Ping: {ping_str}", (130, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, ping_color, 2)
-                    cv2.putText(annotated_full, now_str, (w_f - 105, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (200, 200, 200), 1)
-                    face_count = len(faces)
-                    cv2.putText(annotated_full, f"Faces: {face_count}  |  Service: RUNNING",
-                                (12, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (160, 160, 160), 1)
-                    # === END HUD ===
-
-                    # Thu nhỏ preview xuống 640×360 cho phù hợp resolution mới (640×480)
-                    preview_frame = cv2.resize(annotated_full, (640, 360))
-                    
-                    write_frame_to_shm(preview_frame)
-                    last_preview_time = current_time
-                except: pass
+                    preview_queue.put_nowait((frame.copy(), list(faces), current_time))
+                except Exception:
+                    pass
 
             # 4. ASYNC AI TRIGGER — chỉ đẩy frame vào queue mỗi N vòng lặp
             frame_count += 1
             if frame_count % process_every_n_frames == 0:
-                # Xóa frame cũ trong queue nếu chưa được xử lý → luôn đưa frame mới nhất
                 if not ai_queue.empty():
                     try:
                         ai_queue.get_nowait()
-                    except: pass
-
+                    except Exception:
+                        pass
                 try:
-                    ai_frame_obj = frame.copy()
-
-                    # Apply ROI filtering — chỉ detect trong vùng chấm công
-                    if CameraConfig.ROI:
-                        x1, y1, x2, y2 = CameraConfig.ROI
-                        mask = np.zeros_like(ai_frame_obj)
-                        h, w = ai_frame_obj.shape[:2]
-                        x1, y1 = max(0, x1), max(0, y1)
-                        x2, y2 = min(w, x2), min(h, y2)
-                        mask[y1:y2, x1:x2] = 255
-                        ai_frame_obj = cv2.bitwise_and(ai_frame_obj, mask)
-
-                    ai_queue.put_nowait(ai_frame_obj)
-                except: pass
-
-            # Main loop sleep: 30ms = ~33 iterations/giây
-            # Giải phóng CPU core cho AI worker và OS tasks
-            time.sleep(0.030)
+                    ai_queue.put_nowait(frame.copy())
+                except Exception:
+                    pass
+            # NOTE: Không có time.sleep() — RTSP read() tự block chờ frame mới từ camera
 
     except KeyboardInterrupt:
         logger.info("Service stopping...")

@@ -115,50 +115,46 @@ def main():
                 cv2.rectangle(display_frame, (x1, y1), (x2, y2), (255, 255, 0), 3)
                 cv2.putText(display_frame, "VUNG CHAM CONG", (x1 + 10, y1 + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
             
-            # === RICH HUD ===
+            # === HUD nhỏ gọn — không banner, chỉ text góc ===
+            import datetime
+            now_str = datetime.datetime.now().strftime("%H:%M:%S")
             current_time = time.time()
 
-            # --- FPS ---
             fps = 0.0
             if hasattr(camera, 'last_frame_time') and camera.last_frame_time:
                 dt = current_time - camera.last_frame_time
                 fps = 1.0 / dt if dt > 0 else 0.0
             camera.last_frame_time = current_time
 
-            # --- Ping ---
             ping_str = getattr(camera, 'current_ping', 'N/A')
             try:
                 ping_ms = int(ping_str.replace('ms', '')) if 'ms' in ping_str else -1
             except:
                 ping_ms = -1
 
-            # --- Màu theo chất lượng ---
-            fps_color  = (0, 230, 0)   if fps >= 12 else (0, 200, 255) if fps >= 7 else (0, 60, 255)
-            ping_color = (0, 230, 0)   if ping_ms < 50 else (0, 200, 255) if ping_ms < 150 else (0, 60, 255)
-            if ping_ms < 0: ping_color = (120, 120, 120)
+            fps_color  = (0, 230, 0) if fps  >= 12 else (0, 200, 255) if fps  >= 7 else (0, 60, 255)
+            ping_color = (0, 230, 0) if ping_ms < 50 else (0, 200, 255) if ping_ms < 150 else (0, 60, 255)
+            if ping_ms < 0: ping_color = (160, 160, 160)
 
-            # --- Background panel ---
             h_f, w_f = display_frame.shape[:2]
-            panel_h = 62
-            overlay = display_frame.copy()
-            cv2.rectangle(overlay, (0, 0), (w_f, panel_h), (15, 15, 15), -1)
-            cv2.addWeighted(overlay, 0.65, display_frame, 0.35, 0, display_frame)
 
-            # --- Dòng 1: FPS | Ping | Thời gian ---
-            import datetime
-            now_str = datetime.datetime.now().strftime("%H:%M:%S")
-            fps_label  = f"FPS: {int(fps)}"
-            ping_label = f"Ping: {ping_str}"
-            time_label = f"{now_str}"
+            def put_shadow(img, text, pos, scale, color, thick):
+                """Text với shadow đen 1px — dễ đọc trên mọi nền."""
+                cv2.putText(img, text, (pos[0]+1, pos[1]+1), cv2.FONT_HERSHEY_SIMPLEX, scale, (0,0,0), thick+1)
+                cv2.putText(img, text, pos,              cv2.FONT_HERSHEY_SIMPLEX, scale, color,   thick)
 
-            cv2.putText(display_frame, fps_label,  (12, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, fps_color,  2)
-            cv2.putText(display_frame, ping_label, (130, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, ping_color, 2)
-            cv2.putText(display_frame, time_label, (w_f - 105, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (200, 200, 200), 1)
+            # Dòng 1: FPS | Ping  (góc trên-trái)
+            hud_line = f"FPS {int(fps)}  |  {ping_str}"
+            put_shadow(display_frame, f"FPS {int(fps)}", (10, 26), 0.65, fps_color,  2)
+            put_shadow(display_frame, f"| {ping_str}",   (95, 26), 0.65, ping_color, 2)
 
-            # --- Dòng 2: AI workers + faces ---
-            ai_count   = len(faces)
-            ai_label   = f"Faces: {ai_count}  |  AI: {'active' if not ai_queue.empty() else 'idle'}  |  [q] Thoat"
-            cv2.putText(display_frame, ai_label, (12, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (160, 160, 160), 1)
+            # Dòng 2: giờ hiện tại  (góc trên-phải)
+            put_shadow(display_frame, now_str, (w_f - 95, 26), 0.55, (200, 200, 200), 1)
+
+            # Dòng 3: số mặt (nhỏ, góc dưới-trái)
+            face_count = len(faces)
+            if face_count > 0:
+                put_shadow(display_frame, f"Faces: {face_count}", (10, h_f - 12), 0.5, (160, 220, 160), 1)
             # === END HUD ===
             
             cv2.imshow(win_name, display_frame)

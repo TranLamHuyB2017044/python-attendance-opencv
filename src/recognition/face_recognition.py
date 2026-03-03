@@ -72,20 +72,46 @@ class FaceRecognition:
             logger.error(f"Failed to load InsightFace model: {e}")
             raise e
 
-    def detect_and_extract(self, frame: np.ndarray, max_faces: Optional[int] = None, fast: bool = False) -> List[Any]:
+    def detect_and_extract(self, frame: np.ndarray, max_faces: Optional[int] = None,
+                           fast: bool = False, roi=None) -> List[Any]:
         """
         Architecture:
-        1. InsightFace Detection -> 2. SFAS Anti-spoofing -> 3. InsightFace Recognition
-        
-        If fast=True, skips SFAS and Recognition (Defer to tracker).
+        1. [Optional ROI crop] - chỉ detect trên vùng quan tâm → nhanh hơn
+        2. InsightFace Detection (SCRFD)
+        3. InsightFace Recognition (ArcFace) — defer to tracker nếu fast=True
+
+        roi: (x1, y1, x2, y2) tọa độ full frame.
+             Nếu set → detect chỉ trên vùng đó, sau đó remap bbox về tọa độ gốc.
         """
         try:
-            # 1. Detection & Landmarks only
-            faces = self.app.get(frame)
-            
+            # ─── ROI Crop: giảm pixels → SCRFD nhanh hơn ──────────────────
+            offset_x, offset_y = 0, 0
+            detect_frame = frame
+
+            if roi is not None:
+                fx1, fy1, fx2, fy2 = roi
+                fh, fw = frame.shape[:2]
+                fx1 = max(0, fx1); fy1 = max(0, fy1)
+                fx2 = min(fw, fx2); fy2 = min(fh, fy2)
+                if fx2 > fx1 and fy2 > fy1:
+                    detect_frame = frame[fy1:fy2, fx1:fx2]
+                    offset_x, offset_y = fx1, fy1
+
+            # 1. Detection & Landmarks
+            faces = self.app.get(detect_frame)
+
+            # Remap bbox về tọa độ full frame nếu dùng ROI
+            if offset_x != 0 or offset_y != 0:
+                for face in faces:
+                    face.bbox[0] += offset_x; face.bbox[2] += offset_x
+                    face.bbox[1] += offset_y; face.bbox[3] += offset_y
+                    if hasattr(face, 'kps') and face.kps is not None:
+                        face.kps[:, 0] += offset_x
+                        face.kps[:, 1] += offset_y
+
             if not faces:
                 return []
-                
+
             # Filter out faces that are too small or too far away
             valid_faces = []
             min_size = getattr(RecognitionConfig, "MIN_FACE_SIZE", 80)
@@ -145,71 +171,49 @@ class FaceRecognition:
         res_frame = frame.copy()
         for face in faces:
             bbox = face.bbox.astype(int)
-            is_known = getattr(face, 'name', 'Unknown') != "Unknown"
-            is_real = getattr(face, 'is_real', True)
-            as_label = getattr(face, 'as_label', 1) # 2 = WAITING
-            
-            # Color logic: Red if Fake or Spoof Warning, Green if Known, Yellow if Unknown
-            # Check for "CANH BAO", "SPOOF", or "TRUY CAP" in name/label to handle flicker
-            display_name = getattr(face, 'name', '')
-            if not is_real or any(kw in display_name for kw in ["CANH BAO", "SPOOF", "TRUY CAP"]):
-                color = (0, 0, 255) # RED for spoof/unauthorized
-            elif as_label == 2:
-                color = (0, 255, 255) # Yellow while waiting
+            display_name = getattr(face, 'name', '') or ''
+
+            # ╔════════════════════════════════════╗
+            # ║ COLOR LOGIC (theo trạng thái tracker)        ║
+            # ║  is_recognized flag do tracker gán trực tiếp  ║
+            # ╚════════════════════════════════════╝
+            is_recognized = getattr(face, 'recognized', False)
+            is_spoof      = getattr(face, 'is_spoof',   False)
+
+            if is_spoof or any(kw in str(display_name) for kw in ["TRUY CAP", "GIA MAO"]):
+                color = (0, 0, 255)       # 🔴 Đỏ: spoof / unauthorized
+            elif is_recognized:
+                color = (0, 220, 0)       # 🟢 Xanh: đã nhận diện thành công
             else:
-                color = (0, 255, 0) if is_known else (0, 255, 255)
-            
-            # Draw Box
+                color = (0, 200, 255)     # 🟡 Vàng: đang phân tích / chưa rõ
+
+
+            # Box
             cv2.rectangle(res_frame, (bbox[0], bbox[1]), (bbox[2], bbox[3]), color, 2)
-            
-            # Main Label: Real/Fake status
-            as_score = getattr(face, 'as_score', 0.0)
-            if as_label == 2:
-                liveness_label = "ANALYZING LIVENESS..."
-            elif not is_real:
-                liveness_label = f"GIA MAO (FAKE) | Score: {as_score:.2f}"
-            else:
-                liveness_label = f"REAL | Score: {as_score:.2f}"
-            
+
             y_offset = bbox[1] - 10
-            
-            cv2.putText(res_frame, liveness_label, (bbox[0], y_offset - 45), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
 
             if hasattr(face, 'name'):
-                # Main Label: Name (Score)
                 score = getattr(face, 'score', 0.0) or 0.0
-                label = f"{face.name} ({score:.2f})"
-                cv2.putText(res_frame, label, (bbox[0], y_offset), 
+                label = f"{face.name} ({score:.2f})" if is_recognized and score > 0 else face.name
+                cv2.putText(res_frame, label, (bbox[0], y_offset),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2)
-                
-                # Second Label: Camera Name & Time
+
                 from src.config import CameraConfig
                 import time
                 cam_time_label = f"{CameraConfig.CAMERA_NAME} | {time.strftime('%H:%M:%S')}"
-                cv2.putText(res_frame, cam_time_label, (bbox[0], y_offset - 20), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
-                
-                if is_known and is_real:
-                    gender_map = {0: "Nu", 1: "Nam"}
-                    gender_val = "N/A"
-                    if hasattr(face, 'gender') and face.gender is not None:
-                        gender_val = gender_map.get(int(face.gender), "N/A")
-                        
-                    age_val = "N/A"
-                    if hasattr(face, 'age') and face.age is not None:
-                        age_val = int(face.age)
+                cv2.putText(res_frame, cam_time_label, (bbox[0], y_offset - 20),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 200, 255), 1)
 
+                if is_recognized:
                     meta_info = [
                         f"ID: {getattr(face, 'user_id', 'Unknown') or 'Unknown'}",
                         f"N-sinh: {getattr(face, 'birthday', 'N/A') or 'N/A'}",
                         f"Gio: {getattr(face, 'detect_time', 'N/A') or 'N/A'}",
                         f"Mau: {getattr(face, 'vector_count', 0) if getattr(face, 'vector_count', None) is not None else 0}"
                     ]
-                    
                     for i, text in enumerate(meta_info):
-                        pos = (bbox[0], bbox[3] + 25 + (i * 22))
-                        cv2.putText(res_frame, text, pos, 
+                        cv2.putText(res_frame, text, (bbox[0], bbox[3] + 25 + i * 22),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
             
             # If SPOOF or UNAUTHORIZED, add a big warning

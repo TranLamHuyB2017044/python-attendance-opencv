@@ -406,8 +406,8 @@ class AntiSpoof:
 
 class AntiSpoofing:
     """Wrapper class to match existing API."""
-    def __init__(self):
-        self.detector = AntiSpoof()
+    def __init__(self, model_dir="models/anti_spoof"):
+        self.detector = AntiSpoof(model_dir=model_dir)
         
     def predict(self, frame, face_obj):
         # face_obj.bbox is [x1, y1, x2, y2]
