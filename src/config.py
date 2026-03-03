@@ -152,9 +152,12 @@ class RecognitionConfig:
     TEST_MODE: bool = os.getenv("TEST_MODE", "false").lower() == "true"
     ANTI_SPOOFING_ENABLED: bool = os.getenv("ANTI_SPOOFING_ENABLED", "true").lower() == "true"
     COOLDOWN_SECONDS: int = int(os.getenv("DETECTION_COOLDOWN", "3600")) # Default 1 hour
-    MAX_FACES: int = int(os.getenv("MAX_FACES", "100")) 
+    MAX_FACES: int = int(os.getenv("MAX_FACES", "100"))
     CAPTURE_MAX_WIDTH: int = int(os.getenv("CAPTURE_MAX_WIDTH", "1280"))
-    MIN_FACE_SIZE: int = int(os.getenv("MIN_FACE_SIZE", "80")) # Kích thước tối thiểu để lấy ảnh nét
+    MIN_FACE_SIZE: int = int(os.getenv("MIN_FACE_SIZE", "80"))
+    # Số frame thu thập trước khi kết luận nhận diện (Best-of-N voting)
+    # Tăng lên nhưng chậm hơn (khuyên dùng 3-7), giảm xuống nhưng nhanh hơn
+    GATHER_FRAMES: int = int(os.getenv("GATHER_FRAMES", "5"))
 
 
 class QdrantConfig:

@@ -77,10 +77,26 @@ class RTSPCamera:
                     # Webcam settings
                     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
                 else:
-                    cap = cv2.VideoCapture(self.camera_source)
-                    # RTSP settings
-                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                    cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000)  # 5 second timeout
+                    import os
+                    # =============================================================
+                    # MINIMUM LATENCY FFMPEG FLAGS
+                    # Thứ tự ưu tiên: loại buffer ẩn > tắc độ thấp > giảm probe time
+                    # =============================================================
+                    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "|".join([
+                        "rtsp_transport;tcp",        # Force TCP (tránh mất gói UDP)
+                        "fflags;nobuffer",           # Tắt FFmpeg demuxer buffer
+                        "flags;low_delay",           # Low-latency decode mode
+                        "framedrop",                 # Bỏ frame cũ khi không kịp thời gian
+                        "avioflags;direct",          # I/O trực tiếp, không qua buffer OS
+                        "probesize;32",              # Giảm thời gian dò stream (mặc định 5MB!)
+                        "analyzeduration;0",         # Không phân tích dạng stream trước khi play
+                        "reorder_queue_size;0",      # Không reorder gói (thêm +50-100ms)
+                        "max_delay;100000",          # Max jitter buffer: 100ms (mặc định 500ms!)
+                    ])
+
+                    cap = cv2.VideoCapture(self.camera_source, cv2.CAP_FFMPEG)
+                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)       # Chỉ giữ 1 frame trong bộ đệm
+                    cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000)
                     cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000)
                 
                 if cap.isOpened():
@@ -160,26 +176,67 @@ class RTSPCamera:
             self.current_ping = "Err"
 
     def _update(self):
-        """Background thread: continuously grab frames from the stream."""
-        while self.running:
-            if self.is_connected and self.cap is not None:
-                ret, frame = self.cap.read()
-                if ret:
-                    # Apply Flip if configured
-                    if CameraConfig.FLIP_H and CameraConfig.FLIP_V:
-                        frame = cv2.flip(frame, -1) # Both
-                    elif CameraConfig.FLIP_H:
-                        frame = cv2.flip(frame, 1)  # Horizontal
-                    elif CameraConfig.FLIP_V:
-                        frame = cv2.flip(frame, 0)  # Vertical
-                        
-                    with self.lock:
-                        self.frame = frame
+        """
+        Background thread: grab frames from RTSP with minimum latency.
+
+        KEY INSIGHT về RTSP:
+          cap.read() đối với RTSP tự block chờ frame mới từ mạng.
+          Nếu chúng ta sleep() thêm, frame mới tới trong lúcng sleep
+          và nằm trong buffer → lần read() tiếp theo lấy frame CŨ đó!
+          → Sleep thêm = tự cộng thêm latency mà chúng ta vừa fix!
+
+        Giải pháp:
+          1. RTSP: Dùng grab() để xả sạch buffer, chỉ decode frame mới nhất.
+          2. Webcam: Giữ adaptive sleep như cũ (cảm biến local, không có network buffer).
+        """
+        if self.is_webcam:
+            # --- WEBCAM: giữ throttle cũ để tránh read nhanh hơn cảm biến ---
+            target_interval = 1.0 / max(1, CameraConfig.FPS)
+            while self.running:
+                frame_start = time.time()
+                if self.is_connected and self.cap is not None:
+                    ret, frame = self.cap.read()
+                    if ret:
+                        if CameraConfig.FLIP_H and CameraConfig.FLIP_V: frame = cv2.flip(frame, -1)
+                        elif CameraConfig.FLIP_H: frame = cv2.flip(frame, 1)
+                        elif CameraConfig.FLIP_V: frame = cv2.flip(frame, 0)
+                        with self.lock:
+                            self.frame = frame
+                    else:
+                        logger.warning("Webcam disconnected.")
+                        self.is_connected = False
                 else:
-                    logger.warning("Stream connection lost in background thread.")
+                    time.sleep(0.1)
+                    continue
+                elapsed = time.time() - frame_start
+                sleep_time = target_interval - elapsed
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+        else:
+            # --- RTSP: MINIMUM LATENCY MODE ---
+            # cap.read() tự block chờ frame từ mạng → không cần sleep()
+            # Thread chạy đúng tốc độ camera (15fps) mà không tốn CPU vô ích
+            # KHÔNG dùng grab() drain loop — grab() RTSP cũng block như read()!
+            while self.running:
+                if not self.is_connected or self.cap is None:
+                    time.sleep(0.1)
+                    continue
+
+                try:
+                    ret, frame = self.cap.read()  # block tại đây đến khi có frame mới
+
+                    if ret and frame is not None:
+                        if CameraConfig.FLIP_H and CameraConfig.FLIP_V: frame = cv2.flip(frame, -1)
+                        elif CameraConfig.FLIP_H: frame = cv2.flip(frame, 1)
+                        elif CameraConfig.FLIP_V: frame = cv2.flip(frame, 0)
+                        with self.lock:
+                            self.frame = frame
+                    else:
+                        logger.warning("Stream connection lost in background thread.")
+                        self.is_connected = False
+                except Exception as e:
+                    logger.error(f"[Camera] _update error: {e}")
                     self.is_connected = False
-            else:
-                time.sleep(0.1)  # Wait for reconnection
 
     def read_frame(self) -> Tuple[bool, Optional[np.ndarray]]:
         """

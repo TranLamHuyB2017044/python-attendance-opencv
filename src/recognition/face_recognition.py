@@ -41,28 +41,33 @@ class FaceRecognition:
         self.det_thresh = det_thresh or InsightFaceConfig.DET_THRESH
         
         try:
-            # Initialize FaceAnalysis
+            # Initialize FaceAnalysis — detection + landmark only
             self.app = FaceAnalysis(
                 name=self.model_name,
                 root=str(MODELS_DIR),
-                allowed_modules=['detection', 'landmark_2d_106'], # Removed 'recognition', 'attribute'
-                providers=['CPUExecutionProvider'] # Forcing CPU as requested
+                allowed_modules=['detection', 'landmark_2d_106'],
+                providers=['CPUExecutionProvider']
             )
             self.app.prepare(ctx_id=ctx_id, det_size=self.det_size, det_thresh=self.det_thresh)
-            
-            # Manual load of recognition model for the strict pipeline
+            logger.info(f"InsightFace detection model ready. DET_SIZE={self.det_size}")
+
+            # Manual load of recognition (ArcFace embedding) model
             from insightface.model_zoo import get_model
-            # Look for the .onnx file in the recognition folder of buffalo_l/buffalo_s
             rec_model_name = "w600k_r50.onnx" if "buffalo_l" in self.model_name else "w600k_mbf.onnx"
             rec_model_path = MODELS_DIR / "models" / self.model_name / rec_model_name
             self.rec_model = get_model(str(rec_model_path), providers=['CPUExecutionProvider'])
             self.rec_model.prepare(ctx_id=ctx_id)
-            logger.info("Recognition model loaded manually for strict pipeline.")
-            # Anti-Spoofing Setup (Silent-Face-Anti-Spoofing)
-            from src.recognition.antispoofing import AntiSpoofing
-            self.anti_spoof = AntiSpoofing()
-            logger.info("Silent-Face-Anti-Spoofing (MiniFASNet) initialized.")
-                
+            logger.info("ArcFace recognition model loaded.")
+
+            # Anti-Spoofing — chỉ load khi ANTI_SPOOFING_ENABLED=true
+            if RecognitionConfig.ANTI_SPOOFING_ENABLED:
+                from src.recognition.antispoofing import AntiSpoofing
+                self.anti_spoof = AntiSpoofing()
+                logger.info("[Anti-Spoofing] MiniFASNet loaded (ENABLED).")
+            else:
+                self.anti_spoof = None
+                logger.warning("[Anti-Spoofing] DISABLED — skipping model load. All faces treated as REAL.")
+
         except Exception as e:
             logger.error(f"Failed to load InsightFace model: {e}")
             raise e
@@ -109,20 +114,22 @@ class FaceRecognition:
 
             real_faces = []
             for face in faces:
-                # 2. Anti-Spoofing (SFAS)
-                if self.anti_spoof and RecognitionConfig.ANTI_SPOOFING_ENABLED:
+                # 2. Anti-Spoofing — chỉ chạy nếu được bật VÀ model đã load
+                if self.anti_spoof is not None and RecognitionConfig.ANTI_SPOOFING_ENABLED:
                     as_label, as_score = self.anti_spoof.predict(frame, face)
                     face.as_label = int(as_label)
                     face.as_score = float(as_score)
                     face.is_real = (face.as_label == 1)
                 else:
+                    # Anti-spoofing tắt: mặc định là người thật, as_label=1
                     face.is_real = True
+                    face.as_label = 1
                     face.as_score = 1.0
 
-                # 3. Recognition (Only if Real)
+                # 3. Recognition (ArcFace embedding)
                 if face.is_real:
                     self.rec_model.get(frame, face)
-                
+
                 real_faces.append(face)
 
             return real_faces

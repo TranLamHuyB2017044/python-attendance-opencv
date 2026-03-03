@@ -106,13 +106,15 @@ def main():
     
     preview_path = DATA_DIR / "camera_preview.jpg"
     frame_count = 0
-    process_every_n_frames = 3
+    # AI chỉ xử lý 1 trong 5 frame → tại 15fps = 3 lần/giây
+    # Giảm CPU rất đáng kể mà không ảnh hưởng tốc độ nhận diện thực tế
+    process_every_n_frames = 5
     faces = []
     ai_busy = False
     last_preview_time = 0
-    # Match camera FPS for preview (limit to up to 60 for ultra-smoothness)
-    preview_fps = max(15, min(60, CameraConfig.FPS))
-    preview_interval = 1.0 / preview_fps 
+    # Giới hạn preview FPS theo camera FPS thực tế (tối đa 30)
+    preview_fps = min(30, CameraConfig.FPS)
+    preview_interval = 1.0 / preview_fps
 
     try:
         from src.attendance.mongodb_mgr import mongo_db
@@ -220,43 +222,68 @@ def main():
                         fps = 1.0 / (current_time - camera.last_frame_time) if current_time > camera.last_frame_time else 0
                     camera.last_frame_time = current_time
                     
-                    # Display HUD
-                    import socket
+                    # === RICH HUD ===
                     ping_str = getattr(camera, 'current_ping', 'N/A')
-                    cv2.putText(annotated_full, f"FPS: {int(fps)} | Ping: {ping_str}", (20, 40),
-                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 3)
+                    try:
+                        ping_ms = int(ping_str.replace('ms', '')) if 'ms' in ping_str else -1
+                    except:
+                        ping_ms = -1
 
-                    # THEN RESIZE for monitor performance
-                    preview_frame = cv2.resize(annotated_full, (960, 540))
+                    fps_color  = (0, 230, 0) if fps >= 12 else (0, 200, 255) if fps >= 7 else (0, 60, 255)
+                    ping_color = (0, 230, 0) if ping_ms < 50 else (0, 200, 255) if ping_ms < 150 else (0, 60, 255)
+                    if ping_ms < 0: ping_color = (120, 120, 120)
+
+                    # Background panel (semi-transparent)
+                    h_f, w_f = annotated_full.shape[:2]
+                    overlay = annotated_full.copy()
+                    cv2.rectangle(overlay, (0, 0), (w_f, 62), (15, 15, 15), -1)
+                    cv2.addWeighted(overlay, 0.65, annotated_full, 0.35, 0, annotated_full)
+
+                    import datetime
+                    now_str = datetime.datetime.now().strftime("%H:%M:%S")
+                    cv2.putText(annotated_full, f"FPS: {int(fps)}",  (12, 24),  cv2.FONT_HERSHEY_SIMPLEX, 0.7, fps_color,  2)
+                    cv2.putText(annotated_full, f"Ping: {ping_str}", (130, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, ping_color, 2)
+                    cv2.putText(annotated_full, now_str, (w_f - 105, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (200, 200, 200), 1)
+                    face_count = len(faces)
+                    cv2.putText(annotated_full, f"Faces: {face_count}  |  Service: RUNNING",
+                                (12, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (160, 160, 160), 1)
+                    # === END HUD ===
+
+                    # Thu nhỏ preview xuống 640×360 cho phù hợp resolution mới (640×480)
+                    preview_frame = cv2.resize(annotated_full, (640, 360))
                     
                     write_frame_to_shm(preview_frame)
                     last_preview_time = current_time
                 except: pass
 
-            # 4. ASYNC AI TRIGGER (Queue based)
-            if ai_queue.empty():
+            # 4. ASYNC AI TRIGGER — chỉ đẩy frame vào queue mỗi N vòng lặp
+            frame_count += 1
+            if frame_count % process_every_n_frames == 0:
+                # Xóa frame cũ trong queue nếu chưa được xử lý → luôn đưa frame mới nhất
+                if not ai_queue.empty():
+                    try:
+                        ai_queue.get_nowait()
+                    except: pass
+
                 try:
                     ai_frame_obj = frame.copy()
-                    
-                    # Apply ROI filtering - Black out everything outside the ROI
-                    # This guarantees the AI only detects faces inside the drawn box
-                    # AND the bounding box coordinates will still match the full frame!
+
+                    # Apply ROI filtering — chỉ detect trong vùng chấm công
                     if CameraConfig.ROI:
-                        import numpy as np
                         x1, y1, x2, y2 = CameraConfig.ROI
                         mask = np.zeros_like(ai_frame_obj)
-                        # Ensure coordinates are within bounds
                         h, w = ai_frame_obj.shape[:2]
                         x1, y1 = max(0, x1), max(0, y1)
                         x2, y2 = min(w, x2), min(h, y2)
-                        
                         mask[y1:y2, x1:x2] = 255
                         ai_frame_obj = cv2.bitwise_and(ai_frame_obj, mask)
-                        
+
                     ai_queue.put_nowait(ai_frame_obj)
                 except: pass
 
-            time.sleep(0.001) 
+            # Main loop sleep: 30ms = ~33 iterations/giây
+            # Giải phóng CPU core cho AI worker và OS tasks
+            time.sleep(0.030)
 
     except KeyboardInterrupt:
         logger.info("Service stopping...")
