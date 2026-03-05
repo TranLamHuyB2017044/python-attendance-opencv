@@ -112,8 +112,8 @@ def main():
             if CameraConfig.ROI:
                 import numpy as np
                 x1, y1, x2, y2 = CameraConfig.ROI
-                cv2.rectangle(display_frame, (x1, y1), (x2, y2), (255, 255, 0), 3)
-                cv2.putText(display_frame, "VUNG CHAM CONG", (x1 + 10, y1 + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
+                cv2.rectangle(display_frame, (x1, y1), (x2, y2), (0, 230, 230), 2)
+                cv2.putText(display_frame, "VUNG CHAM CONG", (x1 + 10, y1 + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 230, 230), 2)
             
             # === HUD nhỏ gọn — không banner, chỉ text góc ===
             import datetime

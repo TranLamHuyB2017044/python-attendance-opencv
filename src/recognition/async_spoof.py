@@ -24,6 +24,12 @@ import numpy as np
 import cv2
 from loguru import logger
 
+# Import MODELS_DIR ở module-level để tránh NameError khi chạy từ thread trong file .exe
+try:
+    from src.config import MODELS_DIR as _MODELS_DIR
+except Exception:
+    _MODELS_DIR = None
+
 
 class AsyncSpoofChecker:  # Giữ tên cũ để không đổi import trong tracker.py
     """
@@ -52,10 +58,13 @@ class AsyncSpoofChecker:  # Giữ tên cũ để không đổi import trong trac
     def _load_model(self):
         """Load MiniFASNet model một lần. Gọi từ background thread."""
         try:
-            from src.config import MODELS_DIR
             import os
             if self._model_dir is None:
-                self._model_dir = str(MODELS_DIR / "anti_spoof")
+                if _MODELS_DIR is not None:
+                    self._model_dir = str(_MODELS_DIR / "anti_spoof")
+                else:
+                    logger.warning("[Spoof] MODELS_DIR không xác định được → DISABLED")
+                    return
             
             if not os.path.exists(self._model_dir):
                 logger.warning(f"[Spoof] Model dir not found: {self._model_dir} → DISABLED")
@@ -153,7 +162,7 @@ class AsyncSpoofChecker:  # Giữ tên cũ để không đổi import trong trac
 
         # Phone màn hình OLED sắc nét thường có blur > 60 nên lớp blur
         # không bắt được → cần dựa vào ML (Lớp 2)
-        BLUR_THRESH = 45.0   # Tăng lên từ 60 → bắt thêm ảnh in chất lượng trung bình
+        BLUR_THRESH = 15.0   # Tăng lên từ 60 → bắt thêm ảnh in chất lượng trung bình
 
         if blur_score < BLUR_THRESH:
             score_fake = min(1.0, 1.0 - blur_score / BLUR_THRESH)

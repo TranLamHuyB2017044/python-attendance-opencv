@@ -62,8 +62,9 @@ class FaceRecognition:
             # Anti-Spoofing — chỉ load khi ANTI_SPOOFING_ENABLED=true
             if RecognitionConfig.ANTI_SPOOFING_ENABLED:
                 from src.recognition.antispoofing import AntiSpoofing
-                self.anti_spoof = AntiSpoofing()
-                logger.info("[Anti-Spoofing] MiniFASNet loaded (ENABLED).")
+                anti_spoof_dir = str(MODELS_DIR / "anti_spoof")
+                self.anti_spoof = AntiSpoofing(model_dir=anti_spoof_dir)
+                logger.info(f"[Anti-Spoofing] MiniFASNet loaded (ENABLED) from: {anti_spoof_dir}")
             else:
                 self.anti_spoof = None
                 logger.warning("[Anti-Spoofing] DISABLED — skipping model load. All faces treated as REAL.")
@@ -173,10 +174,6 @@ class FaceRecognition:
             bbox = face.bbox.astype(int)
             display_name = getattr(face, 'name', '') or ''
 
-            # ╔════════════════════════════════════╗
-            # ║ COLOR LOGIC (theo trạng thái tracker)        ║
-            # ║  is_recognized flag do tracker gán trực tiếp  ║
-            # ╚════════════════════════════════════╝
             is_recognized = getattr(face, 'recognized', False)
             is_spoof      = getattr(face, 'is_spoof',   False)
 

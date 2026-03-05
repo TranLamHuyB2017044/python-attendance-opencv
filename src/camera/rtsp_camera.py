@@ -238,28 +238,27 @@ class RTSPCamera:
                     logger.error(f"[Camera] _update error: {e}")
                     self.is_connected = False
 
-    def read_frame(self) -> Tuple[bool, Optional[np.ndarray]]:
+    def read_frame(self, wait_first_frame: bool = False) -> Tuple[bool, Optional[np.ndarray]]:
         """
         Get the ABSOLUTE LATEST frame from the background thread.
         This provides zero-latency performance.
+
+        Args:
+            wait_first_frame: Neu True, cho toi da 2s de background thread capture
+                              frame dau tien (thay vi tra None ngay lap tuc).
         """
         if not self.is_connected:
             return False, None
-            
+
+        # Cho frame dau tien neu can (thread moi chay, cap.read() chua tra lai)
+        if wait_first_frame and self.frame is None:
+            deadline = time.time() + 2.0
+            while self.frame is None and time.time() < deadline and self.is_connected:
+                time.sleep(0.01)
+
         with self.lock:
             if self.frame is not None:
-                frame = self.frame.copy()
-                
-                # No cropping - keep original camera size
-                # h, w = frame.shape[:2]
-                # roi_w, roi_h = CameraConfig.ROI_SIZE
-                
-                # if roi_w < w or roi_h < h:
-                #     x1 = max(0, (w - roi_w) // 2)
-                #     y1 = max(0, (h - roi_h) // 2)
-                #     frame = frame[y1:y1+roi_h, x1:x1+roi_w]
-                
-                return True, frame
+                return True, self.frame.copy()
             return False, None
 
     def reconnect(self) -> bool:

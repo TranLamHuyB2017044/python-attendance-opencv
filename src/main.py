@@ -553,10 +553,20 @@ def main():
                 cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
                 cv2.resizeWindow(win_name, 1280, 720)
                 cv2.setMouseCallback(win_name, ui.handle_menu_click, param=(cur_w, cur_h))
+                main._detect_callback_cleared = False  # Reset để lần sau vào DETECT lại xóa callback
                 last_w, last_h = 1280, 720
                 continue
                 
             elif ui.current_state == STATE_DETECT:
+                # Xóa mouse callback MỘT LẦN khi mới vào STATE_DETECT
+                # → Ngăn click vào camera view vô tình trigger menu buttons
+                if not getattr(main, '_detect_callback_cleared', False):
+                    try:
+                        cv2.setMouseCallback(win_name, lambda *args: None)
+                    except Exception:
+                        pass
+                    main._detect_callback_cleared = True
+
                 # --- AUTO SWITCH MODE: DIRECT (DEV) vs PREVIEW (PROD/EXE) ---
                 if getattr(sys, 'frozen', False):
                     # --- PRODUCTION MODE: SHOW PREVIEW FROM SERVICE (SHARED MEMORY) ---
@@ -568,16 +578,21 @@ def main():
                     shm_frame = None
                     try:
                         existing_shm = shared_memory.SharedMemory(name=SHM_NAME)
-                        if existing_shm.buf[0] % 2 == 0 and existing_shm.buf[1] == 1:
-                            w = int(np.frombuffer(existing_shm.buf[2:4], dtype=np.uint16)[0])
-                            h = int(np.frombuffer(existing_shm.buf[4:6], dtype=np.uint16)[0])
-                            if 0 < w < 4000 and 0 < h < 4000:
-                                size = w * h * 3
-                                if 10 + size <= SHM_SIZE_MAX:
-                                    data = bytes(existing_shm.buf[10:10+size])
-                                    shm_frame = np.frombuffer(data, dtype=np.uint8).reshape((h, w, 3))
+                        seq1 = int(existing_shm.buf[0])
+                        # EVEN = frame hợp lệ (ghi xong), bỏ seq1 > 0 vì seq=0 là EVEN hợp lệ
+                        if seq1 % 2 == 0:
+                            seq2 = int(existing_shm.buf[0])
+                            if seq1 == seq2 and existing_shm.buf[1] == 1:
+                                w = int(np.frombuffer(existing_shm.buf[2:4], dtype=np.uint16)[0])
+                                h = int(np.frombuffer(existing_shm.buf[4:6], dtype=np.uint16)[0])
+                                if 0 < w < 4000 and 0 < h < 4000:
+                                    size = w * h * 3
+                                    if 10 + size <= SHM_SIZE_MAX:
+                                        data = bytes(existing_shm.buf[10:10+size])
+                                        shm_frame = np.frombuffer(data, dtype=np.uint8).reshape((h, w, 3))
                         existing_shm.close()
-                    except: pass
+                    except Exception:
+                        pass
 
                     if shm_frame is not None:
                         p_h, p_w = shm_frame.shape[:2]
@@ -641,8 +656,8 @@ def main():
                         display_frame = face_rec.draw_faces(frame, faces)
                         if CameraConfig.ROI:
                             x1, y1, x2, y2 = CameraConfig.ROI
-                            cv2.rectangle(display_frame, (x1, y1), (x2, y2), (255, 255, 0), 3)
-                            cv2.putText(display_frame, "VUNG CHAM CONG", (x1 + 10, y1 + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
+                            cv2.rectangle(display_frame, (x1, y1), (x2, y2), (255, 120, 0), 3)
+                            cv2.putText(display_frame, "VUNG CHAM CONG", (x1 + 10, y1 + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 120, 0), 2)
 
                 cv2.putText(display_frame, "[M] Thoat ve Menu", (20, cur_h - 20), 0, 0.6, (200, 200, 200), 1)
 
@@ -697,8 +712,8 @@ def main():
                     
                     if CameraConfig.ROI:
                         x1, y1, x2, y2 = CameraConfig.ROI
-                        cv2.rectangle(display_frame, (x1, y1), (x2, y2), (255, 255, 0), 3)
-                        cv2.putText(display_frame, "VUNG CHAM CONG", (x1 + 10, y1 + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
+                        cv2.rectangle(display_frame, (x1, y1), (x2, y2), (255, 120, 0), 3)
+                        cv2.putText(display_frame, "VUNG CHAM CONG", (x1 + 10, y1 + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 120, 0), 2)
                         
                     cv2.putText(display_frame, "CHEDO TEST CAMERA (TRUC TIEP)", (10, cur_h-50), 0, 0.7, (0, 0, 255), 2)
                     cv2.putText(display_frame, "[M] Quay ve Menu", (10, cur_h-20), 0, 0.6, (255,255,255), 1)

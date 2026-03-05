@@ -137,7 +137,7 @@ class CameraConfig:
 class InsightFaceConfig:
     """InsightFace model configuration."""
     
-    MODEL_NAME: str = os.getenv("INSIGHTFACE_MODEL", "buffalo_s")
+    MODEL_NAME: str = os.getenv("INSIGHTFACE_MODEL", "buffalo_sc")
     DET_SIZE: Tuple[int, int] = tuple(
         map(int, os.getenv("INSIGHTFACE_DET_SIZE", "640,640").split(","))
     )

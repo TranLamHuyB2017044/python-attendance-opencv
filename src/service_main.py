@@ -37,14 +37,22 @@ from multiprocessing import shared_memory
 import numpy as np
 
 SHM_NAME = "bittech_monitor_shm"
-SHM_SIZE = 5 * 1024 * 1024 # Increased to 5MB for 720p high quality
+SHM_SIZE = 20 * 1024 * 1024 # Increased to 20MB to support up to 4K resolution (approx 2.7MB for 720p, 6.2MB for 1080p)
 
 try:
     # Try to connect to existing or create new
     try:
         shm = shared_memory.SharedMemory(name=SHM_NAME)
-        logger.info("Found existing Shared Memory.")
-    except FileNotFoundError:
+        # Verify size if it's already there (Optional, but let's be safe)
+        if shm.size < SHM_SIZE:
+            logger.info(f"Existing SHM too small ({shm.size} < {SHM_SIZE}), recreating...")
+            shm.close()
+            # On Windows, we might need some trick to truly 'delete' it or just recreate with new name if it persists
+            # But usually it stays until all handles close.
+            shm = shared_memory.SharedMemory(name=SHM_NAME, create=True, size=SHM_SIZE)
+        else:
+            logger.info("Found existing Shared Memory.")
+    except Exception:
         shm = shared_memory.SharedMemory(name=SHM_NAME, create=True, size=SHM_SIZE)
         logger.success("Created new Shared Memory for monitoring.")
 except Exception as e:
@@ -56,31 +64,30 @@ def write_frame_to_shm(frame):
     global shm
     if shm is None or frame is None: return
     try:
-        # 1. Prepare Metadata
         h, w = frame.shape[:2]
         data = frame.tobytes()
         size = len(data)
-        
-        if size > SHM_SIZE - 20: # Safety margin
+
+        if size > SHM_SIZE - 20:
+            if int(time.time()) % 10 == 0:
+                logger.warning(f"Frame too large for SHM ({size} > {SHM_SIZE}). Skipping write.")
             return
-            
-        # 2. Update sequence (ODD = Writing)
-        current_seq = shm.buf[0]
-        shm.buf[0] = (current_seq + 1) % 255
+
+        # Protocol: ODD seq = đang ghi (reader BỎ QUA), EVEN seq = đã xong (reader ĐỌC)
+        # % 256 (ĐÚNG): khi current=254 → write=255(ODD✅) → done=0(EVEN✅)
+        # % 255 (SAI):  khi current=254 → write=0(EVEN❌)  → done=1(ODD❌)  ← bug cũ
+        current_seq = int(shm.buf[0])
+        shm.buf[0] = (current_seq + 1) % 256   # ODD = đang ghi
         
-        # 3. Write Format (Offset 1): 1 = RAW
-        shm.buf[1] = 1
-        # Write W, H (Offset 2, 4)
+        shm.buf[1] = 1  # format = RAW
         shm.buf[2:4] = np.array([w], dtype=np.uint16).tobytes()
         shm.buf[4:6] = np.array([h], dtype=np.uint16).tobytes()
-        
-        # 4. Write Pixel Data (Offset 10)
-        shm.buf[10:10+size] = data
-        
-        # 5. Done (EVEN = Valid)
-        shm.buf[0] = (current_seq + 2) % 255
+        shm.buf[10:10 + size] = data
+
+        shm.buf[0] = (current_seq + 2) % 256   # EVEN = ghi xong, reader được đọc
     except Exception as e:
         logger.debug(f"SHM Write error: {e}")
+
 
 # Note: FastAPI server is no longer needed but kept as empty if you want to reuse it later
 # or we can just remove uvicorn to be clean.
@@ -106,9 +113,10 @@ def main():
     
     preview_path = DATA_DIR / "camera_preview.jpg"
     frame_count = 0
-    # AI chỉ xử lý 1 trong 5 frame → tại 15fps = 3 lần/giây
-    # Giảm CPU rất đáng kể mà không ảnh hưởng tốc độ nhận diện thực tế
-    process_every_n_frames = 5
+    # Time-based AI throttle: tối đa 3 lần/giây (333ms giữa 2 lần detect)
+    # Ổn định hơn frame-count vì không phụ thuộc vào FPS camera
+    AI_INTERVAL  = 1.0 / 3   # 333ms = ~3 detect/giây
+    last_ai_time = 0.0
     faces = []
     ai_busy = False
     last_preview_time = 0
@@ -172,13 +180,14 @@ def main():
                 # Heavy AI Tasks (Detection only in fast mode, ROI crop nếu cấu hình)
                 detected = face_rec.detect_and_extract(
                     ai_frame, fast=True,
-                    roi=CameraConfig.ROI  # None → full frame, tuple → crop trước detect
+                    roi=CameraConfig.ROI
                 )
                 tracker.update(detected, attendance, face_rec=face_rec, frame=ai_frame)
+                faces[:] = detected
 
-                
-                # Update shared list
-                faces[:] = detected 
+                # Nhưỡng CPU 50ms sau mỗi inference — giảm CPU spike
+                # ONNX đã chạy xong, 50ms nghỉ không ảnh hưởng độ trễ detect
+                time.sleep(0.05)
             except Exception as e:
                 logger.error(f"AI Worker error: {e}")
             finally:
@@ -190,6 +199,8 @@ def main():
     # Main thread chỉ push (frame, faces snapshot) → preview thread xử lý async
     # → Camera read loop không bao giờ bị block bởi annotation/SHM
     preview_queue = queue.Queue(maxsize=1)
+    last_preview_push = 0.0
+    PREVIEW_INTERVAL  = 1.0 / 15  # push tối đa 15fps vào worker (đủ mượt)
 
     def preview_worker():
         import datetime, numpy as np
@@ -207,19 +218,21 @@ def main():
                     break
                 pframe, pfaces, ts = item
 
-                # FPS smooth
-                dt = ts - last_ts if ts > last_ts else 0.001
-                last_ts = ts
+                # FPS smooth (dựa trên timestamp frame từ main loop)
+                now = time.time()
+                dt = now - last_ts if now > last_ts else 0.001
+                last_ts = now
                 fps_smooth = 0.8 * fps_smooth + 0.2 * (1.0 / dt)
 
-                # Draw bounding boxes
-                annotated = face_rec.draw_faces(pframe, pfaces) if pfaces else pframe
+                # Draw bounding boxes (draw_faces tự copy frame nội bộ — thread-safe)
+                # pfaces đã được copy ở thread chính
+                annotated = face_rec.draw_faces(pframe.copy(), pfaces) if pfaces else pframe.copy()
 
                 # ROI box
                 if CameraConfig.ROI:
                     x1, y1, x2, y2 = CameraConfig.ROI
-                    cv2.rectangle(annotated, (x1,y1), (x2,y2), (0,220,220), 2)
-                    _shadow(annotated, "VUNG CHAM CONG", (x1+8, y1+26), 0.6, (0,220,220), 2)
+                    cv2.rectangle(annotated, (x1,y1), (x2,y2), (255, 120, 0), 2)
+                    _shadow(annotated, "VUNG CHAM CONG", (x1+8, y1+26), 0.6, (255, 120, 0), 2)
 
                 # HUD
                 h_f, w_f = annotated.shape[:2]
@@ -240,9 +253,10 @@ def main():
                 if len(pfaces) > 0:
                     _shadow(annotated, f"Faces: {len(pfaces)}", (10,h_f-12), 0.5, (160,220,160), 1)
 
-                # Thu nhỏ preview → SHM (640×360 = 675KB, SHM 5MB ok)
-                preview_frame = cv2.resize(annotated, (640, 360))
-                write_frame_to_shm(preview_frame)
+                # Ghi full resolution 1280×720 vào SHM — sắc nét tương đương camera_app.py
+                # An toàn vì: (1) FPS limiter 15fps, (2) Management App đã bỏ AI (~30% CPU giảm)
+                # 1280×720×3 = 2.76MB < 5MB SHM limit ✅
+                write_frame_to_shm(annotated)
 
             except Exception as e:
                 logger.debug(f"[PreviewWorker] {e}")
@@ -264,31 +278,38 @@ def main():
                     continue
 
             # 2. READ FRAME
-            success, frame = camera.read_frame()
+            # wait_first_frame=True: cho background thread co it nhat 1 frame
+            # truoc khi service loop bat dau push vao preview_queue
+            success, frame = camera.read_frame(wait_first_frame=True)
             if not success or frame is None:
+                time.sleep(0.005)  # tranh busy-spin khi khong co frame
                 continue
 
-            # 3. PUSH FRAME TO PREVIEW THREAD (non-blocking, ≤ SHM write cost)
-            # Preview worker sẽ draw + HUD + write SHM — không block camera read
-            if not preview_queue.full():
+            # 3. PUSH FRAME TO PREVIEW THREAD (FPS-limited + non-blocking)
+            # FPS limiter ở đây thay vì trong worker → worker LUÔN ghi SHM khi nhận frame
+            if current_time - last_preview_push >= PREVIEW_INTERVAL:
+                if not preview_queue.full():
+                    try:
+                        # Copy list faces để tránh race condition khi AI thread update cùng lúc
+                        faces_copy = list(faces)  # shallow copy đủ an toàn với list replace
+                        preview_queue.put_nowait((frame, faces_copy, current_time))
+                        last_preview_push = current_time
+                    except Exception:
+                        pass
+
+            # 4. TIME-BASED AI TRIGGER — tối đa 3 lần/giây bất kể FPS camera
+            if (current_time - last_ai_time) >= AI_INTERVAL:
+                if not ai_queue.empty():
+                    try: ai_queue.get_nowait()
+                    except Exception: pass
                 try:
-                    preview_queue.put_nowait((frame.copy(), list(faces), current_time))
+                    ai_queue.put_nowait(frame.copy())  # copy một lần duy nhất
+                    last_ai_time = current_time
                 except Exception:
                     pass
 
-            # 4. ASYNC AI TRIGGER — chỉ đẩy frame vào queue mỗi N vòng lặp
-            frame_count += 1
-            if frame_count % process_every_n_frames == 0:
-                if not ai_queue.empty():
-                    try:
-                        ai_queue.get_nowait()
-                    except Exception:
-                        pass
-                try:
-                    ai_queue.put_nowait(frame.copy())
-                except Exception:
-                    pass
-            # NOTE: Không có time.sleep() — RTSP read() tự block chờ frame mới từ camera
+            # Safety yield: tránh busy-spin khi RTSP buffer đầy
+            time.sleep(0.002)
 
     except KeyboardInterrupt:
         logger.info("Service stopping...")
