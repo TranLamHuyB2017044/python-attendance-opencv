@@ -342,10 +342,10 @@ class AttendanceUI:
                          corner_radius=12, fg_color="#8E44AD", hover_color="#732D91").grid(row=1, column=1, padx=10, pady=10, sticky="nsew")
 
             # 5. Enroll File
+            # Dùng set_state → đóng dashboard, main loop sẽ lazy-load face_rec rồi xử lý
+            # (Không gọi enroll_by_upload inline vì face_rec=None trong management_app mode)
             def open_enroll_upload():
-                from src.main import enroll_by_upload
-                if face_rec and attendance:
-                    enroll_by_upload(face_rec, attendance, self, parent=root)
+                set_state(STATE_ENROLL_UPLOAD)
 
             ctk.CTkButton(grid_frame, text="ĐĂNG KÝ (FILE ẢNH)", 
                          command=open_enroll_upload,
