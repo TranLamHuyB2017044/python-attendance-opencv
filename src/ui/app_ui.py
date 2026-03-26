@@ -219,11 +219,6 @@ class AttendanceUI:
                                                target_company=target_cid,
                                                parent=root)
 
-        def open_edit():
-            from src.main import handle_edit_logic
-            if attendance and face_rec and camera:
-                handle_edit_logic(attendance, face_rec, self, camera, parent=root)
-
         # --- Sidebar ---
         sidebar = ctk.CTkFrame(root, width=220, corner_radius=0)
         sidebar.pack(side="left", fill="y")
@@ -336,7 +331,7 @@ class AttendanceUI:
         if role_lower in ['admin', 'company']:
             # 2. Edit User
             ctk.CTkButton(grid_frame, text="CHỈNH SỬA THÔNG TIN", 
-                         command=open_edit,
+                         command=lambda: set_state(STATE_EDIT),
                          height=90, font=("Arial", 15, "bold"),
                          corner_radius=12, fg_color="#5D6D7E", hover_color="#34495E").grid(row=0, column=1, padx=10, pady=10, sticky="nsew")
 

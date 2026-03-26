@@ -397,13 +397,6 @@ def main():
                 ui.current_state = STATE_MENU
                 continue
 
-            elif ui.current_state == STATE_EDIT:
-                face_rec = _get_face_rec()
-                cam      = _get_camera()
-                handle_edit_logic(attendance, face_rec, ui, cam)
-                ui.current_state = STATE_MENU
-                continue
-
             elif ui.current_state == STATE_HISTORY:
                 target_cid = get_target_company(ui, mongo_db, allow_selection=True)
                 if target_cid:
