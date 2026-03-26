@@ -171,7 +171,7 @@ class AttendanceUI:
         screen_h = root.winfo_screenheight()
         root.geometry(f"{w}x{h}+{(screen_w-w)//2}+{(screen_h-h)//2}")
         root.resizable(True, True) # Allow resize
-        root.attributes('-topmost', True)
+        root.attributes('-topmost', False)
 
         selected_state = [STATE_MENU]
         role_lower = str(self.session_role).lower()
@@ -180,7 +180,7 @@ class AttendanceUI:
             """Transitions to a state that needs the main loop (OpenCV windows)."""
             selected_state[0] = state
             self.current_state = state
-            root.destroy()
+            root.quit()
 
         # --- Popup Actions (Don't close dashboard) ---
         def open_list():
@@ -266,6 +266,12 @@ class AttendanceUI:
         status_label.pack(side="left")
 
         def update_service_status():
+            try:
+                if not root.winfo_exists():
+                    return
+            except Exception:
+                return
+
             from src.config import MongoDbConfig
             import time
             nonlocal service_active
@@ -282,12 +288,15 @@ class AttendanceUI:
             except Exception as e:
                 service_active = False
             
-            dot_color = "#28a745" if service_active else "#dc3545"
-            status_text = "DỊCH VỤ ĐANG HOẠT ĐỘNG" if service_active else "DỊCH VỤ ĐANG TẮT (Vui lòng mở file service_main.exe)"
-            
-            dot.configure(fg_color=dot_color)
-            status_label.configure(text=status_text)
-            root.after(3000, update_service_status)
+            try:
+                dot_color = "#28a745" if service_active else "#dc3545"
+                status_text = "DỊCH VỤ ĐANG HOẠT ĐỘNG" if service_active else "DỊCH VỤ ĐANG TẮT (Vui lòng mở file service_main.exe)"
+                
+                dot.configure(fg_color=dot_color)
+                status_label.configure(text=status_text)
+                root.after(3000, update_service_status)
+            except Exception:
+                pass
 
         # Initial update
         update_service_status()
@@ -304,17 +313,19 @@ class AttendanceUI:
             # because main.py will connect directly to the camera.
             if getattr(sys, 'frozen', False):
                 if not service_active:
+                    from tkinter import messagebox
                     messagebox.showwarning("Dịch Vụ Đang Tắt", 
                                          "Dịch vụ Camera ẩn chưa chạy.\n\nHướng dẫn:\n1. Vui lòng mở file 'service_main.exe' trước khi xem live.")
                     return
                 self.use_local_webcam = False
             else:
+                from tkinter import messagebox
                 self.use_local_webcam = messagebox.askyesno("Nguồn Camera (Debug Mode)", 
                                                             "Bạn có muốn mở Webcam máy tính (Camera 0) thay vì luồng RTSP không?")
             
             selected_state[0] = STATE_DETECT
             self.current_state = STATE_DETECT # Also update self.current_state
-            root.destroy()
+            root.quit()
 
         btn_monitor = ctk.CTkButton(grid_frame, text="XEM CAMERA TRỰC TIẾP", 
                                    command=watch_live,
@@ -374,6 +385,10 @@ class AttendanceUI:
                          height=45, corner_radius=8, fg_color="#A569BD", hover_color="#884EA0").pack(side="left", padx=5, expand=True, fill="x")
 
         root.mainloop()
+        try:
+            root.destroy()
+        except:
+            pass
         return selected_state[0]
 
     @staticmethod
@@ -411,7 +426,7 @@ class AttendanceUI:
         except:
             root.geometry(f"{window_width}x{window_height}")
             
-        root.attributes('-topmost', True)
+        root.attributes('-topmost', False)
         root.focus_force()
 
         form_data = {"id": None, "name": None, "bday": None, "files": [], "company_id": None}
@@ -551,7 +566,7 @@ class AttendanceUI:
             
         root.title("Chỉnh sửa thông tin")
         root.geometry("450x550")
-        root.attributes('-topmost', True)
+        root.attributes('-topmost', False)
         root.focus_force()
 
         result = {
@@ -666,7 +681,7 @@ class AttendanceUI:
             
         root.title(f"Bittech AI - {title}")
         root.geometry("800x600")
-        root.attributes('-topmost', True)
+        root.attributes('-topmost', False)
 
         ctk.CTkLabel(root, text=title.upper(), font=("Arial", 20, "bold"), text_color="#1f6aa5").pack(pady=20)
 
@@ -720,7 +735,7 @@ class AttendanceUI:
             
         root.title("Chọn Công ty")
         root.geometry("400x350")
-        root.attributes('-topmost', True)
+        root.attributes('-topmost', False)
 
         tk.Label(root, text="CHỌN CÔNG TY ĐỂ XEM NHÂN VIÊN", font=("Arial", 11, "bold")).pack(pady=10)
 
@@ -770,7 +785,7 @@ class AttendanceUI:
             
         root.title("Chọn Nhân viên")
         root.geometry("600x400")
-        root.attributes('-topmost', True)
+        root.attributes('-topmost', False)
 
         tk.Label(root, text="CHỌN NHÂN VIÊN CẦN CHỈNH SỬA", font=("Arial", 11, "bold")).pack(pady=10)
 
@@ -842,7 +857,7 @@ class AttendanceUI:
             
         root.title("Chọn Hệ thống Upload")
         root.geometry("600x450")
-        root.attributes('-topmost', True)
+        root.attributes('-topmost', False)
 
         tk.Label(root, text="CHỌN HỆ THỐNG ĐỂ UPLOAD CHẤM CÔNG", font=("Arial", 12, "bold")).pack(pady=10)
 
@@ -908,7 +923,7 @@ class AttendanceUI:
             
         root.title(f"Bittech AI - {title}")
         root.geometry("1100x700")
-        root.attributes('-topmost', True)
+        root.attributes('-topmost', False)
 
         try:
             display_initial = datetime.strptime(initial_date, "%Y-%m-%d").strftime("%d-%m-%Y") if initial_date else "CHƯA CHỌN"
@@ -1185,7 +1200,7 @@ class AttendanceUI:
             detail_win = ctk.CTkToplevel(root)
             detail_win.title(f"Chi tiết Log: {l_id}")
             detail_win.geometry("500x550")
-            detail_win.attributes('-topmost', True)
+            detail_win.attributes('-topmost', False)
             
             ctk.CTkLabel(detail_win, text="CHI TIẾT ĐIỂM DANH", font=("Arial", 16, "bold")).pack(pady=15)
             
@@ -1233,7 +1248,7 @@ class AttendanceUI:
             detail_win = ctk.CTkToplevel(root)
             detail_win.title(f"Chi tiết Log Lỗi: {l_id}")
             detail_win.geometry("600x600")
-            detail_win.attributes('-topmost', True)
+            detail_win.attributes('-topmost', False)
             
             ctk.CTkLabel(detail_win, text="CHI TIẾT ĐỒNG BỘ ĐẾN HKB", font=("Arial", 16, "bold"), text_color="#e74c3c").pack(pady=15)
             
@@ -1305,7 +1320,7 @@ class AttendanceUI:
             
         root.title("Bittech AI - Kết nối AuthService")
         root.geometry("1100x650")
-        root.attributes('-topmost', True)
+        root.attributes('-topmost', False)
 
         ctk.CTkLabel(root, text="DANH SÁCH KẾT NỐI HỆ THỐNG", font=("Arial", 22, "bold"), text_color="#1f6aa5").pack(pady=20)
 
@@ -1390,7 +1405,7 @@ class AttendanceUI:
             
         root.title(f"Nhân viên từ {system_name}")
         root.geometry("1000x700")
-        root.attributes('-topmost', True)
+        root.attributes('-topmost', False)
 
         ctk.CTkLabel(root, text=f"ĐỒNG BỘ NHÂN VIÊN: {system_name.upper()}", font=("Arial", 20, "bold"), text_color="#1f6aa5").pack(pady=20)
 
@@ -1449,7 +1464,7 @@ class AttendanceUI:
             
         root.title("Bittech AI - Quản lý công ty")
         root.geometry("800x600")
-        root.attributes('-topmost', True)
+        root.attributes('-topmost', False)
 
         ctk.CTkLabel(root, text="DANH SÁCH CÔNG TY TRÊN HỆ THỐNG", font=("Arial", 20, "bold"), text_color="#1f6aa5").pack(pady=20)
 
@@ -1476,7 +1491,7 @@ class AttendanceUI:
             add_win = ctk.CTkToplevel(root)
             add_win.title("Thêm công ty mới")
             add_win.geometry("400x400")
-            add_win.attributes('-topmost', True)
+            add_win.attributes('-topmost', False)
             
             ctk.CTkLabel(add_win, text="THÔNG TIN CÔNG TY", font=("Arial", 16, "bold")).pack(pady=20)
             
@@ -1539,7 +1554,7 @@ class AttendanceUI:
             
         root.title("Bittech AI - Quản lý tài khoản")
         root.geometry("800x600")
-        root.attributes('-topmost', True)
+        root.attributes('-topmost', False)
 
         ctk.CTkLabel(root, text="DANH SÁCH TÀI KHOẢN HỆ THỐNG", font=("Arial", 20, "bold"), text_color="#1f6aa5").pack(pady=20)
 
@@ -1564,7 +1579,7 @@ class AttendanceUI:
             add_win = ctk.CTkToplevel(root)
             add_win.title("Thêm tài khoản mới")
             add_win.geometry("400x500")
-            add_win.attributes('-topmost', True)
+            add_win.attributes('-topmost', False)
             
             ctk.CTkLabel(add_win, text="THÊM TÀI KHOẢN", font=("Arial", 16, "bold")).pack(pady=20)
             
@@ -1653,7 +1668,7 @@ class AttendanceUI:
         pos_x = (screen_width // 2) - (window_width // 2)
         pos_y = (screen_height // 2) - (window_height // 2)
         login_root.geometry(f"{window_width}x{window_height}+{pos_x}+{pos_y}")
-        login_root.attributes('-topmost', True)
+        login_root.attributes('-topmost', False)
         login_root.resizable(False, False)
         
         login_status = {"authenticated": False}
@@ -1723,7 +1738,7 @@ class AttendanceUI:
             
         root.title("Bittech AI - Cài đặt hệ thống")
         root.geometry("650x600")
-        root.attributes('-topmost', True)
+        root.attributes('-topmost', False)
         root.resizable(False, False)
 
         ctk.CTkLabel(root, text="CẤU HÌNH HỆ THỐNG", font=("Arial", 20, "bold"), text_color="#1f6aa5").pack(pady=20)

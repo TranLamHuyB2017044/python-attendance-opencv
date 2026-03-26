@@ -8,7 +8,7 @@ class CTkDatePicker(ctk.CTkToplevel):
         super().__init__(parent)
         self.title(title)
         self.geometry("300x380") if ok_button_text else self.geometry("300x340")
-        self.attributes('-topmost', True)
+        self.attributes('-topmost', False)
         self.resizable(False, False)
         
         # Appearance

@@ -158,7 +158,7 @@ def enroll_from_camera(camera, face_rec, attendance, ui):
             if existing:
                 from tkinter import messagebox
                 import tkinter as tk
-                root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
+                root = tk.Tk(); root.withdraw(); root.attributes("-topmost", False)
                 if messagebox.askyesno("Xác nhận", f"Mã nhân viên '{user_id}' đã tồn tại trong hệ thống.\n\nBạn có muốn CẬP NHẬT dữ liệu mới nhất cho nhân viên này không?"):
                     force_upd = True
                 else:
@@ -172,7 +172,7 @@ def enroll_from_camera(camera, face_rec, attendance, ui):
             if not ok:
                 from tkinter import messagebox
                 import tkinter as tk
-                root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
+                root = tk.Tk(); root.withdraw(); root.attributes("-topmost", False)
                 messagebox.showerror("Lỗi đăng ký", f"Không thể lưu nhân viên: {msg}")
                 root.destroy()
                 return
@@ -192,7 +192,7 @@ def enroll_from_camera(camera, face_rec, attendance, ui):
                 logger.error(f"Failed to save face data to Qdrant for {user_id}")
                 from tkinter import messagebox
                 import tkinter as tk
-                root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
+                root = tk.Tk(); root.withdraw(); root.attributes("-topmost", False)
                 messagebox.showerror("Lỗi", "Đã lưu thông tin nhân viên nhưng thất bại khi đăng ký khuôn mặt.")
                 root.destroy()
     
@@ -224,7 +224,7 @@ def enroll_by_upload(face_rec, attendance, ui, parent=None):
         for i, path in enumerate(file_paths):
             try:
                 logger.info(f"Processing image {i+1}/{len(file_paths)}: {path}")
-                img = cv2.imread(path)
+                img = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
                 if img is None:
                     logger.error(f"Could not read image: {path}")
                     continue
@@ -257,7 +257,7 @@ def enroll_by_upload(face_rec, attendance, ui, parent=None):
             if existing:
                 from tkinter import messagebox
                 import tkinter as tk
-                root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
+                root = tk.Tk(); root.withdraw(); root.attributes("-topmost", False)
                 if messagebox.askyesno("Xác nhận", f"Mã nhân viên '{u_id}' đã tồn tại trong hệ thống.\n\nBạn có muốn CẬP NHẬT dữ liệu mới nhất cho nhân viên này không?"):
                     force_upd = True
                 else:
@@ -271,7 +271,7 @@ def enroll_by_upload(face_rec, attendance, ui, parent=None):
             if not ok:
                 from tkinter import messagebox
                 import tkinter as tk
-                root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
+                root = tk.Tk(); root.withdraw(); root.attributes("-topmost", False)
                 messagebox.showerror("Lỗi đăng ký", f"Không thể lưu nhân viên: {msg}")
                 root.destroy()
                 return
@@ -285,7 +285,7 @@ def enroll_by_upload(face_rec, attendance, ui, parent=None):
                 import tkinter as tk
                 root = tk.Tk()
                 root.withdraw()
-                root.attributes("-topmost", True)
+                root.attributes("-topmost", False)
                 messagebox.showinfo("Thành công", f"Đã đăng ký (Upload) thành công nhân viên: {u_name}")
                 root.destroy()
             except:
@@ -329,42 +329,47 @@ def handle_edit_logic(attendance, face_rec, ui, camera, parent=None):
                     filter_company.append(c["uuid"])
             logger.info(f"Company user '{ui.session_username}' editing merged list for IDs: {filter_company}")
 
-    # 2. Get merged employee list (MongoDB + Qdrant) for this company ONLY
-    mongo_employees = mongo_db.get_all_employees(company_id=filter_company)
-    qdrant_employees = attendance.get_all_users(company_id=filter_company)
-    
-    # Merge employee lists
-    all_employees = []
-    seen_ids = set()
-    
-    # First add all from Qdrant (have face data)
-    for emp in qdrant_employees:
-        u_id_str = str(emp['user_id'])
-        if u_id_str not in seen_ids:
-            all_employees.append({
-                'user_id': u_id_str,
-                'user_name': emp['user_name'],
-                'birthday': emp['birthday'],
-                'has_face': True
-            })
-            seen_ids.add(u_id_str)
-    
-    # Then add MongoDB-only employees (no face data yet)
-    for emp in mongo_employees:
-        # Normalize to string for comparison
-        if str(emp['user_id']) not in seen_ids:
-            all_employees.append({
-                'user_id': emp['user_id'],
-                'user_name': emp['name'],
-                'birthday': emp.get('birthday', 'N/A'),
-                'has_face': False
-            })
-            seen_ids.add(str(emp['user_id']))
-    
-    # 3. Pick User from merged list
-    u_id = ui.pick_user_ui(all_employees, parent=parent)
-    
-    if u_id:
+    # 2. Start editing loop
+    while True:
+        # Get merged employee list (MongoDB + Qdrant) for this company ONLY
+        mongo_employees = mongo_db.get_all_employees(company_id=filter_company)
+        qdrant_employees = attendance.get_all_users(company_id=filter_company)
+        
+        # Merge employee lists
+        all_employees = []
+        seen_ids = set()
+        
+        # First add all from Qdrant (have face data)
+        for emp in qdrant_employees:
+            u_id_str = str(emp['user_id'])
+            if u_id_str not in seen_ids:
+                all_employees.append({
+                    'user_id': u_id_str,
+                    'user_name': emp['user_name'],
+                    'birthday': emp['birthday'],
+                    'has_face': True
+                })
+                seen_ids.add(u_id_str)
+        
+        # Then add MongoDB-only employees (no face data yet)
+        for emp in mongo_employees:
+            # Normalize to string for comparison
+            if str(emp['user_id']) not in seen_ids:
+                all_employees.append({
+                    'user_id': emp['user_id'],
+                    'user_name': emp['name'],
+                    'birthday': emp.get('birthday', 'N/A'),
+                    'has_face': False
+                })
+                seen_ids.add(str(emp['user_id']))
+        
+        # 3. Pick User from merged list
+        u_id = ui.pick_user_ui(all_employees, parent=parent)
+        
+        if not u_id:
+            logger.info("No user selected or selection cancelled. Exiting edit mode.")
+            break
+            
         logger.info(f"Selected user_id for edit: {u_id}")
         
         # 4. Get user info - try Qdrant first, then MongoDB
@@ -437,7 +442,7 @@ def handle_edit_logic(attendance, face_rec, ui, camera, parent=None):
                         if len(samples) >= 1:
                             attendance.upsert_user(edit_res["name"], u_id, edit_res["bday"], samples, clear_old=True, company_id=target_company)
                             from tkinter import messagebox
-                            root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
+                            root = tk.Tk(); root.withdraw(); root.attributes("-topmost", False)
                             messagebox.showinfo("Thành công", f"Đã đăng ký khuôn mặt cho {edit_res['name']}")
                             root.destroy()
                     finally:
@@ -450,23 +455,44 @@ def handle_edit_logic(attendance, face_rec, ui, camera, parent=None):
                     mongo_db.save_employee(str(u_id), edit_res["name"], edit_res["bday"], target_company, force_update=True)
                     
                     from tkinter import filedialog
-                    root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
-                    file_paths = filedialog.askopenfilenames(title="Chọn ảnh khuôn mặt", filetypes=[("Image files", "*.jpg *.jpeg *.png *.webp")])
-                    root.destroy()
+                    # Dùng parent window (CTk dashboard) thay vì tạo tk.Tk() mới,
+                    # vì tạo tk.Tk() mới khi event loop CTk đang chạy sẽ làm filedialog
+                    # mở ra rồi tự đóng ngay lập tức.
+                    _dialog_parent = parent  # có thể là CTkToplevel hoặc None
+                    if _dialog_parent is None:
+                        _tmp_root = tk.Tk()
+                        _tmp_root.withdraw()
+                        _tmp_root.attributes("-topmost", False)
+                        _dialog_parent = _tmp_root
+                    else:
+                        _tmp_root = None
+                    
+                    file_paths = filedialog.askopenfilenames(
+                        title="Chọn ảnh khuôn mặt",
+                        filetypes=[("Image files", "*.jpg *.jpeg *.png *.webp *.bmp")],
+                        parent=_dialog_parent
+                    )
+                    
+                    if _tmp_root is not None:
+                        _tmp_root.destroy()
                     
                     if file_paths:
                         samples = []
                         for fp in file_paths[:5]:
-                            img = cv2.imread(fp)
+                            img = cv2.imdecode(np.fromfile(fp, dtype=np.uint8), cv2.IMREAD_COLOR)
                             if img is not None:
                                 faces = face_rec.detect_and_extract(img)
                                 if faces: samples.append(faces[0].normed_embedding)
                         
                         if len(samples) >= 1:
                             attendance.upsert_user(edit_res["name"], u_id, edit_res["bday"], samples, clear_old=True, company_id=target_company)
-                            root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
-                            messagebox.showinfo("Thành công", f"Đã cập nhật {len(samples)} ảnh cho {edit_res['name']}")
-                            root.destroy()
+                            from tkinter import messagebox
+                            if parent:
+                                messagebox.showinfo("Thành công", f"Đã cập nhật {len(samples)} ảnh cho {edit_res['name']}", parent=parent)
+                            else:
+                                _msg_root = tk.Tk(); _msg_root.withdraw(); _msg_root.attributes("-topmost", False)
+                                messagebox.showinfo("Thành công", f"Đã cập nhật {len(samples)} ảnh cho {edit_res['name']}")
+                                _msg_root.destroy()
                 else:
                     # Only update info
                     mongo_db.save_employee(str(u_id), edit_res["name"], edit_res["bday"], target_company, force_update=True)
@@ -678,7 +704,7 @@ def main():
                     if not camera.connect():
                         from tkinter import messagebox
                         import tkinter as tk
-                        root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
+                        root = tk.Tk(); root.withdraw(); root.attributes("-topmost", False)
                         messagebox.showerror("Lỗi", f"Không thể kết nối camera tại {cam_ip}!")
                         root.destroy()
                         ui.current_state = STATE_MENU

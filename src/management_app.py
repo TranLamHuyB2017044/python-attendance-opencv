@@ -153,7 +153,7 @@ def main():
         logger.critical(f"Khoi tao that bai: {e}")
         from tkinter import messagebox
         import tkinter as tk
-        root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
+        root = tk.Tk(); root.withdraw(); root.attributes("-topmost", False)
         messagebox.showerror("Lỗi Khởi Tạo", f"Không thể khởi động hệ thống:\n{e}")
         root.destroy()
         return
