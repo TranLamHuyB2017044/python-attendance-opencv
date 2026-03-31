@@ -1233,7 +1233,80 @@ class AttendanceUI:
 
         def on_view_log():
             sel = tree.selection()
-            if not sel: return messagebox.showwarning("!", "Vui lòng chọn 1 dòng để xem log")
+            if not sel:
+                # View global system logs
+                detail_win = ctk.CTkToplevel(root)
+                detail_win.title("Nhật ký Lỗi Tổng (System Logs)")
+                detail_win.geometry("900x600")
+                detail_win.transient(root)
+                detail_win.grab_set()
+                detail_win.focus_force()
+                
+                ctk.CTkLabel(detail_win, text="DANH SÁCH LỖI HỆ THỐNG / SYNC / WEBHOOK", font=("Arial", 16, "bold"), text_color="#e74c3c").pack(pady=15)
+                
+                filter_frame = ctk.CTkFrame(detail_win, fg_color="transparent")
+                filter_frame.pack(fill="x", padx=20, pady=(0, 10))
+                
+                error_tree_frame = ctk.CTkFrame(detail_win)
+                error_tree_frame.pack(fill="both", expand=True, padx=20, pady=(0, 20))
+                
+                scrollbar = ttk.Scrollbar(error_tree_frame)
+                scrollbar.pack(side="right", fill="y")
+                
+                cols = ("time", "level", "source", "message")
+                err_tree = ttk.Treeview(error_tree_frame, columns=cols, show="headings", yscrollcommand=scrollbar.set)
+                scrollbar.config(command=err_tree.yview)
+                
+                err_tree.heading("time", text="Thời gian")
+                err_tree.heading("level", text="Mức độ")
+                err_tree.heading("source", text="Nguồn")
+                err_tree.heading("message", text="Nội dung lỗi")
+                
+                err_tree.column("time", width=150, anchor="center")
+                err_tree.column("level", width=80, anchor="center")
+                err_tree.column("source", width=200)
+                err_tree.column("message", width=400)
+                err_tree.pack(fill="both", expand=True)
+                
+                def fetch_sys_logs():
+                    for item in err_tree.get_children(): err_tree.delete(item)
+                    if not mongo_db: return
+                    try:
+                        logs = list(mongo_db.db.system_logs.find().sort("_id", -1).limit(200))
+                        for lg in logs:
+                            time_val = lg.get("time_str", str(lg.get("timestamp", "")))
+                            err_tree.insert("", tk.END, values=(
+                                time_val,
+                                lg.get("level", ""),
+                                lg.get("source", ""),
+                                lg.get("message", "")
+                            ))
+                    except Exception as e:
+                        print("Fetch sys logs error:", e)
+                        
+                fetch_sys_logs()
+                ctk.CTkButton(filter_frame, text="LÀM MỚI", width=100, command=fetch_sys_logs).pack(side="left")
+                
+                def on_msg_db_click(event):
+                    sel_item = err_tree.selection()
+                    if not sel_item: return
+                    msg = err_tree.item(sel_item[0])['values'][3]
+                    
+                    msg_win = ctk.CTkToplevel(detail_win)
+                    msg_win.title("Chi tiết lỗi")
+                    msg_win.geometry("600x400")
+                    msg_win.transient(detail_win)
+                    msg_win.grab_set()
+                    msg_win.focus_force()
+                    
+                    txt = ctk.CTkTextbox(msg_win)
+                    txt.pack(fill="both", expand=True, padx=10, pady=10)
+                    txt.insert("1.0", str(msg))
+                    txt.configure(state="disabled")
+                    
+                err_tree.bind("<Double-1>", on_msg_db_click)
+                return
+
             if len(sel) > 1: return messagebox.showwarning("!", "Chỉ chọn 1 dòng để xem chi tiết log lỗi")
             
             l_id = str(tree.item(sel[0])['values'][0])
@@ -1243,7 +1316,9 @@ class AttendanceUI:
             detail_win = ctk.CTkToplevel(root)
             detail_win.title(f"Chi tiết Log Lỗi: {l_id}")
             detail_win.geometry("600x600")
-            detail_win.attributes('-topmost', False)
+            detail_win.transient(root)
+            detail_win.grab_set()
+            detail_win.focus_force()
             
             ctk.CTkLabel(detail_win, text="CHI TIẾT ĐỒNG BỘ ĐẾN HKB", font=("Arial", 16, "bold"), text_color="#e74c3c").pack(pady=15)
             
@@ -1255,10 +1330,23 @@ class AttendanceUI:
                 hist_box.insert("1.0", "Không có lịch sử upload hoặc chưa từng đẩy lên máy chủ.")
             else:
                 import json
+                import datetime
                 text_content = ""
                 for idx, h in enumerate(reversed(history)):  # Xem log mới nhất trước
                     text_content += f"--- LẦN THỬ THỨ {len(history)-idx} ---\n"
-                    text_content += f"Thời gian: {h.get('timestamp')}\n"
+                    
+                    ts = h.get('timestamp')
+                    ts_str = str(ts)
+                    if isinstance(ts, datetime.datetime):
+                        ts_str = (ts + datetime.timedelta(hours=7)).strftime("%Y-%m-%d %H:%M:%S") + " (GMT+7)"
+                    elif isinstance(ts, str):
+                        try:
+                            dt = datetime.datetime.fromisoformat(ts.replace('Z', ''))
+                            ts_str = (dt + datetime.timedelta(hours=7)).strftime("%Y-%m-%d %H:%M:%S") + " (GMT+7)"
+                        except:
+                            pass
+                            
+                    text_content += f"Thời gian: {ts_str}\n"
                     text_content += f"Hệ thống (UUID): {h.get('system_id')}\n"
                     text_content += f"Trạng thái: {h.get('status')}\n"
                     text_content += f"Lời nhắn: {h.get('message')}\n"

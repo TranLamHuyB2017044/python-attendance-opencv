@@ -105,6 +105,8 @@ class FaceTracker:
                     voice_text = f"Xin chào {user_name}, bạn đã chấm công {action_vn} thành công"
                 elif status == "SPOOF":
                     voice_text = "Cảnh báo: Phát hiện hành vi giả mạo khuôn mặt"
+                elif status == "COOLDOWN":
+                    voice_text = f"{user_name} đã truy cập gần đây"
                 else:
                     # Default for unknown/unauthorized
                     voice_text = "Xin vui lòng thử lại"
@@ -520,6 +522,7 @@ class FaceTracker:
                                         f_data['status'] = 'COOLDOWN'
                                         f_data['user_data'] = user_data
                                         f_data['cooldown_remaining'] = int(RecognitionConfig.COOLDOWN_SECONDS - elapsed)
+                                        self._send_user_webhook(user_id, user_name, "COOLDOWN", is_unknown=False)
                                     else:
                                         f_data['status'] = 'RECOGNIZED'
                                         f_data['user_data'] = user_data

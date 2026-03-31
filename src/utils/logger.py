@@ -44,6 +44,30 @@ def setup_logger() -> None:
         encoding="utf-8",
         catch=True, # Prevent app crash if file logging fails
     )
+
+    # Add MongoDB sink for WARNING and ERROR levels
+    def mongodb_sink(message):
+        record = message.record
+        try:
+            from src.attendance.mongodb_mgr import mongo_db
+            import datetime
+            doc = {
+                "timestamp": datetime.datetime.utcnow(),
+                "time_str": record["time"].strftime("%Y-%m-%d %H:%M:%S"),
+                "level": record["level"].name,
+                "message": record["message"],
+                "source": f"{record['name']}:{record['function']}:{record['line']}"
+            }
+            mongo_db.db.system_logs.insert_one(doc)
+        except Exception:
+            pass
+
+    logger.add(
+        mongodb_sink,
+        level="SUCCESS", # SUCCESS = 25, captures SUCCESS, WARNING, ERROR, CRITICAL
+        enqueue=True, # Run in background thread automatically
+        catch=True
+    )
     
     logger.info("Logger initialized successfully")
 
