@@ -118,7 +118,7 @@ class FaceTracker:
                     "voice_text": voice_text,
                     "time": time_str
                 }
-                
+
                 response = requests.post(
                     WebhookConfig.USER_WEBHOOK_URL,
                     json=payload,
@@ -132,15 +132,76 @@ class FaceTracker:
                     logger.success(f"📊 Đây là webhook thành công lần thứ {count} của nhân viên này.")
                     logger.success(f"=====================================================")
                 else:
-                    logger.warning(f"WEBHOOK FAILED -> [ {user_name} ] - Code: {response.status_code}")
+                    error_msg = f"WEBHOOK FAILED -> [ {user_name} ] - Code: {response.status_code}"
+                    logger.warning(error_msg)
+                    from src.utils.telegram_bot import send_telegram_report
+                    send_telegram_report("Webhook Fail", f"Nhân viên: {user_name} ({user_id})\nStatus: {status}\nHTTP Code: {response.status_code}")
             except Exception as e:
-                logger.error(f"Error sending webhook: {e}")
+                error_msg = f"Error sending webhook: {e}"
+                logger.error(error_msg)
+                from src.utils.telegram_bot import send_telegram_report
+                send_telegram_report("Webhook Fail", f"Nhân viên: {user_name} ({user_id})\nStatus: {status}\nError: {str(e)}")
 
         # Run in background to not block the tracking loop
         threading.Thread(target=thread_task, daemon=True).start()
 
     def _get_center(self, bbox):
         return (int((bbox[0] + bbox[2]) / 2), int((bbox[1] + bbox[3]) / 2))
+
+    def _auto_learn_face(self, frame, face, user_id, user_name, birthday, company_id, attendance_mgr):
+        """Tự động học mẫu khuôn mặt mới từ ảnh chấm công"""
+        # Auto-learn logic implementation
+        def task():
+            try:
+                # 1. Trích xuất và nén ảnh khuôn mặt
+                bbox = face.bbox.astype(int)
+                h, w = frame.shape[:2]
+                
+                # Mở rộng bbox một chút để lấy ảnh đẹp hơn ( enrollment-style )
+                pad_w = int((bbox[2] - bbox[0]) * 0.2)
+                pad_h = int((bbox[3] - bbox[1]) * 0.2)
+                
+                x1 = max(0, bbox[0] - pad_w)
+                y1 = max(0, bbox[1] - pad_h)
+                x2 = min(w, bbox[2] + pad_w)
+                y2 = min(h, bbox[3] + pad_h)
+                
+                face_crop = frame[y1:y2, x1:x2]
+                if face_crop.size == 0:
+                    return
+
+                success, encoded_img = cv2.imencode('.webp', face_crop, [int(cv2.IMWRITE_WEBP_QUALITY), 80])
+                if not success:
+                    return
+                
+                image_blob = encoded_img.tobytes()
+                
+                # 2. Lưu vào MongoDB
+                from src.attendance.mongodb_mgr import mongo_db
+                image_id = mongo_db.save_enrollment_image(user_id, company_id, image_blob)
+                if not image_id:
+                    logger.warning(f"Auto-learn: Failed to save enrollment image for {user_id}")
+                    return
+                
+                # 3. Lưu vào Qdrant với image_id
+                ok = attendance_mgr.upsert_user(
+                    user_name=user_name,
+                    user_id=user_id,
+                    birthday=birthday,
+                    embeddings=[face.normed_embedding],
+                    company_id=company_id,
+                    enrollment_image_ids=[image_id]
+                )
+                
+                if ok:
+                    logger.info(f"Auto-learned new sample for {user_name} (ID: {user_id}), total points updated.")
+                else:
+                    logger.warning(f"Auto-learn: Failed to update Qdrant for {user_id}")
+                    
+            except Exception as e:
+                logger.error(f"Error in _auto_learn_face: {e}")
+
+        threading.Thread(target=task, daemon=True).start()
 
     def _save_log_with_bbox(self, frame, face, user_id, user_name, score, is_known=True, status=None, company_id=None, unknown_attempt=0, birthday="N/A", vector_count=0):
         """Sync state check + Async heavy saving."""
@@ -261,7 +322,6 @@ class FaceTracker:
                 if is_known:
                     meta_info = [
                         f"ID: {user_id}",
-                        f"N-sinh: {birthday}",
                         f"Gio: {current_time_str}",
                         f"Mau: {vector_count}"
                     ]
@@ -501,6 +561,15 @@ class FaceTracker:
                                     f_data['status'] = 'SPOOF_DETECTED'
                                     f_data['last_attempt_time'] = current_time # Gán để cooldown retry
                                     self._send_user_webhook("Spoof", "Ke gia mao", "SPOOF", is_unknown=True)
+                                    
+                                    # Send Telegram report for Spoofing
+                                    from src.utils.telegram_bot import send_telegram_report
+                                    send_telegram_report(
+                                        "Spoof Detected", 
+                                        f"Phát hiện hành vi giả mạo!\nID: {matched_id}\nSpoof Score: {spoof_score:.2f}",
+                                        image=frame
+                                    )
+                                    
                                     updated_faces_map[matched_id] = f_data
                                     continue  # Không log chấm công
                             # ── RECOGNIZED ──────────────────────────────────────
@@ -540,9 +609,8 @@ class FaceTracker:
 
                                 # Auto-enrich nếu chưa đủ mẫu
                                 if user_data.get('vector_count', 0) < 10:
-                                    attendance_mgr.upsert_user(user_name=user_name, user_id=user_id,
-                                                               birthday=user_data.get('birthday', 'N/A'),
-                                                               embeddings=[face.normed_embedding], company_id=target_cid)
+                                    self._auto_learn_face(frame, face, user_id, user_name, user_data.get('birthday', 'N/A'), target_cid, attendance_mgr)
+                                    
                                 f_data['unknown_attempts'] = 0
 
                         else:

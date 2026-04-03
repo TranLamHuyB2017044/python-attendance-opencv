@@ -14,8 +14,15 @@ if sys.stderr is None:
     sys.stderr = open(os.devnull, 'w', encoding='utf-8')
 
 if getattr(sys, 'frozen', False):
+    # Nếu chạy từ file .exe
     base_dir = sys._MEIPASS
+    # --- THÊM ĐƯỜNG DẪN NGOÀI ĐỂ HỖ TRỢ LIVE UPDATE (Dành cho Loader + Source flow) ---
+    # Cho phép ghi đè logic bằng cách copy file .py vào thư mục 'src' bên cạnh file .exe
+    exe_dir = os.path.dirname(sys.executable)
+    if exe_dir not in sys.path:
+        sys.path.insert(0, exe_dir) 
 else:
+    # Nếu chạy từ code python
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 if base_dir not in sys.path:
@@ -103,13 +110,13 @@ def main():
     force_single_instance("ManagementApp")
 
     # --- 1. HIỆN MÀN HÌNH LOADING NGAY LẬP TỨC ---
-    win_loading = "BITTECH AI SYSTEM"
+    win_loading = "BITTECH AI"
     cv2.namedWindow(win_loading, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(win_loading, 1280, 720)
 
     loading_frame = np.zeros((720, 1280, 3), dtype=np.uint8)
     cv2.rectangle(loading_frame, (0, 0), (1280, 720), (30, 30, 30), -1)
-    cv2.putText(loading_frame, "BITTECH AI SYSTEM", (440, 300),
+    cv2.putText(loading_frame, "BITTECH AI", (440, 300),
                 cv2.FONT_HERSHEY_DUPLEX, 1.2, (255, 255, 255), 2)
     cv2.putText(loading_frame, "DANG KHOI TAO HE THONG... VUI LONG CHO TRONG GIAY LAT", (320, 380),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 1)
@@ -137,7 +144,7 @@ def main():
         cv2.rectangle(loading_frame, (440, 420), (840, 430), (0, 255, 0), -1)
         cv2.imshow(win_loading, loading_frame)
         cv2.waitKey(1)
-        ui = AttendanceUI()
+        ui = AttendanceUI(is_manager_app=True)
 
         # Check service status immediately
         status_doc = mongo_db.db.system_status.find_one({
@@ -158,7 +165,7 @@ def main():
         root.destroy()
         return
 
-    win_name = "BITTECH AI SYSTEM"
+    win_name = "BITTECH AI"
     try:
         cv2.destroyAllWindows()
     except Exception:
@@ -393,7 +400,7 @@ def main():
                             all_employees.append({'user_id': emp['user_id'], 'user_name': emp['name'],
                                                   'birthday': emp.get('birthday', 'N/A'), 'has_face': False})
                             seen_ids.add(str(emp['user_id']))
-                    ui.show_user_list_ui(all_employees)
+                    ui.show_user_list_ui(all_employees, attendance_manager=attendance)
                 ui.current_state = STATE_MENU
                 continue
 

@@ -1,5 +1,7 @@
 import pymongo
 import datetime
+import bcrypt
+from typing import Optional
 from loguru import logger
 import cv2
 import numpy as np
@@ -21,6 +23,7 @@ class MongoDBManager:
             self.auth_services = self.db["auth_services"] # HKB/Auth Connections
             self.settings = self.db["settings"] # System Settings
             self.employees = self.db["employees"] # Metadata for registered employees
+            self.enrollment_images = self.db["enrollment_images"] # Enrollment images
             
             # Create indexes for faster queries
             self.logs.create_index([("company_id", 1), ("date", -1)])
@@ -36,6 +39,7 @@ class MongoDBManager:
             self.settings.create_index([("key", 1), ("username", 1)], unique=True)
             
             self.employees.create_index([("company_id", 1), ("user_id", 1)], unique=True)
+            self.enrollment_images.create_index([("user_id", 1), ("company_id", 1)])
             
             logger.info("Connected to MongoDB Cloud successfully")
         except Exception as e:
@@ -280,16 +284,35 @@ class MongoDBManager:
             return None
 
     def verify_login(self, username, password):
-        """Verify user login and return role info."""
-        user = self.users.find_one({"username": username, "password": password})
-        if user:
-            return {
-                "role": user.get("role"),
-                "company_id": user.get("company_id"),
-                "username": user.get("username"),
-                "user_id": user.get("user_id") # Trả về user_id (int) nếu có
-            }
-        return None
+        """Verify login credentials with bcrypt hashing support and return role info."""
+        try:
+            user = self.users.find_one({"username": username})
+            if user:
+                stored_password = user.get("password", "")
+                is_valid = False
+                
+                # 1. Try bcrypt verification first
+                try:
+                    if bcrypt.checkpw(password.encode('utf-8'), stored_password.encode('utf-8')):
+                        is_valid = True
+                except Exception:
+                    # 2. Fallback to plain text comparison (for existing unhashed passwords)
+                    if stored_password == password:
+                        is_valid = True
+                        # Auto-hash the password now for future security
+                        self.update_user_password(username, password)
+                
+                if is_valid:
+                    return {
+                        "role": user.get("role"),
+                        "company_id": user.get("company_id"),
+                        "username": user.get("username"),
+                        "user_id": user.get("user_id") # Trả về user_id (int) nếu có
+                    }
+            return None
+        except Exception as e:
+            logger.error(f"MongoDB: Error during login verification: {e}")
+            return None
 
     def save_employee(self, user_id, name, birthday, company_id, force_update=True):
         """
@@ -390,9 +413,13 @@ class MongoDBManager:
         try:
             if self.users.find_one({"username": username}):
                 return False, "Username already exists"
+            
+            # Hash the password
+            hashed_pwd = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+            
             self.users.insert_one({
                 "username": username,
-                "password": password,
+                "password": hashed_pwd,
                 "role": role,
                 "company_id": company_id,
                 "created_at": datetime.datetime.utcnow()
@@ -401,9 +428,98 @@ class MongoDBManager:
         except Exception as e:
             return False, str(e)
 
+    def save_enrollment_image(self, user_id: str, company_id: str, image_blob: bytes, image_path: Optional[str] = None) -> Optional[str]:
+        """
+        Save an enrollment image to MongoDB.
+        Returns the ObjectId of the saved image.
+        """
+        try:
+            entry = {
+                "user_id": str(user_id),
+                "company_id": str(company_id),
+                "image_webp": image_blob,
+                "image_path": image_path, # Original path if uploaded from file
+                "created_at": datetime.datetime.utcnow()
+            }
+            result = self.enrollment_images.insert_one(entry)
+            logger.info(f"MongoDB: Saved enrollment image for user {user_id} (ID: {result.inserted_id})")
+            return str(result.inserted_id)
+        except Exception as e:
+            logger.error(f"MongoDB: Failed to save enrollment image for user {user_id}: {e}")
+            return None
+
+    def get_enrollment_image(self, image_id: str) -> Optional[bytes]:
+        """
+        Retrieve binary enrollment image data from MongoDB.
+        """
+        from bson.objectid import ObjectId
+        try:
+            image_doc = self.enrollment_images.find_one({"_id": ObjectId(image_id)})
+            return image_doc.get("image_webp") if image_doc else None
+        except Exception as e:
+            logger.error(f"MongoDB: Failed to get enrollment image {image_id}: {e}")
+            return None
+
+    def delete_enrollment_image(self, image_id: str) -> bool:
+        """
+        Delete an enrollment image from MongoDB.
+        """
+        from bson.objectid import ObjectId
+        try:
+            result = self.enrollment_images.delete_one({"_id": ObjectId(image_id)})
+            if result.deleted_count > 0:
+                logger.info(f"MongoDB: Deleted enrollment image {image_id}")
+                return True
+            return True
+        except Exception as e:
+            logger.error(f"MongoDB: Failed to delete enrollment image {image_id}: {e}")
+            return False
+
+    def delete_enrollment_images_by_user(self, user_id: str) -> bool:
+        """
+        Deletes all enrollment images associated with a specific user_id.
+        """
+        try:
+            result = self.enrollment_images.delete_many({"user_id": user_id})
+            if result.deleted_count > 0:
+                logger.info(f"Successfully deleted {result.deleted_count} enrollment images for user_id: {user_id}")
+                return True
+            else:
+                logger.info(f"No enrollment images found for user_id: {user_id} to delete.")
+                return False
+        except Exception as e:
+            logger.error(f"Error deleting enrollment images for user_id {user_id}: {e}")
+            return False
+
     def get_all_companies(self):
         """Get list of all companies."""
         return list(self.companies.find().sort("name", 1))
+
+    def get_logs_by_user(self, user_id: str) -> list:
+        """
+        Get all attendance logs for a specific user.
+        """
+        try:
+            return list(self.logs.find({"user_id": str(user_id)}).sort("timestamp", -1))
+        except Exception as e:
+            logger.error(f"MongoDB: Failed to get logs for user {user_id}: {e}")
+            return []
+
+    def delete_log(self, log_id: str) -> bool:
+        """
+        Delete an attendance log from MongoDB.
+        """
+        from bson.objectid import ObjectId
+        try:
+            result = self.logs.delete_one({"_id": ObjectId(log_id)})
+            if result.deleted_count > 0:
+                logger.info(f"MongoDB: Deleted log {log_id}")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"MongoDB: Failed to delete log {log_id}: {e}")
+            return False
+
 
     def get_company_name(self, company_id):
         """Retrieve company name from its ID (with cache)."""
@@ -430,6 +546,27 @@ class MongoDBManager:
     def get_all_cloud_users(self):
         """Get list of all management users."""
         return list(self.users.find().sort("username", 1))
+
+    def update_user_password(self, username, new_password):
+        """Update a management user password with hashing."""
+        try:
+            hashed_pwd = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+            self.users.update_one(
+                {"username": username},
+                {"$set": {"password": hashed_pwd, "updated_at": datetime.datetime.utcnow()}}
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Failed to update password for {username}: {e}")
+            return False
+
+    def get_user_by_username(self, username):
+        """Find a user by username."""
+        return self.users.find_one({"username": username})
+
+    def get_user_by_email(self, email):
+        """Find a user by email."""
+        return self.users.find_one({"email": email})
 
     def delete_user(self, username):
         """Delete a management user."""

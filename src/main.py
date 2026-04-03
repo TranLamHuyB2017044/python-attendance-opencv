@@ -93,8 +93,16 @@ def enroll_from_camera(camera, face_rec, attendance, ui):
     user_id, user_name, birthday, _, selected_cid = user_info
 
     samples = []
+    enrollment_image_ids = []
     logger.info(f"Collecting 3-5 samples for '{user_name}' (ID: {user_id}). Press 's' to capture, 'f' to finish, 'm' to menu, 'c' to cancel.")
     
+    target_company = MongoDbConfig.COMPANY_ID
+    # Use selected company if admin, otherwise session company
+    if str(ui.session_role).lower() == 'admin' and selected_cid:
+        target_company = selected_cid
+    elif ui.session_company_id:
+        target_company = ui.session_company_id
+
     try:
         while len(samples) < 5:
             success, frame = camera.read_frame()
@@ -128,6 +136,13 @@ def enroll_from_camera(camera, face_rec, attendance, ui):
             if key == ord('s'):
                 if faces:
                     samples.append(faces[0].normed_embedding)
+                    # Save the frame to MongoDB enrollment_images
+                    success, encoded_img = cv2.imencode('.webp', frame, [int(cv2.IMWRITE_WEBP_QUALITY), 80])
+                    if success:
+                        image_blob = encoded_img.tobytes()
+                        image_id = mongo_db.save_enrollment_image(user_id, target_company, image_blob)
+                        if image_id:
+                            enrollment_image_ids.append(image_id)
                     logger.info(f"Captured sample {len(samples)}/5")
                 else:
                     logger.warning("No face detected to capture.")
@@ -143,13 +158,6 @@ def enroll_from_camera(camera, face_rec, attendance, ui):
             elif key == ord('c'):
                 logger.warning("Enrollment cancelled by user.")
                 return
-
-        target_company = MongoDbConfig.COMPANY_ID
-        # Use selected company if admin, otherwise session company
-        if str(ui.session_role).lower() == 'admin' and selected_cid:
-            target_company = selected_cid
-        elif ui.session_company_id:
-            target_company = ui.session_company_id
 
         if len(samples) >= 1:
             # --- Check for existing user to ask before update ---
@@ -177,7 +185,7 @@ def enroll_from_camera(camera, face_rec, attendance, ui):
                 root.destroy()
                 return
 
-            ok_qdrant = attendance.upsert_user(user_name, user_id, birthday, samples, clear_old=force_upd, company_id=target_company)
+            ok_qdrant = attendance.upsert_user(user_name, user_id, birthday, samples, clear_old=force_upd, company_id=target_company, enrollment_image_ids=enrollment_image_ids)
             if ok_qdrant:
                 logger.success(f"Da dang ky: {user_name} (ID: {user_id}) cho cong ty: {target_company}")
                 
@@ -220,7 +228,14 @@ def enroll_by_upload(face_rec, attendance, ui, parent=None):
         u_id, u_name, u_bday, file_paths, selected_cid = user_info
         logger.info(f"Processing enrollment for {u_name} (ID: {u_id}) with {len(file_paths)} files.")
         
+        target_company = MongoDbConfig.COMPANY_ID
+        if str(ui.session_role).lower() == 'admin' and selected_cid:
+            target_company = selected_cid
+        elif ui.session_company_id:
+            target_company = ui.session_company_id
+
         samples = []
+        enrollment_image_ids = []
         for i, path in enumerate(file_paths):
             try:
                 logger.info(f"Processing image {i+1}/{len(file_paths)}: {path}")
@@ -234,6 +249,15 @@ def enroll_by_upload(face_rec, attendance, ui, parent=None):
                     # Sort by face size to get the most prominent face
                     faces.sort(key=lambda x: (x.bbox[2]-x.bbox[0])*(x.bbox[3]-x.bbox[1]), reverse=True)
                     samples.append(faces[0].normed_embedding)
+                    
+                    # Save to MongoDB
+                    success, encoded_img = cv2.imencode('.webp', img, [int(cv2.IMWRITE_WEBP_QUALITY), 80])
+                    if success:
+                        image_blob = encoded_img.tobytes()
+                        image_id = mongo_db.save_enrollment_image(u_id, target_company, image_blob, image_path=path)
+                        if image_id:
+                            enrollment_image_ids.append(image_id)
+                            
                     logger.info(f"Successfully extracted face embedding from: {path}")
                 else:
                     logger.warning(f"No face detected in image: {path}")
@@ -242,12 +266,7 @@ def enroll_by_upload(face_rec, attendance, ui, parent=None):
 
         if samples:
             logger.info(f"Face extraction complete. {len(samples)} valid samples found.")
-            target_company = MongoDbConfig.COMPANY_ID
-            if str(ui.session_role).lower() == 'admin' and selected_cid:
-                target_company = selected_cid
-            elif ui.session_company_id:
-                target_company = ui.session_company_id
-                
+            
             # Update databases
             logger.info(f"Saving to Qdrant and MongoDB for company: {target_company}")
             
@@ -276,7 +295,7 @@ def enroll_by_upload(face_rec, attendance, ui, parent=None):
                 root.destroy()
                 return
 
-            attendance.upsert_user(u_name, u_id, u_bday, samples, clear_old=force_upd, company_id=target_company)
+            attendance.upsert_user(u_name, u_id, u_bday, samples, clear_old=force_upd, company_id=target_company, enrollment_image_ids=enrollment_image_ids)
             logger.success(f"Successfully enrolled {u_name} via upload.")
             
             # Show success message using a robust method

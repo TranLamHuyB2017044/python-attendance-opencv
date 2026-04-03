@@ -16,6 +16,11 @@ if sys.stderr is None:
 if getattr(sys, 'frozen', False):
     # Nếu chạy từ file .exe
     base_dir = sys._MEIPASS
+    # --- THÊM ĐƯỜNG DẪN NGOÀI ĐỂ HỖ TRỢ LIVE UPDATE (Dành cho Loader + Source flow) ---
+    # Cho phép ghi đè logic bằng cách copy file .py vào thư mục 'src' bên cạnh file .exe
+    exe_dir = os.path.dirname(sys.executable)
+    if exe_dir not in sys.path:
+        sys.path.insert(0, exe_dir) 
 else:
     # Nếu chạy từ code python
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -133,9 +138,9 @@ def main():
         camera = RTSPCamera()
         tracker = FaceTracker(threshold_seconds=2.0)
         
-        # Notify about successful startup
-        from src.utils.notification import show_info_message
-        show_info_message("Bittech Camera Service", "DỊCH VỤ CAMERA ĐÃ BẬT THÀNH CÔNG!\n\nHệ thống đang chạy ẩn và sẽ tự động điểm danh.")
+        # Notify about successful startup (non-blocking)
+        from src.utils.notification import send_notification
+        send_notification("Bittech Camera Service", "DỊCH VỤ CAMERA ĐÃ BẬT THÀNH CÔNG!\n\nHệ thống đang chạy ẩn và sẽ tự động điểm danh.")
         
         logger.info("Service is now running in the background.")
         

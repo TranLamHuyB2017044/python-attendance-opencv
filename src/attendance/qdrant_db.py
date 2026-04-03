@@ -59,7 +59,7 @@ class QdrantAttendanceManager:
             logger.error(f"Failed to ensure Qdrant collection/indexes: {e}")
             raise e
 
-    def upsert_user(self, user_name: str, user_id: str, birthday: str, embeddings: List[np.ndarray], clear_old: bool = False, **kwargs) -> bool:
+    def upsert_user(self, user_name: str, user_id: str, birthday: str, embeddings: List[np.ndarray], clear_old: bool = False, enrollment_image_ids: Optional[List[str]] = None, **kwargs) -> bool:
         """
         Save/Update user embeddings in Qdrant with metadata.
         """
@@ -83,18 +83,22 @@ class QdrantAttendanceManager:
                 self.delete_user(user_id_str)
 
             points = []
-            for emb in embeddings:
+            for i, emb in enumerate(embeddings):
                 vector = emb.tolist() if isinstance(emb, np.ndarray) else list(emb)
+                payload = {
+                    "user_id": user_id_str,
+                    "user_name": user_name,
+                    "birthday": birthday,
+                    "company_id": cid,
+                    "created_at": datetime.now().isoformat()
+                }
+                if enrollment_image_ids and i < len(enrollment_image_ids):
+                    payload["enrollment_image_id"] = enrollment_image_ids[i]
+                
                 points.append(models.PointStruct(
                     id=str(uuid.uuid4()),
                     vector=vector,
-                    payload={
-                        "user_id": user_id_str,
-                        "user_name": user_name,
-                        "birthday": birthday,
-                        "company_id": cid,
-                        "created_at": datetime.now().isoformat()
-                    }
+                    payload=payload
                 ))
 
             self.client.upsert(
@@ -281,6 +285,69 @@ class QdrantAttendanceManager:
             logger.error(f"Failed to delete user {user_id}: {e}")
             return False
 
+    def get_user_points(self, user_id: str) -> List[models.Record]:
+        """
+        Retrieve all points (embeddings) for a specific user_id.
+        """
+        try:
+            records, _ = self.client.scroll(
+                collection_name=self.collection_name,
+                scroll_filter=models.Filter(
+                    must=[models.FieldCondition(key="user_id", match=models.MatchValue(value=str(user_id)))]
+                ),
+                limit=100, # Adjust limit as needed, or implement full pagination
+                with_payload=True,
+                with_vectors=False # No need for vectors in this case
+            )
+            return records
+        except Exception as e:
+            logger.error(f"Failed to get points for user {user_id}: {e}")
+            return []
+
+    def delete_point(self, point_id: str) -> bool:
+        """
+        Delete a specific point (embedding) by its ID.
+        """
+        try:
+            self.client.delete(
+                collection_name=self.collection_name,
+                points_selector=models.PointIdsSelector(
+                    points=[point_id]
+                )
+            )
+            logger.success(f"Deleted point ID: {point_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to delete point {point_id}: {e}")
+            return False
+
+    def delete_user_points(self, user_id: str) -> bool:
+        """
+        Deletes all points (embeddings) associated with a specific user_id.
+        """
+        try:
+            response = self.client.delete(
+                collection_name=self.collection_name,
+                points_selector=models.FilterSelector(
+                    filter=models.Filter(
+                        must=[
+                            models.FieldCondition(
+                                key="user_id",
+                                match=models.MatchValue(value=str(user_id)),
+                            )
+                        ]
+                    )
+                ),
+            )
+            if response.status == models.UpdateStatus.COMPLETED:
+                logger.info(f"Successfully deleted all Qdrant points for user_id: {user_id}")
+                return True
+            else:
+                logger.warning(f"Failed to delete Qdrant points for user_id {user_id}: {response.status}")
+                return False
+        except Exception as e:
+            logger.error(f"Error deleting all Qdrant points for user_id {user_id}: {e}")
+            return False
 
 # Global instance for shared use
 attendance = QdrantAttendanceManager()

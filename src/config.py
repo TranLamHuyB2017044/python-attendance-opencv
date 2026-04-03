@@ -147,7 +147,7 @@ class InsightFaceConfig:
 class RecognitionConfig:
     """Face recognition configuration."""
     
-    THRESHOLD: float = float(os.getenv("RECOGNITION_THRESHOLD", "0.4"))
+    THRESHOLD: float = float(os.getenv("RECOGNITION_THRESHOLD", "0.6"))
     EMBEDDING_DIM: int = int(os.getenv("EMBEDDING_DIM", "512"))
     TEST_MODE: bool = os.getenv("TEST_MODE", "false").lower() == "true"
     ANTI_SPOOFING_ENABLED: bool = os.getenv("ANTI_SPOOFING_ENABLED", "true").lower() == "true"
@@ -197,8 +197,26 @@ class LogConfig:
 class MongoDbConfig:
     """MongoDB configuration."""
     CONNECTION_STRING: str = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
-    DATABASE_NAME: str = os.getenv("MONGODB_DB", "face_attendance_db")
+    DATABASE_NAME: str = os.getenv("MONGODB_DB", "attendance_system")
     COMPANY_ID: str = os.getenv("COMPANY_ID", "default_company")
+
+
+class EmailConfig:
+    """SMTP Email configuration for password reset."""
+    SMTP_HOST: str = os.getenv("SMTP_HOST", "smtp.gmail.com")
+    SMTP_PORT: int = int(os.getenv("SMTP_PORT", "465"))
+    SMTP_USERNAME: str = os.getenv("SMTP_USERNAME", "")
+    SMTP_PASSWORD: str = os.getenv("SMTP_PASSWORD", "") # App Password for Gmail
+
+
+class TelegramConfig:
+    """Telegram Bot configuration for error reporting."""
+    _raw_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    _raw_chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
+    
+    BOT_TOKEN: str = _raw_token.strip()
+    CHAT_ID: str = _raw_chat_id.strip()
+    ENABLED: bool = os.getenv("ENABLE_TELEGRAM_NOTIF", "false").lower() == "true"
 
 
 class WebhookConfig:
@@ -223,4 +241,5 @@ __all__ = [
     "AuthServiceConfig",
     "MongoDbConfig",
     "WebhookConfig",
+    "TelegramConfig",
 ]

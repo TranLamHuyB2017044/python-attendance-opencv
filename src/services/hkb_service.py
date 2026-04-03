@@ -375,12 +375,29 @@ class HKBService:
                         logger.warning(f"HKB Service: Upload Full Result Object: {res_details}")
                     except Exception as le:
                         logger.error(f"Could not log full result: {le}")
+
+                    # Send Telegram reports for each failed log entry
+                    from src.utils.telegram_bot import send_telegram_report
+                    for log in attendance_logs:
+                        send_telegram_report(
+                            "Sync Fail", 
+                            f"Đồng bộ lên server thất bại!\nNhân viên: {log.get('user_name')} ({log.get('user_id')})\nStatus: {log.get('status')}\nServer Message: {result.message}",
+                            image=log.get("image_webp")
+                        )
             else:
                 logger.warning("HKB Service: Upload timekeepers returned None after retry")
+                # Send summary Telegram report for critical failure
+                from src.utils.telegram_bot import send_telegram_report
+                send_telegram_report(
+                    "Sync Fail", 
+                    f"Đồng bộ lên server thất bại hoàn toàn (Không có phản hồi từ API).\nSố lượng log: {len(attendance_logs)}"
+                )
             
             return result
         except Exception as e:
             logger.error(f"HKB Service: Upload timekeepers failed: {e}")
+            from src.utils.telegram_bot import send_telegram_report
+            send_telegram_report("Sync Fail", f"Lỗi hệ thống khi đồng bộ: {str(e)}")
             return None
 
 # Global instance

@@ -58,6 +58,7 @@ def enroll_user():
             user_info = {"raw_info": user_info_raw}
 
         embeddings = []
+        enrollment_image_ids = [] # To store MongoDB ObjectIds of saved images
         for file in files:
             # Read image file to numpy array
             filestr = file.read()
@@ -78,6 +79,13 @@ def enroll_user():
             faces.sort(key=lambda x: (x.bbox[2]-x.bbox[0])*(x.bbox[3]-x.bbox[1]), reverse=True)
             embeddings.append(faces[0].normed_embedding)
 
+            # Save the enrollment image to MongoDB
+            success, encoded_img = cv2.imencode('.webp', img, [int(cv2.IMWRITE_WEBP_QUALITY), 70])
+            if success:
+                image_id = mongo_db.save_enrollment_image(user_id, user_info.get("company_id", "default"), encoded_img.tobytes(), file.filename)
+                if image_id:
+                    enrollment_image_ids.append(image_id)
+
         if len(embeddings) < 3:
             logger.error(f"Enrollment failed for {user_name}: Only {len(embeddings)} valid faces found.")
             return jsonify({
@@ -86,7 +94,9 @@ def enroll_user():
             }), 400
 
         # Save to Qdrant
-        success = qdrant_mgr.upsert_user(user_name, user_id, embeddings, user_info)
+        birthday = user_info.get("birthday", "N/A")
+        company_id = user_info.get("company_id", "default")
+        success = qdrant_mgr.upsert_user(user_name, user_id, birthday, embeddings, clear_old=True, enrollment_image_ids=enrollment_image_ids, company_id=company_id)
         
         if success:
             logger.success(f"Flask API: User '{user_name}' (ID: {user_id}) enrolled successfully.")
@@ -95,7 +105,8 @@ def enroll_user():
                 "message": f"User {user_name} enrolled successfully.",
                 "user_id": user_id,
                 "user_name": user_name,
-                "samples": len(embeddings)
+                "samples": len(embeddings),
+                "enrollment_image_ids": enrollment_image_ids
             }), 201
         else:
             return jsonify({"status": "error", "message": "Failed to save to database"}), 500

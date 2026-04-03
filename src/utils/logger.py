@@ -68,6 +68,21 @@ def setup_logger() -> None:
         enqueue=True, # Run in background thread automatically
         catch=True
     )
+
+    # Add Telegram sink for ERROR and CRITICAL levels
+    def telegram_sink(message):
+        from src.utils.telegram_bot import send_telegram_report
+        record = message.record
+        title = f"System {record['level'].name}"
+        error_msg = f"{record['name']}:{record['function']}:{record['line']} - {record['message']}"
+        send_telegram_report(title, error_msg)
+
+    logger.add(
+        telegram_sink,
+        level="ERROR",
+        enqueue=True,
+        catch=True
+    )
     
     logger.info("Logger initialized successfully")
 

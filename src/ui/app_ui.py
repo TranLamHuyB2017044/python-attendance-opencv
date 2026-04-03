@@ -1,3 +1,7 @@
+import datetime
+import threading
+import io
+
 import cv2
 import numpy as np
 import os
@@ -20,6 +24,8 @@ import customtkinter as ctk
 import tkinter as tk
 from tkinter import ttk, messagebox
 from src.ui.date_picker import CTkDatePicker, CTkDateEntry
+from PIL import Image, ImageTk
+import io
 
 def _apply_icon(window):
     """Utility to apply app icon to any tkinter/customtkinter window."""
@@ -59,7 +65,7 @@ class AttendanceUI:
     """
     Handles all UI rendering and interaction logic.
     """
-    def __init__(self):
+    def __init__(self, is_manager_app=False):
         self.current_state = STATE_MENU
         self.is_admin_logged_in = False
         self.session_role = None # 'admin' or 'company'
@@ -68,6 +74,7 @@ class AttendanceUI:
         self.session_user_id = 1 # ID mặc định cho system user
         self.service_active = False # Track if background service is running
         self.last_w, self.last_h = 1280, 720 # Default
+        self.is_manager_app = is_manager_app
 
     def handle_menu_click(self, event, x, y, flags, param):
         """Handle mouse clicks for the menu."""
@@ -163,7 +170,7 @@ class AttendanceUI:
         import threading
         root = ctk.CTk()
         _apply_icon(root)
-        root.title("BITTECH AI - HỆ THỐNG QUẢN LÝ CHẤM CÔNG")
+        root.title("BITTECH AI")
         
         # Window size and position
         w, h = 1010, 660 # Slightly larger for padding
@@ -202,7 +209,7 @@ class AttendanceUI:
                         all_employees.append({'user_id': emp['user_id'], 'user_name': emp['name'], 'birthday': emp.get('birthday', 'N/A'), 'has_face': False})
                         seen_ids.add(str(emp['user_id']))
                 company_name = mongo_db.get_company_name(target_cid)
-                self.show_user_list_ui(all_employees, title=f"Nhân viên - {company_name}", parent=root)
+                self.show_user_list_ui(all_employees, title=f"Nhân viên - {company_name}", parent=root, attendance_manager=attendance)
 
         def open_history():
             from src.main import get_target_company
@@ -657,15 +664,10 @@ class AttendanceUI:
             
         return result if result["name"] or result["delete"] or result["enroll_camera"] or result["enroll_upload"] else None
 
-    @staticmethod
-    def show_user_list_ui(user_list, title="Danh sách nhân viên", parent=None):
+    def show_user_list_ui(self, employees: list, title="Danh sách nhân viên", parent=None, attendance_manager=None):
         """
-        Modernized list of users using CustomTkinter.
+        Displays a list of employees in a CustomTkinter window.
         """
-        import customtkinter as ctk
-        import tkinter as tk
-        from tkinter import ttk
-
         if parent:
             root = ctk.CTkToplevel(parent)
             root.transient(parent)
@@ -674,42 +676,258 @@ class AttendanceUI:
             root = ctk.CTk()
             _apply_icon(root)
             
-        root.title(f"Bittech AI - {title}")
+        root.title(title)
+        root.geometry("1000x600") # Increased width for new column
+        root.attributes('-topmost', False)
+        root.focus_force()
+
+        ctk.CTkLabel(root, text=title, font=("Arial", 20, "bold"), text_color="#1f6aa5").pack(pady=20)
+
+        # Frame for Treeview and Scrollbar
+        frame_tree = ctk.CTkFrame(root)
+        frame_tree.pack(pady=10, padx=20, fill="both", expand=True)
+
+        # Treeview
+        columns = ("user_id", "user_name", "birthday", "has_face", "enrollment_status")
+        tree = ttk.Treeview(frame_tree, columns=columns, show="headings")
+        
+        # Configure column headings
+        tree.heading("user_id", text="Mã NV")
+        tree.heading("user_name", text="Họ và Tên")
+        tree.heading("birthday", text="Ngày Sinh")
+        tree.heading("has_face", text="Khuôn mặt")
+        tree.heading("enrollment_status", text="Số lượng ĐK")
+
+        # Configure column widths
+        tree.column("user_id", width=100, anchor="center")
+        tree.column("user_name", width=250)
+        tree.column("birthday", width=120, anchor="center")
+        tree.column("has_face", width=100, anchor="center")
+        tree.column("enrollment_status", width=120, anchor="center")
+
+        # Scrollbar
+        scrollbar = ctk.CTkScrollbar(frame_tree, command=tree.yview)
+        tree.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        tree.pack(side="left", fill="both", expand=True)
+
+        # Populate Treeview
+        for emp in employees:
+            has_face_text = "Có" if emp.get("has_face") else "Không"
+            
+            enrollment_count = 0
+            if attendance_manager and emp.get("has_face"):
+                points = attendance_manager.get_user_points(emp["user_id"])
+                enrollment_count = len(points)
+            
+            enroll_status_str = f"{enrollment_count}/10"
+
+            tree.insert("", "end", values=(
+                emp["user_id"], 
+                emp["user_name"], 
+                emp["birthday"], 
+                has_face_text,
+                enroll_status_str
+            ))
+
+        # Action Buttons Frame
+        btn_frame = ctk.CTkFrame(root, fg_color="transparent")
+        btn_frame.pack(pady=10)
+
+        def on_view_images():
+            sel = tree.selection()
+            if not sel:
+                messagebox.showwarning("Cảnh báo", "Vui lòng chọn một nhân viên để xem ảnh.")
+                return
+            
+            item_id = sel[0]
+            values = tree.item(item_id, "values")
+            user_id = values[0]
+            user_name = values[1]
+            # Call the new function to show images
+            self.show_user_images_ui(user_id, user_name, parent=root, attendance_manager=attendance_manager)
+
+        if self.session_role == "admin":
+            ctk.CTkButton(btn_frame, text="Xem Ảnh", command=on_view_images, fg_color="#1f6aa5", hover_color="#154c75").pack(side="left", padx=10)
+        
+        ctk.CTkButton(btn_frame, text="Đóng", command=root.destroy, fg_color="gray").pack(side="left", padx=10)
+
+        root.mainloop()
+
+    def show_user_images_ui(self, user_id: str, user_name: str, parent=None, attendance_manager=None):
+        """
+        Displays a window with two tabs: Enrollment Images and Attendance Images for a specific user.
+        """
+        if parent:
+            root = ctk.CTkToplevel(parent)
+            root.transient(parent)
+            _apply_icon(root)
+        else:
+            root = ctk.CTk()
+            _apply_icon(root)
+            
+        root.title(f"Ảnh của {user_name} (ID: {user_id})")
         root.geometry("800x600")
         root.attributes('-topmost', False)
+        root.focus_force()
 
-        ctk.CTkLabel(root, text=title.upper(), font=("Arial", 20, "bold"), text_color="#1f6aa5").pack(pady=20)
+        ctk.CTkLabel(root, text=f"Ảnh của {user_name} (ID: {user_id})", font=("Arial", 20, "bold"), text_color="#1f6aa5").pack(pady=15)
 
-        tree_frame = ctk.CTkFrame(root)
-        tree_frame.pack(fill="both", expand=True, padx=20, pady=10)
+        tabview = ctk.CTkTabview(root, width=750, height=450)
+        tabview.pack(pady=5, padx=20, fill="both", expand=True)
 
-        columns = ("id", "name", "birthday", "face_status")
-        tree = ttk.Treeview(tree_frame, columns=columns, show="headings")
+        tabview.add("Ảnh Đăng Ký")
+        tabview.add("Ảnh Chấm Công")
+
+        # Enrollment Images Tab
+        enrollment_frame = ctk.CTkScrollableFrame(tabview.tab("Ảnh Đăng Ký"))
+        enrollment_frame.pack(fill="both", expand=True)
         
-        tree.heading("id", text="Mã nhân viên")
-        tree.heading("name", text="Họ và tên")
-        tree.heading("birthday", text="Ngày sinh")
-        tree.heading("face_status", text="Khuôn mặt")
-        
-        tree.column("id", width=150)
-        tree.column("name", width=250)
-        tree.column("birthday", width=150)
-        tree.column("face_status", width=150, anchor="center")
+        # Attendance Images Tab
+        attendance_frame = ctk.CTkScrollableFrame(tabview.tab("Ảnh Chấm Công"))
+        attendance_frame.pack(fill="both", expand=True)
 
-        for user in user_list:
-            u_id = user.get("user_id", "N/A")
-            u_name = user.get("user_name") or user.get("name", "Unknown")
-            u_bday = user.get("birthday", "N/A")
-            has_face = user.get("has_face", True)
-            face_status = "✓ Đã đăng ký" if has_face else "⚠ Chưa có"
-            tree.insert("", tk.END, values=(u_id, u_name, u_bday, face_status))
+        def _load_enrollment_images():
+            # Add loading label
+            loading_label = ctk.CTkLabel(enrollment_frame, text="⏳ Đang tải ảnh đăng ký...", font=("Arial", 14, "bold"), text_color="#1f6aa5")
+            loading_label.pack(pady=40)
+            root.update_idletasks() # Force UI to show loading label
 
-        tree.pack(expand=True, fill="both")
-        
-        ctk.CTkButton(root, text="ĐÓNG CỬA SỔ", command=root.destroy, width=150, height=40).pack(pady=20)
+            def task():
+                if not attendance_manager:
+                    root.after(0, lambda: [loading_label.destroy(), ctk.CTkLabel(enrollment_frame, text="Lỗi: Không có attendance_manager").pack()])
+                    return
 
-        if not parent:
-            root.mainloop()
+                points = attendance_manager.get_user_points(user_id)
+                if not points:
+                    root.after(0, lambda: [loading_label.destroy(), ctk.CTkLabel(enrollment_frame, text="Không tìm thấy ảnh đăng ký.").pack()])
+                    return
+
+                # Remove loading label before showing images
+                root.after(0, loading_label.destroy)
+
+                # Grid configuration
+                cols_count = 4 
+                for i, point in enumerate(points):
+                    image_id = point.payload.get("enrollment_image_id")
+                    if not image_id: continue
+
+                    img_data = mongo_db.get_enrollment_image(image_id)
+                    if not img_data: continue
+
+                    try:
+                        img_pil = Image.open(io.BytesIO(img_data))
+                        ctk_img = ctk.CTkImage(light_image=img_pil, dark_image=img_pil, size=(150, 150))
+                        
+                        def show_img(idx=i, img=ctk_img, p_id=point.id, i_id=image_id):
+                            img_frame = ctk.CTkFrame(enrollment_frame)
+                            row = idx // cols_count
+                            col = idx % cols_count
+                            img_frame.grid(row=row, column=col, pady=10, padx=10)
+                            
+                            label = ctk.CTkLabel(img_frame, image=img, text="")
+                            label._image = img 
+                            label.pack()
+                            
+                            def delete_enrollment_image(p_id=p_id, img_id=i_id, frame=img_frame):
+                                if messagebox.askyesno("Xác nhận", "Bạn có chắc muốn xóa ảnh này?"):
+                                    if attendance_manager.delete_point(p_id):
+                                        mongo_db.delete_enrollment_image(img_id)
+                                        frame.destroy()
+                                        messagebox.showinfo("Thành công", "Đã xóa ảnh.")
+                                    else:
+                                        messagebox.showerror("Lỗi", "Không thể xóa ảnh khỏi Qdrant.")
+
+                            if self.session_role == "admin":
+                                ctk.CTkButton(img_frame, text="Xóa", command=delete_enrollment_image, fg_color="red").pack(pady=5)
+                        
+                        root.after(0, show_img)
+                    except Exception as e:
+                        logger.error(f"Error loading enrollment image: {e}")
+
+            threading.Thread(target=task, daemon=True).start()
+
+        def _load_attendance_images():
+            # Add loading label
+            loading_label = ctk.CTkLabel(attendance_frame, text="⏳ Đang tải ảnh chấm công...", font=("Arial", 14, "bold"), text_color="#1f6aa5")
+            loading_label.pack(pady=40)
+            root.update_idletasks() # Force UI to show loading label
+
+            def task():
+                logs = mongo_db.get_logs_by_user(user_id)
+                if not logs:
+                    root.after(0, lambda: [loading_label.destroy(), ctk.CTkLabel(attendance_frame, text="Không tìm thấy ảnh chấm công.").pack()])
+                    return
+
+                # Remove loading label before showing images
+                root.after(0, loading_label.destroy)
+
+                # Grid configuration
+                cols_count = 4 
+                for i, log in enumerate(logs):
+                    log_id = str(log["_id"])
+                    img_data = mongo_db.get_log_image(log_id)
+                    if not img_data: continue
+
+                    try:
+                        img_pil = Image.open(io.BytesIO(img_data))
+                        ctk_img = ctk.CTkImage(light_image=img_pil, dark_image=img_pil, size=(150, 150))
+                        
+                        def show_img(idx=i, img=ctk_img, l_id=log_id):
+                            img_frame = ctk.CTkFrame(attendance_frame)
+                            row = idx // cols_count
+                            col = idx % cols_count
+                            img_frame.grid(row=row, column=col, pady=10, padx=10)
+                            
+                            label = ctk.CTkLabel(img_frame, image=img, text="")
+                            label._image = img 
+                            label.pack()
+                            
+                            def delete_attendance_image(l_id=l_id, frame=img_frame):
+                                if messagebox.askyesno("Xác nhận", "Bạn có chắc muốn xóa ảnh này?"):
+                                    if mongo_db.delete_log(l_id):
+                                        frame.destroy()
+                                        messagebox.showinfo("Thành công", "Đã xóa ảnh.")
+                                    else:
+                                        messagebox.showerror("Lỗi", "Không thể xóa ảnh khỏi MongoDB.")
+
+                            if self.session_role == "admin":
+                                ctk.CTkButton(img_frame, text="Xóa", command=lambda l_id=l_id, frame=img_frame: delete_attendance_image(l_id, frame), fg_color="red").pack(pady=5)
+                        
+                        root.after(0, show_img)
+                    except Exception as e:
+                        logger.error(f"Error loading attendance image: {e}")
+
+            threading.Thread(target=task, daemon=True).start()
+
+        # Add "Delete All Enrollment Images" button for admin
+        if self.session_role == "admin":
+            def delete_all_enrollment_images():
+                if messagebox.askyesno("Xác nhận xóa", f"Bạn có chắc muốn xóa TẤT CẢ ảnh đăng ký của nhân viên {user_name} (ID: {user_id}) không?\n\nHành động này không thể hoàn tác!"):
+                    # Delete from Qdrant
+                    qdrant_success = attendance_manager.delete_user_points(user_id)
+                    # Delete from MongoDB
+                    mongo_success = mongo_db.delete_enrollment_images_by_user(user_id)
+
+                    if qdrant_success and mongo_success:
+                        # Update has_face status in MongoDB
+                        mongo_db.update_employee_has_face(user_id, False)
+                        messagebox.showinfo("Thành công", f"Đã xóa tất cả ảnh đăng ký của {user_name}.")
+                        # Refresh the UI
+                        for widget in enrollment_frame.winfo_children():
+                            widget.destroy()
+                        _load_enrollment_images()
+                    else:
+                        messagebox.showerror("Lỗi", "Không thể xóa tất cả ảnh đăng ký. Vui lòng kiểm tra log.")
+
+            ctk.CTkButton(enrollment_frame, text="Xóa TẤT CẢ Ảnh Đăng Ký", command=delete_all_enrollment_images, fg_color="red", hover_color="#8b0000").pack(pady=10)
+
+        _load_enrollment_images()
+        _load_attendance_images()
+
+        ctk.CTkButton(root, text="Đóng", command=root.destroy).pack(pady=10)
+
+        root.mainloop()
 
     @staticmethod
     def pick_company_ui(companies, parent=None):
@@ -1182,7 +1400,8 @@ class AttendanceUI:
                 messagebox.showinfo("Hoàn tất", f"Đã tải {len(upload_logs)} dữ liệu lên {selected_system['name']}")
                 # REFRESH list after solid upload using the CURRENT date
                 if current_view_date[0]:
-                    refresh_data(current_view_date[0])
+                    # Call refresh_data_range with the current date as both start and end
+                    refresh_data_range(current_view_date[0], current_view_date[0])
             else: messagebox.showerror("Lỗi Upload", res.message if res else "Không phản hồi từ server")
 
         def on_double_click(event):
@@ -1710,6 +1929,24 @@ class AttendanceUI:
 
             ctk.CTkButton(add_win, text="LƯU TÀI KHOẢN", command=submit, height=40, font=("Arial", 14, "bold")).pack(pady=30)
 
+        def on_reset_pwd():
+            sel = tree.selection()
+            if not sel: return messagebox.showwarning("!", "Vui lòng chọn tài khoản cần reset")
+            user = tree.item(sel[0])['values'][0]
+            
+            if messagebox.askyesno("Xác nhận", f"Bạn có chắc muốn reset mật khẩu của tài khoản '{user}' về '123456'?"):
+                from src.utils.email_utils import send_reset_password_email
+                new_pwd = "123456"
+                if mongo_db.update_user_password(user, new_pwd):
+                    admin_email = "tranlamhuy5tn@gmail.com"
+                    ok, msg = send_reset_password_email(admin_email, user, new_pwd)
+                    if ok:
+                        messagebox.showinfo("Thành công", f"Đã reset mật khẩu tài khoản '{user}' về '123456'.\nThông báo đã được gửi đến admin.")
+                    else:
+                        messagebox.showwarning("Thành công", f"Đã reset mật khẩu về '123456' nhưng không thể gửi email: {msg}")
+                else:
+                    messagebox.showerror("Lỗi", "Không thể cập nhật mật khẩu.")
+
         def on_delete():
             sel = tree.selection()
             if not sel: return
@@ -1726,7 +1963,8 @@ class AttendanceUI:
         
         ctk.CTkButton(btn_frame, text="LÀM MỚI", command=refresh, width=120).pack(side=tk.LEFT, padx=10)
         ctk.CTkButton(btn_frame, text="THÊM MỚI", command=on_add, width=120, fg_color="#28a745", hover_color="#218838").pack(side=tk.LEFT, padx=10)
-        ctk.CTkButton(btn_frame, text="XÓA TÀI KHOẢN", command=on_delete, width=120, fg_color="#dc3545", hover_color="#c82333").pack(side=tk.LEFT, padx=10)
+        ctk.CTkButton(btn_frame, text="RESET MẬT KHẨU", command=on_reset_pwd, width=130, fg_color="#f39c12", hover_color="#d35400").pack(side=tk.LEFT, padx=10)
+        ctk.CTkButton(btn_frame, text="XÓA TÀI KHOẢN", command=on_delete, width=125, fg_color="#dc3545", hover_color="#c82333").pack(side=tk.LEFT, padx=10)
         ctk.CTkButton(btn_frame, text="ĐÓNG", command=root.destroy, width=100, fg_color="gray").pack(side=tk.LEFT, padx=10)
         
         refresh()
@@ -1786,22 +2024,167 @@ class AttendanceUI:
         
         ctk.CTkLabel(main_frame, text="Mật khẩu", font=("Arial", 12)).pack(anchor="w", padx=30)
         entry_pwd = ctk.CTkEntry(main_frame, width=280, height=35, placeholder_text="Nhập mật khẩu...", show="*")
-        entry_pwd.pack(pady=(5, 30))
+        entry_pwd.pack(pady=(5, 5))
+
+        def toggle_pwd_visibility():
+            if entry_pwd.cget("show") == "*":
+                entry_pwd.configure(show="")
+            else:
+                entry_pwd.configure(show="*")
+
+        chk_show_pwd = ctk.CTkCheckBox(main_frame, text="Hiển thị mật khẩu", command=toggle_pwd_visibility, 
+                                      font=("Arial", 11), checkbox_width=18, checkbox_height=18)
+        chk_show_pwd.pack(anchor="w", padx=30, pady=(0, 20))
         
         btn_login = ctk.CTkButton(main_frame, text="ĐĂNG NHẬP", command=attempt_login, width=280, height=40, font=("Arial", 14, "bold"))
-        btn_login.pack(pady=10)
+        btn_login.pack(pady=(10, 5))
+
+        # --- Forgot Password & Change Password Links ---
+        links_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
+        links_frame.pack(fill="x", padx=30)
+
+        def on_forgot_pwd():
+            self.show_forgot_password_ui(login_root)
+
+        def on_change_pwd():
+            self.show_change_password_ui(login_root)
+
+        if self.is_manager_app:
+            ctk.CTkButton(links_frame, text="Quên mật khẩu?", command=on_forgot_pwd, width=100, height=20, 
+                         fg_color="transparent", text_color="#1f6aa5", font=("Arial", 11, "underline"), hover=False).pack(side="left")
         
+        ctk.CTkButton(links_frame, text="Đổi mật khẩu", command=on_change_pwd, width=100, height=20, 
+                     fg_color="transparent", text_color="#1f6aa5", font=("Arial", 11, "underline"), hover=False).pack(side="right")
+
         def on_exit_app():
             login_status["authenticated"] = "EXIT"
             login_root.destroy()
 
-        ctk.CTkButton(main_frame, text="THOÁT", command=on_exit_app, width=150, fg_color="gray").pack(pady=5)
+        ctk.CTkButton(main_frame, text="THOÁT", command=on_exit_app, width=150, fg_color="gray").pack(pady=(20, 5))
         
         # Support Enter key
         login_root.bind('<Return>', attempt_login)
 
         login_root.mainloop()
         return login_status["authenticated"]
+
+    def show_forgot_password_ui(self, parent):
+        """
+        Dialog to request password reset via username.
+        """
+        from src.utils.email_utils import send_reset_password_email
+        from src.attendance.mongodb_mgr import mongo_db
+
+        forgot_win = ctk.CTkToplevel(parent)
+        forgot_win.title("Quên mật khẩu")
+        forgot_win.geometry("400x300")
+        forgot_win.attributes('-topmost', True)
+        forgot_win.grab_set()
+
+        ctk.CTkLabel(forgot_win, text="KHÔI PHỤC MẬT KHẨU", font=("Arial", 16, "bold")).pack(pady=20)
+        
+        ctk.CTkLabel(forgot_win, text="Nhập tên đăng nhập (Username) cần reset:").pack(anchor="w", padx=40)
+        entry_username = ctk.CTkEntry(forgot_win, width=320)
+        entry_username.pack(pady=10)
+
+        def do_reset():
+            username = entry_username.get().strip()
+            if not username:
+                messagebox.showwarning("Cảnh báo", "Vui lòng nhập tên đăng nhập!")
+                return
+            
+            # Find user by username
+            user = mongo_db.get_user_by_username(username)
+            if not user:
+                messagebox.showerror("Lỗi", "Tên đăng nhập này không tồn tại trong hệ thống!")
+                return
+            
+            # Fixed password as requested
+            new_pwd = "123456"
+            
+            # Update in DB (this will hash it)
+            if mongo_db.update_user_password(username, new_pwd):
+                # Send Email to the requested admin email
+                admin_email = "tranlamhuy5tn@gmail.com"
+                ok, msg = send_reset_password_email(admin_email, username, new_pwd)
+                if ok:
+                    messagebox.showinfo("Thành công", f"Mật khẩu của tài khoản '{username}' đã được reset về '123456'.\nThông tin đã được gửi đến quản trị viên ({admin_email}).")
+                    forgot_win.destroy()
+                else:
+                    messagebox.showerror("Lỗi gửi email", f"Mật khẩu đã reset nhưng không thể gửi email: {msg}")
+            else:
+                messagebox.showerror("Lỗi", "Không thể cập nhật mật khẩu mới. Vui lòng thử lại.")
+
+        ctk.CTkButton(forgot_win, text="GỬI YÊU CẦU RESET", command=do_reset, width=200, height=40).pack(pady=20)
+        ctk.CTkButton(forgot_win, text="HỦY", command=forgot_win.destroy, fg_color="gray").pack()
+
+    def show_change_password_ui(self, parent):
+        """
+        Dialog to change password.
+        """
+        change_win = ctk.CTkToplevel(parent)
+        change_win.title("Đổi mật khẩu")
+        change_win.geometry("400x450")
+        change_win.attributes('-topmost', True)
+        change_win.grab_set()
+
+        ctk.CTkLabel(change_win, text="ĐỔI MẬT KHẨU", font=("Arial", 16, "bold")).pack(pady=20)
+        
+        ctk.CTkLabel(change_win, text="Tên đăng nhập:").pack(anchor="w", padx=40)
+        entry_user = ctk.CTkEntry(change_win, width=320)
+        entry_user.pack(pady=5)
+
+        ctk.CTkLabel(change_win, text="Mật khẩu cũ:").pack(anchor="w", padx=40)
+        entry_old_pwd = ctk.CTkEntry(change_win, width=320, show="*")
+        entry_old_pwd.pack(pady=5)
+
+        ctk.CTkLabel(change_win, text="Mật khẩu mới:").pack(anchor="w", padx=40)
+        entry_new_pwd = ctk.CTkEntry(change_win, width=320, show="*")
+        entry_new_pwd.pack(pady=5)
+
+        ctk.CTkLabel(change_win, text="Xác nhận mật khẩu mới:").pack(anchor="w", padx=40)
+        entry_confirm_pwd = ctk.CTkEntry(change_win, width=320, show="*")
+        entry_confirm_pwd.pack(pady=5)
+
+        def toggle_change_pwd_visibility():
+            entries = [entry_old_pwd, entry_new_pwd, entry_confirm_pwd]
+            if entry_old_pwd.cget("show") == "*":
+                for e in entries: e.configure(show="")
+            else:
+                for e in entries: e.configure(show="*")
+
+        ctk.CTkCheckBox(change_win, text="Hiển thị mật khẩu", command=toggle_change_pwd_visibility, 
+                        font=("Arial", 11), checkbox_width=18, checkbox_height=18).pack(anchor="w", padx=40, pady=5)
+
+        def do_change():
+            username = entry_user.get().strip()
+            old_pwd = entry_old_pwd.get()
+            new_pwd = entry_new_pwd.get()
+            confirm_pwd = entry_confirm_pwd.get()
+
+            if not all([username, old_pwd, new_pwd, confirm_pwd]):
+                messagebox.showwarning("Cảnh báo", "Vui lòng nhập đầy đủ thông tin!")
+                return
+            
+            if new_pwd != confirm_pwd:
+                messagebox.showwarning("Cảnh báo", "Mật khẩu mới không khớp!")
+                return
+            
+            # Verify old password
+            user = mongo_db.verify_login(username, old_pwd)
+            if not user:
+                messagebox.showerror("Lỗi", "Tên đăng nhập hoặc mật khẩu cũ không đúng!")
+                return
+            
+            # Update password
+            if mongo_db.update_user_password(username, new_pwd):
+                messagebox.showinfo("Thành công", "Đã đổi mật khẩu thành công.")
+                change_win.destroy()
+            else:
+                messagebox.showerror("Lỗi", "Không thể cập nhật mật khẩu. Vui lòng thử lại.")
+
+        ctk.CTkButton(change_win, text="XÁC NHẬN ĐỔI", command=do_change, width=200, height=40).pack(pady=20)
+        ctk.CTkButton(change_win, text="HỦY", command=change_win.destroy, fg_color="gray").pack()
 
     @staticmethod
     def show_system_settings_ui(mongo_db, session_username="GLOBAL", parent=None):
