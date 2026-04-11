@@ -30,6 +30,7 @@ from src.attendance.mongodb_mgr import mongo_db
 from src.recognition.tracker import FaceTracker
 from src.config import MongoDbConfig, CameraConfig, DATA_DIR
 from src.ui.app_ui import AttendanceUI, STATE_MENU, STATE_DETECT, STATE_ENROLL_CAM, STATE_ENROLL_UPLOAD, STATE_EDIT, STATE_LIST, STATE_HISTORY, STATE_HKB_LIST, STATE_COMPANY, STATE_CLOUD_USER, STATE_LOGOUT, STATE_SETTINGS, STATE_TEST_CAM
+from src.services.ping_service import ping_service
 
 
 def get_target_company(ui, mongo_db, allow_selection=True, parent=None):
@@ -525,7 +526,10 @@ def handle_edit_logic(attendance, face_rec, ui, camera, parent=None):
 def main():
     setup_logger()
     logger.info("Initializing Face Attendance System...")
-    
+
+    # Khởi động Ping Service — tự động gửi thông tin thiết bị khi app bật
+    ping_service.start()
+
     # Load config from MongoDB so that Cooldown/Anti-Spoofing settings take effect immediately
     CameraConfig.load_from_mongodb(mongo_db)
 
@@ -951,6 +955,7 @@ def main():
     finally:
         camera.disconnect()
         cv2.destroyAllWindows()
+        ping_service.stop()  # Dừng Ping Service khi app tắt
         logger.info("Shutdown complete.")
 
 

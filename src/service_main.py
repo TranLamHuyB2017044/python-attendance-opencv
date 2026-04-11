@@ -36,6 +36,7 @@ from src.attendance.qdrant_db import QdrantAttendanceManager
 from src.recognition.tracker import FaceTracker
 
 from src.utils.notification import send_notification, show_error_message
+from src.services.ping_service import ping_service
 
 # --- SHARED MEMORY FOR PERSISTENT MONITORING (ULTRA STABLE) ---
 from multiprocessing import shared_memory
@@ -141,7 +142,10 @@ def main():
         # Notify about successful startup (non-blocking)
         from src.utils.notification import send_notification
         send_notification("Bittech Camera Service", "DỊCH VỤ CAMERA ĐÃ BẬT THÀNH CÔNG!\n\nHệ thống đang chạy ẩn và sẽ tự động điểm danh.")
-        
+
+        # Khởi động Ping Service — chỉ chạy khi camera service bật
+        ping_service.start()
+
         logger.info("Service is now running in the background.")
         
     except Exception as e:
@@ -321,6 +325,7 @@ def main():
     except Exception as e:
         logger.error(f"Runtime error: {e}")
     finally:
+        ping_service.stop()  # Dừng Ping Service khi camera service tắt
         camera.disconnect()
         logger.info("Service shutdown complete.")
 

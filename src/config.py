@@ -157,7 +157,7 @@ class RecognitionConfig:
     MIN_FACE_SIZE: int = int(os.getenv("MIN_FACE_SIZE", "80"))
     # Số frame thu thập trước khi kết luận nhận diện (Best-of-N voting)
     # Tăng lên nhưng chậm hơn (khuyên dùng 3-7), giảm xuống nhưng nhanh hơn
-    GATHER_FRAMES: int = int(os.getenv("GATHER_FRAMES", "5"))
+    GATHER_FRAMES: int = int(os.getenv("GATHER_FRAMES", "3"))
 
 
 class QdrantConfig:
@@ -175,6 +175,7 @@ class AuthServiceConfig:
     BASE_URL: str = os.getenv("AUTH_SERVICE_URL", "https://auth.bittechx.cloud")
     API_KEY: str = os.getenv("GROUP_AUTH_KEY", "dwX1S5cHAPDYo6Gom2fv8F3D7rNZqPu")
     SYSTEM_ID: str = os.getenv("SYSTEM_ID", "attendance_system")
+    SYSTEM_NAME: str = os.getenv("SYSTEM_NAME", "FACE AI CHECKING")
     SYSTEM_REGISTER: str = os.getenv("SYSTEM_REGISTER", "")
 
 
@@ -224,6 +225,30 @@ class WebhookConfig:
     USER_WEBHOOK_URL: str = os.getenv("USER_WEBHOOK_URL", "https://voice-cheking.bittechx.cloud/api/webhooks/user")
 
 
+class ReportSystemConfig:
+    """Report System configuration for periodic ping."""
+    PING_INTERVAL_SECONDS: int = 120  # Ping mỗi 2 phút
+    PING_ENDPOINT: str = "/api/v1/systems/ping"
+
+    @classmethod
+    def base_url(cls) -> str:
+        """Returns the base URL from env, evaluated at call time (not import time)."""
+        return os.getenv("Report_System_Base_URL", "").rstrip("/")
+
+    @classmethod
+    def ping_url(cls) -> str:
+        """Returns the full ping URL."""
+        return f"{cls.base_url()}{cls.PING_ENDPOINT}"
+
+    @classmethod
+    def is_enabled(cls) -> bool:
+        """Returns True if the Report System URL is configured."""
+        return bool(cls.base_url())
+
+    # Backward compat: keep BASE_URL as property-like fallback
+    BASE_URL: str = ""  # deprecated, dùng base_url() thay thế
+
+
 # Export all configs
 __all__ = [
     "PROJECT_ROOT",
@@ -242,4 +267,5 @@ __all__ = [
     "MongoDbConfig",
     "WebhookConfig",
     "TelegramConfig",
+    "ReportSystemConfig",
 ]

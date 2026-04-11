@@ -1205,6 +1205,11 @@ class AttendanceUI:
         status_var = ctk.StringVar(value="Tất cả")
         status_dropdown = ctk.CTkOptionMenu(search_frame, variable=status_var, values=["Tất cả", "IN", "OUT", "FAILED", "SPOOF"], width=110, height=30)
         status_dropdown.pack(side="left", padx=5)
+
+        ctk.CTkLabel(search_frame, text="Ca:", font=("Arial", 13)).pack(side="left", padx=(20, 5))
+        shift_var = ctk.StringVar(value="Tất cả")
+        shift_dropdown = ctk.CTkOptionMenu(search_frame, variable=shift_var, values=["Tất cả", "Ca Sáng", "Ca Chiều", "Khác"], width=110, height=30)
+        shift_dropdown.pack(side="left", padx=5)
         
         # We need a shared list to hold the currently fetched logs
         all_current_logs = list(logs)
@@ -1227,6 +1232,9 @@ class AttendanceUI:
                 is_up = 1 if log.get('uploaded_to') else 0
                 up_str = "✓" if is_up else "x"
                 
+                log_shift = log.get('shift', 'Other')
+                shift_display = "Ca Sáng" if log_shift == "Morning" else "Ca Chiều" if log_shift == "Afternoon" else "Khác"
+
                 tree.insert("", tk.END, values=(
                     l_id, 
                     log.get('user_id', 'N/A'), 
@@ -1234,6 +1242,7 @@ class AttendanceUI:
                     time_part, 
                     date_part, 
                     log.get('status', 'IN'), 
+                    shift_display,
                     up_str
                 ))
                 log_items_batch[l_id] = log
@@ -1242,6 +1251,7 @@ class AttendanceUI:
             keyword = search_entry.get().strip().lower()
             cloud_filter = cloud_var.get()
             status_filter = status_var.get()
+            shift_filter = shift_var.get()
             
             filtered = []
             for log in all_current_logs:
@@ -1262,6 +1272,12 @@ class AttendanceUI:
                 log_st = str(log.get('status', 'IN')).upper()
                 if status_filter != "Tất cả" and log_st != status_filter:
                     continue
+                
+                # 4. Shift Filter
+                log_sh = log.get('shift', 'Other')
+                sh_map = {"Ca Sáng": "Morning", "Ca Chiều": "Afternoon", "Khác": "Other"}
+                if shift_filter != "Tất cả" and log_sh != sh_map.get(shift_filter):
+                    continue
                     
                 filtered.append(log)
                 
@@ -1271,6 +1287,7 @@ class AttendanceUI:
         search_entry.bind("<Return>", apply_filters)
         cloud_dropdown.configure(command=apply_filters)
         status_dropdown.configure(command=apply_filters)
+        shift_dropdown.configure(command=apply_filters)
 
         def refresh_data_range(start_date_str, end_date_str):
             if not mongo_db or not target_company:
@@ -1299,7 +1316,7 @@ class AttendanceUI:
         tree_frame.pack(fill="both", expand=True, padx=20, pady=10)
 
         # Columns for modern viewing
-        columns = ("id", "user_id", "user_name", "time", "date", "status", "uploaded")
+        columns = ("id", "user_id", "user_name", "time", "date", "status", "shift", "uploaded")
         
         # Thêm vertical scrollbar
         scrollbar = ttk.Scrollbar(tree_frame)
@@ -1314,6 +1331,7 @@ class AttendanceUI:
         tree.heading("time", text="Giờ")
         tree.heading("date", text="Ngày")
         tree.heading("status", text="Trạng thái")
+        tree.heading("shift", text="Ca")
         tree.heading("uploaded", text="Đã tải lên")
         
         tree.column("id", width=80, anchor="center")
@@ -1322,6 +1340,7 @@ class AttendanceUI:
         tree.column("time", width=100, anchor="center")
         tree.column("date", width=120, anchor="center")
         tree.column("status", width=100, anchor="center")
+        tree.column("shift", width=120, anchor="center")
         tree.column("uploaded", width=100, anchor="center")
         tree.pack(fill="both", expand=True)
 
@@ -1426,6 +1445,7 @@ class AttendanceUI:
                 ("Nhân viên", f"{log_data.get('user_name')} ({log_data.get('user_id')})"),
                 ("Thời gian", log_data.get('timestamp')),
                 ("Trạng thái", log_data.get('status')),
+                ("Ca", "Ca Sáng" if log_data.get('shift') == "Morning" else "Ca Chiều" if log_data.get('shift') == "Afternoon" else "Khác"),
                 ("Công ty", log_data.get('company_id'))
             ]
             

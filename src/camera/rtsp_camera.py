@@ -26,6 +26,7 @@ class RTSPCamera:
         reconnect_delay: int = 3,
     ):
         self.rtsp_url = rtsp_url or CameraConfig.RTSP_URL
+        logger.info(f"RTSPCamera initialized with URL: {self.rtsp_url}")
         
         # Convert to int if it's a numeric string (webcam index)
         try:

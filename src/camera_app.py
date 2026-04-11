@@ -14,12 +14,16 @@ from src.camera.rtsp_camera import RTSPCamera
 from src.recognition.face_recognition import FaceRecognition
 from src.attendance.qdrant_db import QdrantAttendanceManager
 from src.recognition.tracker import FaceTracker
-from src.config import RecognitionConfig, CameraConfig  # ← thêm CameraConfig
+from src.config import RecognitionConfig, CameraConfig
+from src.services.ping_service import ping_service
 
 def main():
     setup_logger()
     warnings.filterwarnings("ignore", category=FutureWarning)
     logger.info("Starting Auto-Start Camera Detection...")
+
+    # Khởi động Ping Service — tự động ping Report System mỗi 2 phút
+    ping_service.start()
 
     try:
         face_rec = FaceRecognition()
@@ -168,6 +172,7 @@ def main():
     finally:
         camera.disconnect()
         cv2.destroyAllWindows()
+        ping_service.stop()  # Dừng Ping Service khi camera app tắt
         logger.info("Camera app shut down.")
 
 if __name__ == "__main__":

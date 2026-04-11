@@ -1,6 +1,7 @@
 import pymongo
 import datetime
 import bcrypt
+import pytz
 from typing import Optional
 from loguru import logger
 import cv2
@@ -78,18 +79,40 @@ class MongoDBManager:
             logger.error(f"Failed to set setting {key} for user {username}: {e}")
             return False
 
-    def get_attendance_status(self, user_id, company_id=None):
-        """Checks the last log to determine if user should be IN, OUT or COOLDOWN."""
+    def get_current_shift(self):
+        """Returns the current shift name based on Vietnam time (Morning, Afternoon, Other)."""
         try:
             from src.utils.time_manager import time_mgr
-            _, date_str = time_mgr.get_formatted_time()
+            vn_now = time_mgr.get_accurate_time()
+            hour_val = vn_now.hour * 100 + vn_now.minute
+            
+            if 730 <= hour_val <= 1200:
+                return "Morning"
+            elif 1250 <= hour_val <= 1800:
+                return "Afternoon"
+            else:
+                return "Other"
+        except Exception:
+            return "Other"
+
+    def get_attendance_status(self, user_id, company_id=None):
+        """Checks the last log to determine if user should be IN, OUT or COOLDOWN with Shift Support."""
+        try:
+            from src.utils.time_manager import time_mgr
+            vn_now = time_mgr.get_accurate_time()
+            date_str = vn_now.strftime("%Y-%m-%d")
             cid = company_id or MongoDbConfig.COMPANY_ID
             
+            # Current time in VN (HHMM) for shift logic
+            current_time_val = vn_now.hour * 100 + vn_now.minute
+            
+            # 1. Fetch last record today
             last_record = self.logs.find_one(
                 {"user_id": user_id, "company_id": cid, "date": date_str},
                 sort=[("_id", -1)]
             )
             
+            # 2. Check Cooldown
             if last_record:
                 last_time = last_record.get("created_at")
                 if last_time:
@@ -101,11 +124,40 @@ class MongoDBManager:
                         elapsed = (datetime.datetime.utcnow() - last_time).total_seconds()
                         if elapsed < RecognitionConfig.COOLDOWN_SECONDS:
                             return 'COOLDOWN'
+
+            # 3. Shift Logic
+            # Morning: 07:30 - 12:00
+            if 730 <= current_time_val <= 1200:
+                morning_in = self.logs.find_one({
+                    "user_id": user_id, 
+                    "company_id": cid, 
+                    "date": date_str,
+                    "status": "IN"
+                })
+                if not morning_in:
+                    return 'IN'
                 
-                # Alternate IN/OUT
-                return 'OUT' if last_record.get('status') == 'IN' else 'IN'
+            # Afternoon: 12:50 - 18:00
+            elif 1250 <= current_time_val <= 1800:
+                # Define start of afternoon shift in UTC
+                vn_afternoon_start = vn_now.replace(hour=12, minute=50, second=0, microsecond=0)
+                utc_afternoon_start = vn_afternoon_start.astimezone(pytz.utc).replace(tzinfo=None)
+                
+                afternoon_in = self.logs.find_one({
+                    "user_id": user_id, 
+                    "company_id": cid, 
+                    "date": date_str,
+                    "status": "IN",
+                    "created_at": {"$gte": utc_afternoon_start}
+                })
+                if not afternoon_in:
+                    return 'IN'
+
+            # 4. Default: Toggle IN/OUT based on last record
+            if last_record and last_record.get('status') == 'IN':
+                return 'OUT'
             
-            return 'IN' # First time today
+            return 'IN'
         except Exception as e:
             logger.error(f"MongoDB: Error getting status: {e}")
             return 'IN'
@@ -133,7 +185,8 @@ class MongoDBManager:
 
             # Determine status logic...
             if user_id == "Unknown":
-                status = "FAILED"
+                if status is None:
+                    status = "FAILED"
             else:
                 # --- COOLDOWN & IN/OUT LOGIC ---
                 last_record = self.logs.find_one(
@@ -157,10 +210,9 @@ class MongoDBManager:
                 
                 # Determine IN/OUT if not provided
                 if status is None:
-                    if not last_record or last_record.get('status') in ['OUT', 'FAILED']:
-                        status = 'IN'
-                    else:
-                        status = 'OUT'
+                    status = self.get_attendance_status(user_id, company_id=cid)
+                    if status == 'COOLDOWN':
+                        return 'COOLDOWN'
             
             import uuid
             log_entry = {
@@ -169,6 +221,7 @@ class MongoDBManager:
                 "timestamp": timestamp_str,
                 "date": date_str,
                 "status": status,
+                "shift": self.get_current_shift(),
                 "company_id": cid,
                 "image_webp": image_blob,
                 "unknown_attempt": unknown_attempt,
@@ -205,6 +258,12 @@ class MongoDBManager:
                 user_id = log_entry.get("user_id")
                 cid = log_entry.get("company_id")
                 attempt = log_entry.get("unknown_attempt", 0)
+
+                # TEST_MODE check
+                from src.config import RecognitionConfig
+                if RecognitionConfig.TEST_MODE:
+                    logger.debug("Sync: TEST_MODE is enabled. Skipping cloud sync.")
+                    return
                 
                 if user_id in ["Unknown", "Spoof"]:
                     # STRANGER/SPOOF SYNC POLICY: LOCAL ONLY (Do not sync to cloud)
