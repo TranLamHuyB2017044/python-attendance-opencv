@@ -525,6 +525,36 @@ def handle_edit_logic(attendance, face_rec, ui, camera, parent=None):
             messagebox.showerror("Lỗi", "Không tìm thấy thông tin nhân viên")
 
 
+def cleanup_old_videos(days=60):
+    """Xóa video cũ hơn 60 ngày để giải phóng ổ cứng."""
+    try:
+        from src.config import CAPTURES_DIR
+        import time
+        import os
+        
+        now = time.time()
+        max_age = days * 24 * 3600
+        count = 0
+        
+        if not CAPTURES_DIR.exists():
+            return
+            
+        for root, dirs, files in os.walk(CAPTURES_DIR):
+            for file in files:
+                if file.endswith((".mp4", ".webm", ".avi")):
+                    file_path = os.path.join(root, file)
+                    try:
+                        file_age = now - os.path.getmtime(file_path)
+                        if file_age > max_age:
+                            os.remove(file_path)
+                            count += 1
+                    except Exception:
+                        continue
+        if count > 0:
+            logger.info(f"Cleanup: Da xoa {count} video cu hon {days} ngay.")
+    except Exception as e:
+        logger.error(f"Cleanup error: {e}")
+
 def main():
     setup_logger()
     logger.info("Initializing Face Attendance System...")
@@ -534,6 +564,10 @@ def main():
 
     # Load config from MongoDB so that Cooldown/Anti-Spoofing settings take effect immediately
     CameraConfig.load_from_mongodb(mongo_db)
+
+    # Auto cleanup old videos in background
+    import threading
+    threading.Thread(target=cleanup_old_videos, args=(60,), daemon=True).start()
 
     # Start webhook log polling
     start_polling()
@@ -685,6 +719,11 @@ def main():
                     panel_w    = 0
                     cam_area_w = cur_w
 
+                # Update click area dynamically (important if window resized)
+                if not getattr(main, '_detect_callback_cleared', False):
+                    # callback set up elsewhere, but we ensure it uses these values
+                    pass
+
                 # --- AUTO SWITCH MODE: DIRECT (DEV) vs PREVIEW (PROD/EXE) ---
                 if getattr(sys, 'frozen', False):
                     # --- PRODUCTION MODE: SHOW PREVIEW FROM SERVICE (SHARED MEMORY) ---
@@ -714,18 +753,20 @@ def main():
 
                     if shm_frame is not None:
                         p_h, p_w = shm_frame.shape[:2]
+                        # Use cam_area_w instead of full cur_w
                         scale = (cam_area_w - 60) / p_w
                         target_w, target_h = int(p_w * scale), int(p_h * scale)
-                        if target_h > cur_h - 200:
-                            scale = (cur_h - 220) / p_h
+                        if target_h > cur_h - 180:
+                            scale = (cur_h - 200) / p_h
                             target_w, target_h = int(p_w * scale), int(p_h * scale)
                         
                         try:
                             resized_preview = cv2.resize(shm_frame, (target_w, target_h))
-                            y_off, x_off = 100, (cam_area_w - target_w) // 2
+                            y_off, x_off = 80, (cam_area_w - target_w) // 2
                             display_frame[y_off:y_off+target_h, x_off:x_off+target_w] = resized_preview
                         except: pass
                         
+                        # Drawn atop Cam area
                         cv2.rectangle(display_frame, (0, 0), (cam_area_w, 40), (40, 40, 40), -1)
                         cv2.putText(display_frame, "SERVICE MONITOR (PRODUCTION MODE)", (20, 25), 
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)

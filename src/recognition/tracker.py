@@ -207,6 +207,27 @@ class FaceTracker:
     def _get_center(self, bbox):
         return (int((bbox[0] + bbox[2]) / 2), int((bbox[1] + bbox[3]) / 2))
 
+    def _render_frame_for_video(self, frame, detected_faces):
+        """Tạo một bản sao frame có vẽ các khung detect để lưu vào video."""
+        if frame is None: return None
+        render = frame.copy()
+        for face in detected_faces:
+            bbox = face.bbox.astype(int)
+            # Màu sắc: Xanh lá nếu đã nhận diện hoặc đang cooldown, xám nếu chưa
+            f_id = getattr(face, 'track_id', None)
+            color = (0, 255, 0)
+            if hasattr(face, 'recognized') and not face.recognized:
+                color = (180, 180, 180)
+            
+            cv2.rectangle(render, (bbox[0], bbox[1]), (bbox[2], bbox[3]), color, 2)
+            
+            # Vẽ tên (nếu có)
+            name = getattr(face, 'name', "Dang phan tich...")
+            from src.utils.string_utils import remove_accents
+            cv2.putText(render, remove_accents(name), (bbox[0], bbox[1] - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+        return render
+
     def _auto_learn_face(self, frame, face, user_id, user_name, birthday, company_id, attendance_mgr):
         """Tự động học mẫu khuôn mặt mới từ ảnh chấm công"""
         # Auto-learn logic implementation
@@ -355,7 +376,30 @@ class FaceTracker:
         # Crop the face area
         save_frame = log_frame[y1:y2, x1:x2]
         
-        def async_save_task():
+        # --- PRE-CALCULATE DIRECTORIES AND VIDEO PATH (SYNC) ---
+        raw_company_name = mongo_db.get_company_name(company_id) if company_id else "unknown_company"
+        company_folder = remove_accents(raw_company_name).replace(" ", "_")
+        
+        if is_known:
+            user_folder = f"{remove_accents(user_name).replace(' ','_')}_{user_id}"
+            target_dir = CAPTURES_DIR / company_folder / user_folder
+        else:
+            target_dir = CAPTURES_DIR / company_folder / "Nguoi_La"
+        
+        target_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Determine video path immediately so tracker knows where to save
+        video_path = None
+        if f_data is not None:
+            if f_data.get('video_path') is None:
+                v_dir = target_dir / "videos"
+                v_dir.mkdir(parents=True, exist_ok=True)
+                v_name = f"{int(time.time())}_{remove_accents(user_name).replace(' ','_')}.mp4"
+                v_path = v_dir / v_name
+                f_data['video_path'] = str(v_path)
+            video_path = f_data['video_path']
+
+        def async_save_task(target_dir, video_path):
             try:
                 from src.config import RecognitionConfig, CAPTURES_DIR, ApiConfig, CameraConfig
                 from src.utils.string_utils import remove_accents
@@ -398,28 +442,6 @@ class FaceTracker:
                 sharpen_kernel = np.array([[0, -0.5, 0], [-0.5, 3, -0.5], [0, -0.5, 0]])
                 final_img = cv2.filter2D(final_img, -1, sharpen_kernel)
 
-                raw_company_name = mongo_db.get_company_name(company_id) if company_id else "unknown_company"
-                company_folder = remove_accents(raw_company_name).replace(" ", "_")
-                
-                # Tạo thư mục con theo tên người (thư mục tên)
-                if is_known:
-                    user_folder = f"{remove_accents(user_name).replace(' ','_')}_{user_id}"
-                    target_dir = CAPTURES_DIR / company_folder / user_folder
-                else:
-                    target_dir = CAPTURES_DIR / company_folder / "Nguoi_La"
-                
-                target_dir.mkdir(parents=True, exist_ok=True)
-                
-                # --- THIẾT LẬP VIDEO ĐỐI SOÁT ---
-                video_path = None
-                if f_data is not None:
-                    if f_data.get('video_path') is None:
-                        v_dir = target_dir.parent / "videos"
-                        v_dir.mkdir(parents=True, exist_ok=True)
-                        v_path = v_dir / f"{int(time.time())}_{remove_accents(user_name).replace(' ','_')}.mp4"
-                        f_data['video_path'] = str(v_path)
-                    video_path = f_data['video_path']
-
                 # Tên ảnh chỉ cần timestamp vì đã nằm trong thư mục tên
                 img_name = f"{int(time.time())}.webp"
                 img_path = str(target_dir / img_name)
@@ -444,7 +466,7 @@ class FaceTracker:
                 logger.error(f"Async log error: {e}")
 
         # Start background saving
-        threading.Thread(target=async_save_task, daemon=True).start()
+        threading.Thread(target=async_save_task, args=(target_dir, video_path), daemon=True).start()
         
         # Return the actual REAL status so Voice says it right
         return "processing_url", final_status
@@ -538,16 +560,19 @@ class FaceTracker:
                     'last_attempt_time':  0,
                     'gathering_embeddings': [],
                     'gather_count':         0,
-                    'video_frames':       [cv2.resize(frame, (640, 360))] if frame is not None else [],
+                    'video_frames':       [],
                     'video_path':         None
                 }
+                self.active_faces[matched_id] = f_data
             else:
                 f_data = self.active_faces[matched_id]
                 f_data['last_seen'] = current_time
                 f_data['center'] = center
                 f_data['bbox'] = face.bbox
-                if frame is not None and len(f_data.setdefault('video_frames', [])) < 900:
-                    f_data['video_frames'].append(cv2.resize(frame, (640, 360)))
+                f_data.setdefault('video_frames', [])
+            
+            # Gán ID vào face để dùng cho phần Render ở cuối
+            face.track_id = matched_id
 
             # SYNC BACK: If we already verified this face in previous frames
             if f_data.get('liveness_verified'):
@@ -768,11 +793,22 @@ class FaceTracker:
                     face.score = 0.0
 
         # ─── SYNC & CLEANUP ─────────────────────────────────────────────────
-        # 1. Cập nhật self.active_faces với các thay đổi trong frame này
+        # 1. Vẽ Render Frame CHUNG cho tất cả video (nếu có frame)
+        if frame is not None:
+            common_render = self._render_frame_for_video(frame, detected_faces)
+            # 2. Cập nhật video_frames cho các face hiện diện trong frame này
+            for face in detected_faces:
+                f_id = getattr(face, 'track_id', None)
+                if f_id is not None and f_id in updated_faces_map:
+                    fdata = updated_faces_map[f_id]
+                    if len(fdata['video_frames']) < 600:
+                        fdata['video_frames'].append(common_render)
+
+        # 3. Cập nhật self.active_faces với các thay đổi trong frame này
         for fid, fdata in updated_faces_map.items():
             self.active_faces[fid] = fdata
 
-        # 2. Xóa các face ID không xuất hiện trong vòng 1 giây & XUẤT VIDEO
+        # 4. Xóa các face ID không xuất hiện trong vòng 1 giây & XUẤT VIDEO
         new_active_faces = {}
         for fid, fdata in self.active_faces.items():
             if current_time - fdata['last_seen'] < 1.0:
