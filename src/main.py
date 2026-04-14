@@ -31,6 +31,8 @@ from src.recognition.tracker import FaceTracker
 from src.config import MongoDbConfig, CameraConfig, DATA_DIR
 from src.ui.app_ui import AttendanceUI, STATE_MENU, STATE_DETECT, STATE_ENROLL_CAM, STATE_ENROLL_UPLOAD, STATE_EDIT, STATE_LIST, STATE_HISTORY, STATE_HKB_LIST, STATE_COMPANY, STATE_CLOUD_USER, STATE_LOGOUT, STATE_SETTINGS, STATE_TEST_CAM
 from src.services.ping_service import ping_service
+from src.utils.log_panel_renderer import draw_log_panel
+from src.utils.webhook_log_bus import start_polling
 
 
 def get_target_company(ui, mongo_db, allow_selection=True, parent=None):
@@ -533,6 +535,9 @@ def main():
     # Load config from MongoDB so that Cooldown/Anti-Spoofing settings take effect immediately
     CameraConfig.load_from_mongodb(mongo_db)
 
+    # Start webhook log polling
+    start_polling()
+
     try:
         face_rec = FaceRecognition()
         attendance = QdrantAttendanceManager()
@@ -653,11 +658,32 @@ def main():
                 # Xóa mouse callback MỘT LẦN khi mới vào STATE_DETECT
                 # → Ngăn click vào camera view vô tình trigger menu buttons
                 if not getattr(main, '_detect_callback_cleared', False):
+                    def on_panel_click(event, x, y, flags, param):
+                        if event == cv2.EVENT_LBUTTONDOWN:
+                            # Tọa độ x0, pw, ph được truyền vào param hoặc tính toán dựa trên current state
+                            # CLEAR button trong log_panel_renderer: [x0+pw-50, x0+pw-4], [ph-17, ph-3]
+                            if RecognitionConfig.TEST_MODE:
+                                cur_w, cur_h = param
+                                p_w = max(220, int(cur_w * 0.25))
+                                x0 = cur_w - p_w
+                                if x >= x0 + p_w - 55 and y >= cur_h - 22:
+                                    from src.utils.webhook_log_bus import clear_logs
+                                    clear_logs()
+
                     try:
-                        cv2.setMouseCallback(win_name, lambda *args: None)
+                        cv2.setMouseCallback(win_name, on_panel_click, param=(cur_w, cur_h))
                     except Exception:
                         pass
                     main._detect_callback_cleared = True
+
+                # Layout:  75% camera | 25% log panel (Only in TEST_MODE)
+                from src.config import RecognitionConfig
+                if RecognitionConfig.TEST_MODE:
+                    panel_w    = max(220, int(cur_w * 0.25))
+                    cam_area_w = cur_w - panel_w
+                else:
+                    panel_w    = 0
+                    cam_area_w = cur_w
 
                 # --- AUTO SWITCH MODE: DIRECT (DEV) vs PREVIEW (PROD/EXE) ---
                 if getattr(sys, 'frozen', False):
@@ -688,7 +714,7 @@ def main():
 
                     if shm_frame is not None:
                         p_h, p_w = shm_frame.shape[:2]
-                        scale = (cur_w - 60) / p_w
+                        scale = (cam_area_w - 60) / p_w
                         target_w, target_h = int(p_w * scale), int(p_h * scale)
                         if target_h > cur_h - 200:
                             scale = (cur_h - 220) / p_h
@@ -696,15 +722,15 @@ def main():
                         
                         try:
                             resized_preview = cv2.resize(shm_frame, (target_w, target_h))
-                            y_off, x_off = 100, (cur_w - target_w) // 2
+                            y_off, x_off = 100, (cam_area_w - target_w) // 2
                             display_frame[y_off:y_off+target_h, x_off:x_off+target_w] = resized_preview
                         except: pass
                         
-                        cv2.rectangle(display_frame, (0, 0), (cur_w, 40), (40, 40, 40), -1)
+                        cv2.rectangle(display_frame, (0, 0), (cam_area_w, 40), (40, 40, 40), -1)
                         cv2.putText(display_frame, "SERVICE MONITOR (PRODUCTION MODE)", (20, 25), 
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
                     else:
-                        cv2.putText(display_frame, "DANG DOI KET NOI VOI SERVICE...", (cur_w//2 - 250, cur_h//2), 
+                        cv2.putText(display_frame, "DANG DOI KET NOI VOI SERVICE...", (cam_area_w//2 - 250, cur_h//2), 
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
                 else:
                     # --- DEVELOPMENT MODE: DIRECT CAMERA CONNECTION FOR TESTING ---
@@ -755,7 +781,21 @@ def main():
                         faces = main.cached_faces_detect
 
                         display_frame = face_rec.draw_faces(frame, faces)
-                        cv2.putText(display_frame, f"FPS: {fps:.1f}", (cur_w - 150, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+
+                        # ── Always Resize & Center onto Canvas ──
+                        f_h, f_w = display_frame.shape[:2]
+                        scale = min(cam_area_w / f_w, cur_h / f_h)
+                        cur_disp_h, cur_disp_w = int(f_h * scale), int(f_w * scale)
+                        
+                        cam_resized = cv2.resize(display_frame, (cur_disp_w, cur_disp_h))
+                        
+                        canvas = np.zeros((cur_h, cur_w, 3), dtype=np.uint8)
+                        y_off = (cur_h - cur_disp_h) // 2
+                        x_off = (cam_area_w - cur_disp_w) // 2
+                        canvas[y_off:y_off+cur_disp_h, x_off:x_off+cur_disp_w] = cam_resized
+                        display_frame = canvas
+
+                        cv2.putText(display_frame, f"FPS: {fps:.1f}", (cam_area_w - 150, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
                         
                         # --- START UI OVERLAY ---
                         current_t = time.time()
@@ -773,7 +813,7 @@ def main():
                             box_w = thumb_w
                             box_h = thumb_h + 20
                             
-                            if box_x + box_w < cur_w and box_y + box_h < cur_h and box_x >= 0 and box_y >= 0:
+                            if box_x + box_w < cam_area_w and box_y + box_h < cur_h and box_x >= 0 and box_y >= 0:
                                 try:
                                     elapsed = current_t - snap["time"]
                                     if elapsed < 1.0:
@@ -801,8 +841,17 @@ def main():
                         
                         if CameraConfig.ROI:
                             x1, y1, x2, y2 = CameraConfig.ROI
-                            cv2.rectangle(display_frame, (x1, y1), (x2, y2), (255, 120, 0), 3)
-                            cv2.putText(display_frame, "VUNG CHAM CONG", (x1 + 10, y1 + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 120, 0), 2)
+                            # Since display_frame is now the full canvas, mapping ROI requires offset
+                            rx1 = x_off + int(x1 * scale)
+                            ry1 = y_off + int(y1 * scale)
+                            rx2 = x_off + int(x2 * scale)
+                            ry2 = y_off + int(y2 * scale)
+                            cv2.rectangle(display_frame, (rx1, ry1), (rx2, ry2), (255, 120, 0), 2)
+                            cv2.putText(display_frame, "VUNG CHAM CONG", (rx1 + 10, ry1 + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 120, 0), 2)
+
+                # ── Log panel ────────────────────────────────────────────────────────
+                if panel_w > 0:
+                    draw_log_panel(display_frame, cam_area_w, panel_w, cur_h)
 
                 cv2.putText(display_frame, "[M] Thoat ve Menu", (20, cur_h - 20), 0, 0.6, (200, 200, 200), 1)
 

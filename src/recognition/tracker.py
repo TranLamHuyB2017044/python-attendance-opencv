@@ -95,8 +95,21 @@ class FaceTracker:
         - Known users: Max 1 webhook per 15 minutes per user_id
         - Unknown faces: Max 10 webhooks total, reset when any known user checks in
         """
-        if RecognitionConfig.TEST_MODE:
-            return
+        # ── Always push to local log bus (for TEST_MODE log panel) ────────────────
+        try:
+            from src.utils.webhook_log_bus import push_sent
+            import datetime
+            push_sent(
+                user_id=str(user_id),
+                user_name=user_name,
+                status=status or "DETECTED",
+                voice_text=custom_voice_text or "",
+                time_str=datetime.datetime.now().strftime("%H:%M:%S")
+            )
+        except Exception:
+            pass
+
+
         import os
         current_time = time.time()  # Định nghĩa current_time local để tránh lỗi reference
 

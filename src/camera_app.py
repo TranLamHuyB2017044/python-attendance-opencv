@@ -22,156 +22,16 @@ from src.recognition.tracker import FaceTracker
 from src.config import RecognitionConfig, CameraConfig
 from src.services.ping_service import ping_service
 
-# ── Webhook log panel constants ──────────────────────────────────────────────
-WEBHOOK_API_URL  = "https://voice-cheking.bittechx.cloud/api/users"
-LOG_POLL_INTERVAL = 3.0          # seconds between API polls
-LOG_PANEL_RATIO   = 0.25         # 25 % of total window width
-LOG_MAX_ROWS      = 30           # max rows kept in memory
+from src.utils.log_panel_renderer import draw_log_panel
+from src.utils.webhook_log_bus import start_polling
 
-# Status → (BGR color, icon char)
-STATUS_META = {
-    "IN":       ((0, 220, 80),   "+"),
-    "OUT":      ((60, 100, 255), "-"),
-    "COOLDOWN": ((0, 200, 255),  "~"),
-    "unknown":  ((80,  80,  80), "?"),
-}
+# ══════════════════════════════════════════════════════════════════════════════
+#  WEBHOOK LOG PANEL
+# ══════════════════════════════════════════════════════════════════════════════
+_LOG_PANEL_RATIO = 0.25          # 25% chiều rộng màn hình
 
+# ── Status colors / short labels ─────────────────────────────────────────────
 
-# ── Shared log state (thread-safe via a lock) ─────────────────────────────────
-_log_lock    = threading.Lock()
-_log_entries = []          # list of dicts from API (newest first, max LOG_MAX_ROWS)
-_log_newest_id = -1        # highest log id seen so far (for blink highlight)
-_log_new_ids   = set()     # ids that arrived in the LAST poll cycle
-
-
-def _log_fetch_worker():
-    """Background thread: poll WEBHOOK_API_URL every LOG_POLL_INTERVAL seconds."""
-    global _log_entries, _log_newest_id, _log_new_ids
-
-    while True:
-        try:
-            req = urllib.request.Request(
-                WEBHOOK_API_URL,
-                headers={"User-Agent": "BitTech-AttendanceMonitor/1.0"}
-            )
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-
-            if isinstance(data, list) and data:
-                # Determine which are truly new since last poll
-                with _log_lock:
-                    old_max = _log_newest_id
-                new_ids_this_cycle = set()
-                new_max = old_max
-
-                for entry in data:
-                    eid = entry.get("id", -1)
-                    if eid > old_max:
-                        new_ids_this_cycle.add(eid)
-                        if eid > new_max:
-                            new_max = eid
-
-                with _log_lock:
-                    _log_entries  = data[:LOG_MAX_ROWS]
-                    _log_newest_id = new_max
-                    _log_new_ids   = new_ids_this_cycle
-
-        except Exception as exc:
-            logger.debug(f"Log fetch error: {exc}")
-
-        time.sleep(LOG_POLL_INTERVAL)
-
-
-def _draw_log_panel(canvas: np.ndarray, x_off: int, panel_w: int, panel_h: int):
-    """
-    Render a dark side-panel onto `canvas` starting at column x_off.
-    Shows the latest webhook attendance records in real-time.
-    """
-    # ── Background ────────────────────────────────────────────────────────────
-    cv2.rectangle(canvas, (x_off, 0), (x_off + panel_w, panel_h),
-                  (18, 18, 28), -1)          # very dark navy
-    # Thin separator line
-    cv2.line(canvas, (x_off, 0), (x_off, panel_h), (50, 50, 80), 2)
-
-    # ── Header ────────────────────────────────────────────────────────────────
-    header_h = 48
-    cv2.rectangle(canvas, (x_off, 0), (x_off + panel_w, header_h),
-                  (28, 28, 48), -1)
-    now_str = datetime.datetime.now().strftime("%H:%M:%S")
-
-    # Title
-    cv2.putText(canvas, "WEBHOOK LOG", (x_off + 8, 20),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.52, (140, 200, 255), 1, cv2.LINE_AA)
-    cv2.putText(canvas, now_str, (x_off + 8, 38),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.42, (100, 160, 200), 1, cv2.LINE_AA)
-
-    # Live dot (blink every second)
-    dot_color = (0, 230, 80) if int(time.time()) % 2 == 0 else (0, 120, 40)
-    cv2.circle(canvas, (x_off + panel_w - 14, 20), 5, dot_color, -1)
-
-    # ── Entries ───────────────────────────────────────────────────────────────
-    with _log_lock:
-        entries    = list(_log_entries)
-        new_ids    = set(_log_new_ids)
-
-    row_h  = 54          # height per log row
-    y_base = header_h + 6
-    font   = cv2.FONT_HERSHEY_SIMPLEX
-
-    for i, entry in enumerate(entries):
-        y_top = y_base + i * row_h
-        if y_top + row_h > panel_h:
-            break
-
-        eid    = entry.get("id", -1)
-        status = entry.get("status", "unknown")
-        name   = entry.get("user_name", "Unknown")
-        uid    = str(entry.get("user_id", ""))
-        t_str  = entry.get("time", "")
-        vtxt   = entry.get("voice_text", "")
-
-        color, icon = STATUS_META.get(status, ((120, 120, 120), "?"))
-        is_new = eid in new_ids
-
-        # Row background (highlight new entries briefly)
-        row_bg = (35, 35, 55) if not is_new else (35, 55, 35)
-        cv2.rectangle(canvas, (x_off + 2, y_top),
-                      (x_off + panel_w - 2, y_top + row_h - 2), row_bg, -1)
-
-        # Status pill
-        pill_x = x_off + 6
-        pill_y = y_top + 8
-        pill_w, pill_h = 42, 18
-        cv2.rectangle(canvas, (pill_x, pill_y),
-                      (pill_x + pill_w, pill_y + pill_h), color, -1, cv2.LINE_AA)
-        cv2.putText(canvas, f"{icon} {status[:4]}", (pill_x + 2, pill_y + 13),
-                    font, 0.32, (255, 255, 255), 1, cv2.LINE_AA)
-
-        # Time
-        cv2.putText(canvas, t_str, (x_off + pill_w + 12, y_top + 20),
-                    font, 0.38, (180, 180, 180), 1, cv2.LINE_AA)
-
-        # Name (truncate if too long)
-        max_name_w = panel_w - 14
-        name_disp = name if len(name) <= 22 else name[:20] + ".."
-        cv2.putText(canvas, name_disp, (x_off + 6, y_top + 38),
-                    font, 0.42, (220, 230, 255), 1, cv2.LINE_AA)
-
-        # UID small
-        uid_disp = f"#{uid}" if uid and uid != "Unknown" else ""
-        if uid_disp:
-            cv2.putText(canvas, uid_disp, (x_off + panel_w - 70, y_top + 38),
-                        font, 0.30, (100, 120, 150), 1, cv2.LINE_AA)
-
-        # Divider
-        cv2.line(canvas, (x_off + 4, y_top + row_h - 1),
-                 (x_off + panel_w - 4, y_top + row_h - 1), (40, 40, 60), 1)
-
-    # ── Footer: total count ───────────────────────────────────────────────────
-    with _log_lock:
-        cnt = len(_log_entries)
-    cv2.putText(canvas, f"Total records: {cnt}", (x_off + 8, panel_h - 8),
-                font, 0.33, (70, 90, 120), 1, cv2.LINE_AA)
 
 
 def main():
@@ -182,14 +42,8 @@ def main():
     # Start Ping Service
     ping_service.start()
 
-    # ── Start log-fetch background thread (TEST_MODE only) ──────────────────
-    _test_mode = RecognitionConfig.TEST_MODE
-    if _test_mode:
-        log_thread = threading.Thread(target=_log_fetch_worker, daemon=True)
-        log_thread.start()
-        logger.info(f"[TEST_MODE] Webhook log panel started — polling {WEBHOOK_API_URL}")
-    else:
-        logger.info("Webhook log panel disabled (TEST_MODE=false)")
+    # ── Start log-fetch background thread ────────────────────────────────────
+    start_polling()
 
     try:
         face_rec   = FaceRecognition()
@@ -201,9 +55,8 @@ def main():
         return
 
     # ── Window setup ──────────────────────────────────────────────────────────
-    TOTAL_W = 1600 if _test_mode else 1280
-    TOTAL_H = 900  if _test_mode else 720
-    win_name = "CAMERA TU DONG DIEM DANH"
+    TOTAL_W, TOTAL_H = 1600, 900
+    win_name = "He thong Diem danh Khuon mat"
     cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(win_name, TOTAL_W, TOTAL_H)
 
@@ -244,6 +97,24 @@ def main():
                     cv2.FONT_HERSHEY_SIMPLEX, scale, (0, 0, 0), thick + 1)
         cv2.putText(img, text, pos,
                     cv2.FONT_HERSHEY_SIMPLEX, scale, color, thick)
+
+    # --- Mouse Callback logic for Log Panel Buttons ---
+    def on_mouse_click(event, x, y, flags, param):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            # Lấy kích thước hiện tại từ window để tính toán click area
+            try:
+                _, _, cw, ch = cv2.getWindowImageRect(win_name)
+                if cw > 0:
+                    pw = max(220, int(cw * _LOG_PANEL_RATIO))
+                    x0 = cw - pw
+                    if x >= x0 + pw - 55 and y >= ch - 22:
+                        from src.utils.webhook_log_bus import clear_logs
+                        clear_logs()
+            except Exception: pass
+
+    cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
+    cv2.setMouseCallback(win_name, on_mouse_click)
+    # ───────────────────────────────────────────────────
 
     try:
         while True:
@@ -288,12 +159,8 @@ def main():
                 cur_w, cur_h = TOTAL_W, TOTAL_H
 
             # In TEST_MODE: 75% cam + 25% log panel; else full width
-            if _test_mode:
-                panel_w = max(200, int(cur_w * LOG_PANEL_RATIO))
-                cam_w   = cur_w - panel_w
-            else:
-                panel_w = 0
-                cam_w   = cur_w
+            panel_w = max(220, int(cur_w * _LOG_PANEL_RATIO))
+            cam_w   = cur_w - panel_w
 
             # ── Compose display frame ────────────────────────────────────────
             canvas = np.zeros((cur_h, cur_w, 3), dtype=np.uint8)
@@ -316,7 +183,8 @@ def main():
 
             # Center vertically in left region
             y_off = (cur_h - new_cam_h) // 2
-            canvas[y_off:y_off + new_cam_h, 0:new_cam_w] = cam_resized
+            x_off = (cam_w - new_cam_w) // 2
+            canvas[y_off:y_off + new_cam_h, x_off:x_off + new_cam_w] = cam_resized
 
             # ── HUD overlay on camera region ──────────────────────────────────
             now_str      = datetime.datetime.now().strftime("%H:%M:%S")
@@ -350,9 +218,9 @@ def main():
 
             put_shadow(canvas, "[Q] Thoat", (10, cur_h - 30), 0.45, (160, 160, 160), 1)
 
-            # ── RIGHT: Log panel (25%) — TEST_MODE only ──────────────────
-            if _test_mode and panel_w > 0:
-                _draw_log_panel(canvas, cam_w, panel_w, cur_h)
+            # --- RIGHT: Log panel (25%) ---
+            if panel_w > 0:
+                draw_log_panel(canvas, cam_w, panel_w, cur_h)
 
             cv2.imshow(win_name, canvas)
 
@@ -368,7 +236,6 @@ def main():
         cv2.destroyAllWindows()
         ping_service.stop()
         logger.info("Camera app shut down.")
-
 
 if __name__ == "__main__":
     main()

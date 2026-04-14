@@ -4,25 +4,24 @@ import warnings
 import numpy as np
 import sys
 import os
+import threading
+import urllib.request
+import json
+import datetime
 from loguru import logger
 
 # --- CẤU HÌNH ĐƯỜNG DẪN CHO PYINSTALLER ---
-# --- FIX FOR WINDOWED MODE (NoneType.write error) ---
 if sys.stdout is None:
     sys.stdout = open(os.devnull, 'w', encoding='utf-8')
 if sys.stderr is None:
     sys.stderr = open(os.devnull, 'w', encoding='utf-8')
 
 if getattr(sys, 'frozen', False):
-    # Nếu chạy từ file .exe
     base_dir = sys._MEIPASS
-    # --- THÊM ĐƯỜNG DẪN NGOÀI ĐỂ HỖ TRỢ LIVE UPDATE (Dành cho Loader + Source flow) ---
-    # Cho phép ghi đè logic bằng cách copy file .py vào thư mục 'src' bên cạnh file .exe
     exe_dir = os.path.dirname(sys.executable)
     if exe_dir not in sys.path:
-        sys.path.insert(0, exe_dir) 
+        sys.path.insert(0, exe_dir)
 else:
-    # Nếu chạy từ code python
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 if base_dir not in sys.path:
@@ -39,45 +38,59 @@ from src.ui.app_ui import (
     STATE_TEST_CAM, STATE_EXIT
 )
 from src.main import enroll_from_camera, enroll_by_upload, get_target_company, handle_edit_logic
-from src.config import DATA_DIR, MongoDbConfig, CameraConfig
+from src.config import DATA_DIR, MongoDbConfig, CameraConfig, RecognitionConfig
 
 from src.utils.notification import show_error_message, send_notification
+from src.utils.log_panel_renderer import draw_log_panel
+from src.utils.webhook_log_bus import start_polling
 
-# ─── LAZY AI LOADER ──────────────────────────────────────────────────────────
-# Management App KHÔNG load AI lúc khởi động.
-# AI (FaceRecognition + Camera) chỉ được load KHI USER vào chế độ Enrollment/Edit.
-# Điều này giúp tiết kiệm ~300-500MB RAM và ~20-30% CPU khi chạy song song với CameraService.
-# ─────────────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+#  LOG PANEL CONFIG
+# ══════════════════════════════════════════════════════════════════════════════
+_LOG_PANEL_RATIO = 0.25          # 25% chiều rộng màn hình
 
-_face_rec = None   # Lazy singleton — chỉ tạo khi cần
-_camera   = None   # Lazy singleton — chỉ tạo khi cần enrollment qua camera
+# ── Status colors / short labels ─────────────────────────────────────────────
+_S_COLOR = {
+    "IN":       (0,  210,  80),
+    "OUT":      (50,  90, 240),
+    "COOLDOWN": (0,  190, 240),
+    "SPOOF":    (0,   50, 230),
+    "unknown":  (70,  70,  70),
+    "DETECTED": (160, 110,  0),
+}
+_S_LABEL = {
+    "IN": "IN", "OUT": "OUT", "COOLDOWN": "CD",
+    "SPOOF": "SP", "unknown": "??", "DETECTED": "DT",
+}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  LAZY AI LOADER
+# ══════════════════════════════════════════════════════════════════════════════
+_face_rec = None
+_camera   = None
 
 def _get_face_rec():
-    """Lazy-load FaceRecognition. Chỉ gọi khi thực sự cần (enrollment/edit)."""
     global _face_rec
     if _face_rec is None:
-        logger.info("[LazyLoad] Đang tải AI models cho chức năng Đăng ký...")
-        # Show loading notification to user
-        _show_loading_window("Đang tải AI Models cho chức năng Đăng ký...\nVui lòng chờ trong giây lát.")
+        logger.info("[LazyLoad] Đang tải AI models...")
+        _show_loading_window("Đang tải AI Models...\nVui lòng chờ trong giây lát.")
         from src.recognition.face_recognition import FaceRecognition
         _face_rec = FaceRecognition()
         _close_loading_window()
-        logger.success("[LazyLoad] FaceRecognition loaded thành công.")
+        logger.success("[LazyLoad] FaceRecognition loaded.")
     return _face_rec
 
 def _get_camera():
-    """Lazy-load RTSPCamera. Chỉ gọi khi enroll qua camera."""
     global _camera
     if _camera is None:
         from src.camera.rtsp_camera import RTSPCamera
         _camera = RTSPCamera()
     return _camera
 
-# Loading window helpers
 _loading_win = "Loading AI..."
 
 def _show_loading_window(msg: str):
-    """Hiện cửa sổ thông báo loading nhỏ."""
     try:
         f = np.zeros((120, 600, 3), dtype=np.uint8)
         cv2.rectangle(f, (0, 0), (600, 120), (30, 30, 30), -1)
@@ -100,61 +113,66 @@ def _close_loading_window():
         pass
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  MAIN
+# ══════════════════════════════════════════════════════════════════════════════
 def main():
     setup_logger()
     logger.info("Starting Management Interface (No-AI mode)...")
     warnings.filterwarnings("ignore", category=FutureWarning)
 
-    # Chặn mở nhiều app cùng lúc
     from src.utils.single_instance import force_single_instance
     force_single_instance("ManagementApp")
 
-    # --- 1. HIỆN MÀN HÌNH LOADING NGAY LẬP TỨC ---
+    # ── Start webhook log panel threads ──────────────────────────────────────
+    start_polling()
+
+    # ── Loading screen ────────────────────────────────────────────────────────
+    WIN_W, WIN_H = 1600, 900
+
     win_loading = "BITTECH AI"
     cv2.namedWindow(win_loading, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(win_loading, 1280, 720)
+    cv2.resizeWindow(win_loading, WIN_W, WIN_H)
 
-    loading_frame = np.zeros((720, 1280, 3), dtype=np.uint8)
-    cv2.rectangle(loading_frame, (0, 0), (1280, 720), (30, 30, 30), -1)
-    cv2.putText(loading_frame, "BITTECH AI", (440, 300),
+    lf = np.zeros((WIN_H, WIN_W, 3), dtype=np.uint8)
+    cv2.rectangle(lf, (0, 0), (WIN_W, WIN_H), (28, 28, 28), -1)
+    cx = WIN_W // 2
+    cv2.putText(lf, "BITTECH AI", (cx - 130, WIN_H // 2 - 40),
                 cv2.FONT_HERSHEY_DUPLEX, 1.2, (255, 255, 255), 2)
-    cv2.putText(loading_frame, "DANG KHOI TAO HE THONG... VUI LONG CHO TRONG GIAY LAT", (320, 380),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 1)
-
-    # Progress bar
-    cv2.rectangle(loading_frame, (440, 420), (840, 430), (60, 60, 60), -1)
-    cv2.imshow(win_loading, loading_frame)
+    cv2.putText(lf, "DANG KHOI TAO HE THONG... VUI LONG CHO TRONG GIAY LAT",
+                (cx - 300, WIN_H // 2 + 20),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (180, 180, 180), 1)
+    bar_x0, bar_x1_full = cx - 200, cx + 200
+    cv2.rectangle(lf, (bar_x0, WIN_H // 2 + 50), (bar_x1_full, WIN_H // 2 + 62), (55, 55, 55), -1)
+    cv2.imshow(win_loading, lf)
     cv2.waitKey(1)
 
     try:
-        # ── Chỉ khởi tạo DATABASE, không load AI ──
-        logger.info("Step 1: Connecting to Vector Database (Qdrant)...")
-        cv2.rectangle(loading_frame, (440, 420), (640, 430), (0, 255, 0), -1)
-        cv2.imshow(win_loading, loading_frame)
-        cv2.waitKey(1)
+        logger.info("Step 1: Connecting to Qdrant...")
+        cv2.rectangle(lf, (bar_x0, WIN_H // 2 + 50),
+                      (bar_x0 + (bar_x1_full - bar_x0) // 3, WIN_H // 2 + 62), (0, 200, 80), -1)
+        cv2.imshow(win_loading, lf); cv2.waitKey(1)
         attendance = QdrantAttendanceManager()
 
         logger.info("Step 2: Connecting to MongoDB...")
-        cv2.rectangle(loading_frame, (440, 420), (740, 430), (0, 255, 0), -1)
-        cv2.imshow(win_loading, loading_frame)
-        cv2.waitKey(1)
+        cv2.rectangle(lf, (bar_x0, WIN_H // 2 + 50),
+                      (bar_x0 + (bar_x1_full - bar_x0) * 2 // 3, WIN_H // 2 + 62), (0, 200, 80), -1)
+        cv2.imshow(win_loading, lf); cv2.waitKey(1)
         CameraConfig.load_from_mongodb(mongo_db)
 
         logger.info("Step 3: Initializing UI...")
-        cv2.rectangle(loading_frame, (440, 420), (840, 430), (0, 255, 0), -1)
-        cv2.imshow(win_loading, loading_frame)
-        cv2.waitKey(1)
+        cv2.rectangle(lf, (bar_x0, WIN_H // 2 + 50),
+                      (bar_x1_full, WIN_H // 2 + 62), (0, 200, 80), -1)
+        cv2.imshow(win_loading, lf); cv2.waitKey(1)
         ui = AttendanceUI(is_manager_app=True)
 
-        # Check service status immediately
         status_doc = mongo_db.db.system_status.find_one({
             "type": "camera_service", "company_id": MongoDbConfig.COMPANY_ID
         })
         if status_doc:
-            last_seen = status_doc.get("last_seen", 0)
-            ui.service_active = (time.time() - last_seen < 15)
+            ui.service_active = (time.time() - status_doc.get("last_seen", 0) < 15)
 
-        logger.success("Management App ready (AI models NOT loaded — will lazy-load on demand).")
+        logger.success("Management App ready.")
 
     except Exception as e:
         logger.critical(f"Khoi tao that bai: {e}")
@@ -171,52 +189,50 @@ def main():
     except Exception:
         pass
 
-    # Initial Login Loop
+    # Login
     while True:
         login_res = ui.show_login_dialog()
         if login_res == "EXIT":
-            logger.info("Người dùng chọn thoát tại màn hình đăng nhập.")
+            logger.info("User thoát tại màn hình đăng nhập.")
             return
         if login_res is True:
             break
-        logger.warning("Cửa sổ đăng nhập bị đóng. Vui lòng đăng nhập để tiếp tục.")
+        logger.warning("Cửa sổ đăng nhập bị đóng.")
 
     try:
-        service_active = False
-        last_heartbeat_check = 0
-        last_w, last_h = 0, 0
+        service_active     = False
+        last_hb_check      = 0
+        last_w, last_h     = 0, 0
+        _shm_seq           = -1
+        _shm_obj           = None
+        _last_frame        = None
+        _detect_entered    = False   # flag: first time entering STATE_DETECT
 
         display_frame = ui.draw_main_menu()
 
-        # ─── SHM state for STATE_DETECT ───────────────────────────────────────
-        _shm_seq    = -1
-        _shm_obj    = None
-        _last_frame = None
-
         while True:
-            # Check window size
+            # ── Window size ─────────────────────────────────────────────────
             try:
                 _, _, cur_w, cur_h = cv2.getWindowImageRect(win_name)
                 if cur_w <= 0 or cur_h <= 0:
-                    cur_w, cur_h = 1280, 720
+                    cur_w, cur_h = WIN_W, WIN_H
             except Exception:
-                cur_w, cur_h = 1280, 720
+                cur_w, cur_h = WIN_W, WIN_H
 
-            # Periodically check service heartbeat (every 2 seconds)
-            if time.time() - last_heartbeat_check > 2:
+            # ── Heartbeat check ─────────────────────────────────────────────
+            if time.time() - last_hb_check > 2:
                 status_doc = mongo_db.db.system_status.find_one({
                     "type": "camera_service", "company_id": MongoDbConfig.COMPANY_ID
                 })
                 if status_doc:
-                    last_seen = status_doc.get("last_seen", 0)
-                    service_active = (time.time() - last_seen < 15)
+                    service_active      = (time.time() - status_doc.get("last_seen", 0) < 15)
                     ui.camera_connected = status_doc.get("camera_connected", False)
                 else:
-                    service_active = False
+                    service_active      = False
                     ui.camera_connected = False
-                last_heartbeat_check = time.time()
+                last_hb_check = time.time()
 
-            # ── STATE: MENU ────────────────────────────────────────────────────
+            # ══ STATE: MENU ══════════════════════════════════════════════════
             if ui.current_state == STATE_MENU:
                 try:
                     cv2.destroyWindow(win_name)
@@ -225,24 +241,25 @@ def main():
 
                 ui.show_main_dashboard(
                     mongo_db, attendance=attendance,
-                    face_rec=None,    # Management App không truyền face_rec vào dashboard
-                    camera=None,
+                    face_rec=None, camera=None,
                     service_active=service_active
                 )
 
-                if ui.current_state in [STATE_DETECT, STATE_TEST_CAM]:
+                if last_w != WIN_W or last_h != WIN_H:
                     cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
-                    cv2.resizeWindow(win_name, 1280, 720)
+                    init_w = WIN_W if ui.current_state == STATE_DETECT else 1280
+                    init_h = WIN_H if ui.current_state == STATE_DETECT else 720
+                    cv2.resizeWindow(win_name, init_w, init_h)
 
-                main._detect_cb_cleared = False  # Reset flag để lần sau vào DETECT xóa callback
-                last_w, last_h = 0, 0
+                main._detect_cb_cleared = False
+                _detect_entered = False
+                last_w, last_h  = 0, 0
                 continue
 
-            # ── STATE: DETECT (Live Monitor via SHM) ──────────────────────────
+            # ══ STATE: DETECT (Live Monitor via Shared Memory) ═══════════════
             elif ui.current_state == STATE_DETECT:
                 if not service_active:
                     from src.utils.notification import show_info_message
-                    logger.warning("[Monitor] Service inactive (heartbeat lost).")
                     show_info_message(
                         "Thông báo",
                         "Dịch vụ Camera ẩn đã dừng hoặc chưa chạy.\nQuay lại Menu chính."
@@ -250,9 +267,16 @@ def main():
                     ui.current_state = STATE_MENU
                     continue
 
+                # Resize window once when first entering STATE_DETECT
+                if not _detect_entered:
+                    cv2.resizeWindow(win_name, WIN_W, WIN_H)
+                    _detect_entered = True
 
-                # Xóa mouse callback MỘT LẦN khi mới vào STATE_DETECT
-                # → Ngăn click camera view vô tình trigger các button từ state trước
+                # Layout:  75% camera | 25% log panel
+                panel_w    = max(220, int(cur_w * _LOG_PANEL_RATIO))
+                cam_area_w = cur_w - panel_w
+
+                # Clear mouse callback once
                 if not getattr(main, '_detect_cb_cleared', False):
                     try:
                         cv2.setMouseCallback(win_name, lambda *args: None)
@@ -260,129 +284,109 @@ def main():
                         pass
                     main._detect_cb_cleared = True
 
-                # Kết nối SHM nếu chưa có
+                # Connect to SHM
                 if _shm_obj is None and service_active:
                     try:
                         from multiprocessing import shared_memory
-                        # Explicitly specify create=False
-                        _shm_obj = shared_memory.SharedMemory(name="bittech_monitor_shm", create=False)
-                        logger.success("[Monitor] Kết nối thành công tới Shared Memory của Camera Service.")
+                        _shm_obj = shared_memory.SharedMemory(
+                            name="bittech_monitor_shm", create=False)
+                        logger.success("[Monitor] Shared Memory connected.")
                     except Exception as e:
                         _shm_obj = None
-                        # Chỉ log lỗi định kỳ để tránh tràn log
                         if int(time.time()) % 10 == 0:
-                            logger.debug(f"[Monitor] Chờ Shared Memory... ({e})")
+                            logger.debug(f"[Monitor] Waiting SHM... ({e})")
 
                 preview_img = None
                 new_frame   = False
 
                 if _shm_obj is not None:
                     try:
-                        # Đọc buffer trực tiếp để tối ưu
-                        buf = _shm_obj.buf
+                        buf  = _shm_obj.buf
                         seq1 = int(buf[0])
-
-                        # Protocol: EVEN sequence = frame hợp lệ (ghi xong)
                         if seq1 % 2 == 0 and seq1 != _shm_seq:
                             seq2 = int(buf[0])
-                            if seq1 == seq2:
-                                if buf[1] == 1:  # RAW
-                                    # Sử dụng np.frombuffer trực tiếp trên memoryview slice (nhanh + an toàn)
-                                    w = int(np.frombuffer(buf[2:4], dtype=np.uint16)[0])
-                                    h = int(np.frombuffer(buf[4:6], dtype=np.uint16)[0])
-                                    
-                                    if 100 < w < 3000 and 100 < h < 2000:
-                                        size = w * h * 3
-                                        offset = 10
-                                        if offset + size <= len(buf):
-                                            raw = np.frombuffer(buf[offset:offset + size], dtype=np.uint8).reshape((h, w, 3))
-                                            preview_img = raw.copy()
-                                            _shm_seq = seq1
-                                            _last_frame = preview_img
-                                            new_frame = True
-                    except (ValueError, IndexError, OSError) as e:
-                        logger.debug(f"[Monitor] SHM Read error: {e}")
-                        _shm_obj = None  # Thử kết nối lại ở vòng lặp sau
-                    except Exception as e:
-                        pass
-                    except OSError:
-                        # SHM bị đóng từ phía service → thử kết nối lại
+                            if seq1 == seq2 and buf[1] == 1:
+                                w = int(np.frombuffer(buf[2:4], dtype=np.uint16)[0])
+                                h = int(np.frombuffer(buf[4:6], dtype=np.uint16)[0])
+                                if 100 < w < 3000 and 100 < h < 2000:
+                                    size = w * h * 3
+                                    if 10 + size <= len(buf):
+                                        raw = np.frombuffer(
+                                            buf[10:10 + size], dtype=np.uint8
+                                        ).reshape((h, w, 3))
+                                        preview_img = raw.copy()
+                                        _shm_seq    = seq1
+                                        _last_frame = preview_img
+                                        new_frame   = True
+                    except (ValueError, IndexError, OSError):
                         _shm_obj = None
                     except Exception:
-                        pass  # Đọc thất bại tạm thời → giữ frame cũ
-                # Không có frame mới → giữ frame cũ, nhường CPU
+                        pass
+
                 if not new_frame:
-                    if _last_frame is not None:
-                        preview_img = _last_frame
-                    cv2.waitKey(33)  # ~30fps ceiling khi chờ SHM cập nhật
+                    preview_img = _last_frame
+                    cv2.waitKey(33)
                 else:
                     cv2.waitKey(1)
 
-                # Dựng khung hiển thị
+                # ── Compose canvas ───────────────────────────────────────────
                 display_frame = np.zeros((cur_h, cur_w, 3), dtype=np.uint8)
 
                 if preview_img is not None:
                     p_h, p_w = preview_img.shape[:2]
-                    scale    = min(cur_w / p_w, cur_h / p_h)
-                    target_w = int(p_w * scale)
-                    target_h = int(p_h * scale)
-
-                    if abs(scale - 1.0) < 0.01:
-                        # Pixel-perfect: cùng kích thước → không resize, không mất chất lượng
-                        resized = preview_img
-                    elif scale < 1.0:
-                        # Dùng INTER_LINEAR để mượt mà và nhanh hơn (giống main.py)
-                        resized = cv2.resize(preview_img, (target_w, target_h),
-                                             interpolation=cv2.INTER_LINEAR)
-                    else:
-                        # Upscale → INTER_LINEAR nhanh và sắc
-                        resized = cv2.resize(preview_img, (target_w, target_h),
-                                             interpolation=cv2.INTER_LINEAR)
-
-                    y_off = (cur_h - target_h) // 2
-                    x_off = (cur_w - target_w) // 2
-                    display_frame[y_off:y_off + target_h, x_off:x_off + target_w] = resized
+                    scale    = min(cam_area_w / p_w, cur_h / p_h)
+                    t_w      = int(p_w * scale)
+                    t_h      = int(p_h * scale)
+                    resized  = cv2.resize(preview_img, (t_w, t_h),
+                                          interpolation=cv2.INTER_LINEAR)
+                    yo = (cur_h - t_h) // 2
+                    xo = (cam_area_w - t_w) // 2
+                    display_frame[yo:yo + t_h, xo:xo + t_w] = resized
                 else:
                     cv2.putText(
                         display_frame, "DANG KET NOI MONITOR...",
-                        (cur_w // 2 - 150, cur_h // 2),
+                        (cam_area_w // 2 - 150, cur_h // 2),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2
                     )
 
-                cv2.putText(display_frame, "[M] Thoat", (10, cur_h - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (80, 80, 80), 1)
+                cv2.putText(display_frame, "[M] Thoat / [Q] Menu",
+                            (10, cur_h - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.38, (70, 70, 70), 1)
 
-            # ── STATE: ENROLL_CAM ─────────────────────────────────────────────
+                # ── Log panel ────────────────────────────────────────────────────────
+                if panel_w > 0:
+                    draw_log_panel(display_frame, cam_area_w, panel_w, cur_h)
+
+            # ══ STATE: ENROLL_CAM ════════════════════════════════════════════
             elif ui.current_state == STATE_ENROLL_CAM:
-                face_rec = _get_face_rec()   # Lazy-load lần đầu
+                face_rec = _get_face_rec()
                 cam      = _get_camera()
-
                 if not cam.is_connected:
                     if not cam.connect():
-                        show_error_message("Lỗi kết nối", "Không thể kết nối với camera để thực hiện đăng ký!")
+                        show_error_message("Lỗi kết nối",
+                                           "Không thể kết nối camera để đăng ký!")
                         ui.current_state = STATE_MENU
                         continue
-
                 enroll_from_camera(cam, face_rec, attendance, ui)
                 ui.current_state = STATE_MENU
                 continue
 
-            # ── STATE: ENROLL_UPLOAD ──────────────────────────────────────────
+            # ══ STATE: ENROLL_UPLOAD ═════════════════════════════════════════
             elif ui.current_state == STATE_ENROLL_UPLOAD:
-                face_rec = _get_face_rec()   # Lazy-load lần đầu
+                face_rec = _get_face_rec()
                 enroll_by_upload(face_rec, attendance, ui)
                 ui.current_state = STATE_MENU
                 continue
 
-            # ── STATE: EDIT ───────────────────────────────────────────────────
+            # ══ STATE: EDIT ══════════════════════════════════════════════════
             elif ui.current_state == STATE_EDIT:
-                face_rec = _get_face_rec()   # Lazy-load lần đầu
+                face_rec = _get_face_rec()
                 cam      = _get_camera()
                 handle_edit_logic(attendance, face_rec, ui, cam)
                 ui.current_state = STATE_MENU
                 continue
 
-            # ── STATE: LIST ───────────────────────────────────────────────────
+            # ══ STATE: LIST ══════════════════════════════════════════════════
             elif ui.current_state == STATE_LIST:
                 target_cid = get_target_company(ui, mongo_db, allow_selection=True)
                 if target_cid:
@@ -390,11 +394,11 @@ def main():
                     qdrant_employees = attendance.get_all_users(company_id=target_cid)
                     all_employees, seen_ids = [], set()
                     for emp in qdrant_employees:
-                        u_id_str = str(emp['user_id'])
-                        if u_id_str not in seen_ids:
-                            all_employees.append({'user_id': u_id_str, 'user_name': emp['user_name'],
+                        u = str(emp['user_id'])
+                        if u not in seen_ids:
+                            all_employees.append({'user_id': u, 'user_name': emp['user_name'],
                                                   'birthday': emp['birthday'], 'has_face': True})
-                            seen_ids.add(u_id_str)
+                            seen_ids.add(u)
                     for emp in mongo_employees:
                         if str(emp['user_id']) not in seen_ids:
                             all_employees.append({'user_id': emp['user_id'], 'user_name': emp['name'],
@@ -407,9 +411,9 @@ def main():
             elif ui.current_state == STATE_HISTORY:
                 target_cid = get_target_company(ui, mongo_db, allow_selection=True)
                 if target_cid:
-                    company_displayName = mongo_db.get_company_name(target_cid)
-                    target_date = ui.get_date_form(
-                        title=f"Lịch sử [{company_displayName}]",
+                    company_name = mongo_db.get_company_name(target_cid)
+                    target_date  = ui.get_date_form(
+                        title=f"Lịch sử [{company_name}]",
                         ok_button_text="LẤY DỮ LIỆU"
                     )
                     if target_date:
@@ -435,19 +439,14 @@ def main():
             elif ui.current_state == STATE_LOGOUT:
                 ui.session_role       = None
                 ui.session_company_id = None
-
                 logged_in = False
                 while True:
-                    login_res = ui.show_login_dialog()
-                    if login_res == "EXIT":
-                        break
-                    if login_res is True:
-                        logged_in = True
-                        break
-
+                    r = ui.show_login_dialog()
+                    if r == "EXIT": break
+                    if r is True:
+                        logged_in = True; break
                 if not logged_in:
                     break
-
                 ui.current_state = STATE_MENU
                 continue
 
@@ -457,7 +456,7 @@ def main():
                 continue
 
             elif ui.current_state == STATE_EXIT:
-                logger.info("Thoát ứng dụng theo yêu cầu người dùng.")
+                logger.info("Thoát theo yêu cầu người dùng.")
                 break
 
             elif ui.current_state == STATE_COMPANY:
@@ -465,19 +464,18 @@ def main():
                 ui.current_state = STATE_MENU
                 continue
 
-            # ── STATE: TEST_CAM (xem camera trực tiếp — không cần AI) ─────────
+            # ══ STATE: TEST_CAM ══════════════════════════════════════════════
             elif ui.current_state == STATE_TEST_CAM:
-                cam = _get_camera()
+                cam      = _get_camera()
                 cam_ip   = mongo_db.get_setting("camera_ip",   CameraConfig.IP,   username=ui.session_username)
                 cam_port = mongo_db.get_setting("camera_port", CameraConfig.PORT, username=ui.session_username)
                 cam_user = mongo_db.get_setting("camera_user", CameraConfig.USER, username=ui.session_username)
                 cam_pass = mongo_db.get_setting("camera_pass", CameraConfig.PASS, username=ui.session_username)
-                
-                import os
-                new_url  = f"rtsp://{cam_user}:{cam_pass}@{cam_ip}:{cam_port}/ch1/main"
+
+                new_url = f"rtsp://{cam_user}:{cam_pass}@{cam_ip}:{cam_port}/ch1/main"
                 env_url = os.getenv("RTSP_URL")
-                if env_url and str(cam_ip) in env_url: new_url = env_url
-                
+                if env_url and str(cam_ip) in env_url:
+                    new_url = env_url
                 if cam_ip.isdigit():
                     new_url = cam_ip
 
@@ -494,41 +492,36 @@ def main():
                         ui.current_state = STATE_MENU
                         continue
 
-                # Inner loop — chỉ hiển thị raw stream, không AI
                 while ui.current_state == STATE_TEST_CAM:
                     success, frame = cam.read_frame()
                     if not success or frame is None:
                         f = np.zeros((cur_h, cur_w, 3), dtype=np.uint8)
                         cv2.putText(f, "KHONG THE DOC FRAME", (100, 100), 0, 1, (0, 0, 255), 2)
                         cv2.imshow(win_name, f)
-                        if cv2.waitKey(1) & 0xFF == ord('m'):
-                            break
+                        if cv2.waitKey(1) & 0xFF == ord('m'): break
                         continue
-
-                    # Chỉ hiển thị raw — KHÔNG chạy AI!
                     display = frame.copy()
                     if CameraConfig.ROI:
                         x1, y1, x2, y2 = CameraConfig.ROI
                         cv2.rectangle(display, (x1, y1), (x2, y2), (255, 120, 0), 2)
                         cv2.putText(display, "VUNG CHAM CONG", (x1 + 10, y1 + 30),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 120, 0), 2)
-
                     cv2.putText(display, "CHEDO TEST CAMERA (KHONG AI)", (10, cur_h - 50),
                                 0, 0.7, (0, 165, 255), 2)
                     cv2.putText(display, "[M] Quay ve Menu", (10, cur_h - 20),
                                 0, 0.6, (255, 255, 255), 1)
                     cv2.imshow(win_name, display)
-                    if cv2.waitKey(1) & 0xFF == ord('m'):
-                        break
+                    if cv2.waitKey(1) & 0xFF == ord('m'): break
 
                 cam.disconnect()
                 ui.current_state = STATE_MENU
                 continue
 
-            # ── RENDER FRAME ───────────────────────────────────────────────────
-            final_show = display_frame if ui.current_state in [STATE_DETECT, STATE_TEST_CAM] else ui.frame
+            # ══ RENDER (DETECT only — other states render their own windows) ═
+            final_show = (display_frame
+                          if ui.current_state in [STATE_DETECT, STATE_TEST_CAM]
+                          else ui.frame)
 
-            # Check if window was closed via 'X' button
             try:
                 if cv2.getWindowProperty(win_name, cv2.WND_PROP_VISIBLE) < 1:
                     if ui.current_state in [STATE_DETECT, STATE_TEST_CAM]:
@@ -549,17 +542,12 @@ def main():
                 ui.current_state = STATE_MENU
 
     finally:
-        # Dọn dẹp camera nếu đã lazy-load
         if _camera is not None:
-            try:
-                _camera.disconnect()
-            except Exception:
-                pass
+            try: _camera.disconnect()
+            except Exception: pass
         if _shm_obj is not None:
-            try:
-                _shm_obj.close()
-            except Exception:
-                pass
+            try: _shm_obj.close()
+            except Exception: pass
         cv2.destroyAllWindows()
 
 
