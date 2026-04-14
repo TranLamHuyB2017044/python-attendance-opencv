@@ -19,6 +19,7 @@ class FaceTracker:
     def __init__(self, threshold_seconds=0):
         self.active_faces: Dict[int, Dict[str, Any]] = {} # {id: data}
         self.face_id_counter = 0
+        self.recent_snapshots = [] # History of successful snapshots for UI overlay
         self.threshold_seconds = threshold_seconds
         
         # Motion Tracking
@@ -86,7 +87,7 @@ class FaceTracker:
         except Exception as e:
             logger.error(f"Error sending enhanced Telegram alert: {e}")
 
-    def _send_user_webhook(self, user_id, user_name, status, is_unknown=False):
+    def _send_user_webhook(self, user_id, user_name, status, is_unknown=False, custom_voice_text=None):
         """
         Sends user detection info to the configured webhook URL in a background thread.
         
@@ -140,16 +141,21 @@ class FaceTracker:
                 name_no_accents = remove_accents(user_name)
                 
                 # 3. Format voice text for TTS
-                if status in ["IN", "OUT"]:
-                    action_vn = "vào" if status == "IN" else "ra"
-                    voice_text = f"Xin chào {user_name}, bạn đã chấm công {action_vn} thành công"
+                name_parts = user_name.strip().split()
+                # Lấy tên đệm và tên (2 phần cuối của chuỗi tên)
+                short_name = " ".join(name_parts[-2:]) if len(name_parts) >= 2 else user_name
+
+                if custom_voice_text:
+                    voice_text = custom_voice_text
+                elif status in ["IN", "OUT"]:
+                    voice_text = f"{short_name} đã chấm công"
                 elif status == "SPOOF":
                     voice_text = "Cảnh báo: Phát hiện hành vi giả mạo khuôn mặt"
                 elif status == "COOLDOWN":
-                    voice_text = f"{user_name} đã truy cập gần đây"
+                    voice_text = f"{short_name} đã truy cập gần đây"
                 else:
                     # Default for unknown/unauthorized
-                    voice_text = "Xin vui lòng thử lại"
+                    voice_text = "Vui lòng thử lại"
 
                 payload = {
                     "user_id": user_id,
@@ -243,7 +249,7 @@ class FaceTracker:
 
         threading.Thread(target=task, daemon=True).start()
 
-    def _save_log_with_bbox(self, frame, face, user_id, user_name, score, is_known=True, status=None, company_id=None, unknown_attempt=0, birthday="N/A", vector_count=0):
+    def _save_log_with_bbox(self, frame, face, user_id, user_name, score, is_known=True, status=None, company_id=None, unknown_attempt=0, birthday="N/A", vector_count=0, f_data=None):
         """Sync state check + Async heavy saving."""
         if frame is None: return None, None
         
@@ -372,8 +378,12 @@ class FaceTracker:
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
                 
                 # --- OPTIMIZATION: Resize to 640x360 and compress quality ---
-                # This meets user request for ~10KB file size
-                final_img = cv2.resize(save_frame, (640, 360), interpolation=cv2.INTER_AREA)
+                # Dùng INTER_CUBIC để ảnh sắc nét hơn và thêm bộ lọc sắc nét nhẹ
+                final_img = cv2.resize(save_frame, (640, 360), interpolation=cv2.INTER_CUBIC)
+                
+                # Nâng nhẹ độ tương phản và độ nét
+                sharpen_kernel = np.array([[0, -0.5, 0], [-0.5, 3, -0.5], [0, -0.5, 0]])
+                final_img = cv2.filter2D(final_img, -1, sharpen_kernel)
 
                 raw_company_name = mongo_db.get_company_name(company_id) if company_id else "unknown_company"
                 company_folder = remove_accents(raw_company_name).replace(" ", "_")
@@ -386,16 +396,37 @@ class FaceTracker:
                     target_dir = CAPTURES_DIR / company_folder / "Nguoi_La"
                 
                 target_dir.mkdir(parents=True, exist_ok=True)
+                
+                # --- THIẾT LẬP VIDEO ĐỐI SOÁT ---
+                video_path = None
+                if f_data is not None:
+                    if f_data.get('video_path') is None:
+                        v_dir = target_dir.parent / "videos"
+                        v_dir.mkdir(parents=True, exist_ok=True)
+                        v_path = v_dir / f"{int(time.time())}_{remove_accents(user_name).replace(' ','_')}.mp4"
+                        f_data['video_path'] = str(v_path)
+                    video_path = f_data['video_path']
 
-                import time
                 # Tên ảnh chỉ cần timestamp vì đã nằm trong thư mục tên
                 img_name = f"{int(time.time())}.webp"
                 img_path = str(target_dir / img_name)
                 
-                # Heavy Disk Write with quality 50 to target ~10KB
-                cv2.imwrite(img_path, final_img, [int(cv2.IMWRITE_WEBP_QUALITY), 50])
+                # Lưu ảnh với chất lượng WebP 75 (Rõ nét hơn nhưng vẫn tối ưu dung lượng)
+                cv2.imwrite(img_path, final_img, [int(cv2.IMWRITE_WEBP_QUALITY), 75])
+                
+                # LƯU ẢNH OVERLAY (Tối đa 3 ảnh hiển thị trên UI)
+                if is_known and final_status in ['IN', 'OUT']:
+                    self.recent_snapshots.append({
+                        "img": final_img.copy(),
+                        "name": remove_accents(user_name),
+                        "time": time.time(),
+                        "status": final_status
+                    })
+                    if len(self.recent_snapshots) > 3:
+                        self.recent_snapshots.pop(0)
+
                 # Actual DB Commit
-                mongo_db.log_attendance(user_id, user_name, status=final_status, frame=final_img, company_id=company_id, unknown_attempt=unknown_attempt)
+                mongo_db.log_attendance(user_id, user_name, status=final_status, frame=final_img, company_id=company_id, unknown_attempt=unknown_attempt, video_path=video_path)
             except Exception as e:
                 logger.error(f"Async log error: {e}")
 
@@ -443,13 +474,20 @@ class FaceTracker:
         # Sequential Processing: Only allow 1 recognition attempt per frame to save CPU
         recognition_done_this_frame = False
 
+        def calc_iou(b1, b2):
+            x1, y1, x2, y2 = max(b1[0], b2[0]), max(b1[1], b2[1]), min(b1[2], b2[2]), min(b1[3], b2[3])
+            inter = max(0, x2 - x1) * max(0, y2 - y1)
+            b1_area = (b1[2] - b1[0]) * (b1[3] - b1[1])
+            b2_area = (b2[2] - b2[0]) * (b2[3] - b2[1])
+            return inter / float(b1_area + b2_area - inter + 1e-6)
+
         for face in detected_faces:
             center = self._get_center(face.bbox)
             matched_id = None
             is_real = getattr(face, 'is_real', True)
             as_label = getattr(face, 'as_label', 1) 
             
-            # Sort active faces by distance to current center
+            # Sort active faces by combined IoU and Center Distance
             potential_matches = []
             face_w = face.bbox[2] - face.bbox[0]
             face_h = face.bbox[3] - face.bbox[1]
@@ -458,12 +496,17 @@ class FaceTracker:
             for f_id, f_data in self.active_faces.items():
                 if f_id in used_ids_in_frame: continue
                 prev_center = f_data['center']
+                prev_bbox = f_data.get('bbox', [0, 0, 0, 0])
+                
                 dist = np.sqrt((center[0] - prev_center[0])**2 + (center[1] - prev_center[1])**2)
-                if dist < max_dist: 
-                    potential_matches.append((dist, f_id))
+                iou = calc_iou(face.bbox, prev_bbox)
+                
+                if dist < max_dist or iou > 0.15: 
+                    score = dist - iou * 1000 # High IoU rewards match heavily
+                    potential_matches.append((score, f_id))
             
             if potential_matches:
-                potential_matches.sort()
+                potential_matches.sort(key=lambda x: x[0])
                 matched_id = potential_matches[0][1]
                 used_ids_in_frame.add(matched_id)
             
@@ -474,6 +517,7 @@ class FaceTracker:
                     'start_time':         current_time,
                     'last_seen':          current_time,
                     'center':             center,
+                    'bbox':               face.bbox,
                     'status':             'GATHERING',
                     'user_data':          None,
                     'cooldown_remaining': 0,
@@ -481,11 +525,16 @@ class FaceTracker:
                     'last_attempt_time':  0,
                     'gathering_embeddings': [],
                     'gather_count':         0,
+                    'video_frames':       [cv2.resize(frame, (640, 360))] if frame is not None else [],
+                    'video_path':         None
                 }
             else:
                 f_data = self.active_faces[matched_id]
                 f_data['last_seen'] = current_time
                 f_data['center'] = center
+                f_data['bbox'] = face.bbox
+                if frame is not None and len(f_data.setdefault('video_frames', [])) < 900:
+                    f_data['video_frames'].append(cv2.resize(frame, (640, 360)))
 
             # SYNC BACK: If we already verified this face in previous frames
             if f_data.get('liveness_verified'):
@@ -506,23 +555,46 @@ class FaceTracker:
             elif f_data['status'] == 'GATHERING':
                 can_attempt = True
             elif f_data['status'] in ['RETRY_WAIT', 'UNAUTHORIZED', 'SPOOF_DETECTED']:
-                retry_delay = 5.0 if f_data['status'] == 'SPOOF_DETECTED' else 3.0
-                if wait_time >= retry_delay:
-                    f_data['status'] = 'GATHERING'
-                    f_data['gathering_embeddings'] = [] 
-                    f_data['gather_count'] = 0
-                    can_attempt = True
+                # Xóa độ trễ (delay) để retry ngay lập tức (Real-time quét)
+                f_data['status'] = 'GATHERING'
+                f_data['gathering_embeddings'] = [] 
+                f_data['gather_count'] = 0
+                can_attempt = True
 
             if can_attempt and face_rec is not None and attendance_mgr is not None:
                 GATHER_FRAMES = getattr(RecognitionConfig, 'GATHER_FRAMES', 1)
 
-                # Step 1: Extract embedding
-                face_rec.rec_model.get(frame, face)
-                emb = face.normed_embedding.copy()
+                # Bộ lọc Face Quality
+                is_good_frame = True
                 
-                # Step 2: Accumulate
-                f_data.setdefault('gathering_embeddings', []).append(emb)
-                f_data['gather_count'] = len(f_data['gathering_embeddings'])
+                # 1. Box Bounds & Blur
+                int_bbox = face.bbox.astype(int)
+                x1, y1 = max(0, int_bbox[0]), max(0, int_bbox[1])
+                x2, y2 = min(frame.shape[1], int_bbox[2]), min(frame.shape[0], int_bbox[3])
+                crop_h, crop_w = y2 - y1, x2 - x1
+                # Skip nếu mặt quá sát biên hoặc quá nhỏ
+                if crop_h > 40 and crop_w > 40:
+                    crop = frame[y1:y2, x1:x2]
+                    if crop.size > 0:
+                        blur_val = cv2.Laplacian(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), cv2.CV_64F).var()
+                        if blur_val < 30: is_good_frame = False
+                
+                # 2. Angle (Pitch/Yaw/Roll)
+                if hasattr(face, 'pose') and face.pose is not None:
+                    pitch, yaw, roll = face.pose
+                    if abs(yaw) > 30 or abs(pitch) > 30: is_good_frame = False
+                
+                if is_good_frame:
+                    # Step 1: Extract embedding
+                    face_rec.rec_model.get(frame, face)
+                    emb = face.normed_embedding.copy()
+                    
+                    # Step 2: Accumulate
+                    f_data.setdefault('gathering_embeddings', []).append(emb)
+                    f_data['gather_count'] = len(f_data['gathering_embeddings'])
+                else:
+                    face.name = "Anh mo hoac goc nghieng..."
+                    f_data['gather_count'] = len(f_data.setdefault('gathering_embeddings', []))
 
                 # Step 3: Check if reached count
                 if f_data['gather_count'] >= GATHER_FRAMES:
@@ -550,12 +622,17 @@ class FaceTracker:
                                 logger.warning(f"[Spoof] ❌ SPOOF DETECTED — ID={matched_id} score={spoof_score:.2f}")
                                 f_data['status'] = 'SPOOF_DETECTED'
                                 f_data['last_attempt_time'] = current_time
-                                self._send_user_webhook("Spoof", "Ke gia mao", "SPOOF", is_unknown=True)
-                                self._send_telegram_alert(
-                                    "CANH BAO GIA MAO", 
-                                    f"Phat hien hanh vi gia mao khuon mat!\nID: {matched_id}\nScore: {spoof_score:.2f}",
-                                    image=frame
-                                )
+                                
+                                # Cơ chế chống Spam Spoof (5s báo 1 lần trên cùng 1 người)
+                                last_spoof = f_data.get('last_spoof_alert', 0)
+                                if current_time - last_spoof > 5.0:
+                                    f_data['last_spoof_alert'] = current_time
+                                    self._send_user_webhook("Spoof", "Ke gia mao", "SPOOF", is_unknown=True)
+                                    self._send_telegram_alert(
+                                        "CANH BAO GIA MAO", 
+                                        f"Phat hien hanh vi gia mao khuon mat!\nID: {matched_id}\nScore: {spoof_score:.2f}",
+                                        image=frame
+                                    )
                                 updated_faces_map[matched_id] = f_data
                                 continue
 
@@ -588,7 +665,7 @@ class FaceTracker:
                                 f_data['user_data'] = user_data
                                 self.user_cooldowns[user_id] = current_time
                                 _, status = self._save_log_with_bbox(frame, face, user_id, user_name, user_data.get('score', 0.0),
-                                                                       company_id=target_cid, birthday=user_data.get('birthday', 'N/A'), vector_count=user_data.get('vector_count', 0))
+                                                                       company_id=target_cid, birthday=user_data.get('birthday', 'N/A'), vector_count=user_data.get('vector_count', 0), f_data=f_data)
                                 self._send_user_webhook(user_id, user_name, status, is_unknown=False)
 
                             if user_data.get('vector_count', 0) < 10:
@@ -598,18 +675,27 @@ class FaceTracker:
                         f_data['unknown_attempts'] += 1
                         f_data['last_attempt_time'] = current_time
                         f_data['user_data'] = vote
-                        logger.warning(f"[Recognition] ❌ Unknown (attempt {f_data['unknown_attempts']}/5)")
-                        
-                        # Send Telegram alert for Unknown Users (Strangers) - only on 1st and 5th attempt
-                        if f_data['unknown_attempts'] in [1, 5]:
-                            self._send_telegram_alert(
-                                "PHAT HIEN NGUOI LA",
-                                f"Nguoi la xuat hien (Lan thu {f_data['unknown_attempts']}/5)",
-                                image=frame
-                            )
-                        
-                        self._send_user_webhook("Unknown", "Nguoi la", "unknown", is_unknown=True)
-                        f_data['status'] = 'UNAUTHORIZED' if f_data['unknown_attempts'] >= 5 else 'RETRY_WAIT'
+                        # --- CƠ CHẾ CHỐNG SPAM NHƯNG VẪN REALTIME ---
+                        # Chỉ phát báo động BẰNG GIỌNG NÓI khi thực sự đã phân tích 10 lần liên tiếp thất bại.
+                        # Vẫn giữ Rate-Limiter 5 giây 1 lần để tránh loa kêu dồn dập.
+                        if f_data['unknown_attempts'] >= 10:
+                            last_unknown = f_data.get('last_unknown_alert', 0)
+                            if current_time - last_unknown > 5.0:
+                                f_data['last_unknown_alert'] = current_time
+                                logger.warning(f"[Recognition] ❌ Unknown (10+ attempts) - Triggering Alert")
+                                
+                                # Cấp phát tên video cho người lạ
+                                if f_data.get('video_path') is None:
+                                    from src.config import CAPTURES_DIR
+                                    v_dir = CAPTURES_DIR / "Unknown_Videos"
+                                    v_dir.mkdir(parents=True, exist_ok=True)
+                                    v_path = v_dir / f"{int(time.time())}_Nguoi_La.mp4"
+                                    f_data['video_path'] = str(v_path)
+                                
+                                self._send_telegram_alert("PHAT HIEN NGUOI LA", f"Phát hiện người lạ trước camera (Đã quét {f_data['unknown_attempts']} lần)", image=frame)
+                                self._send_user_webhook("Unknown", "Nguoi la", "unknown", is_unknown=True, custom_voice_text="Xin vui lòng thử lại")
+
+                        f_data['status'] = 'RETRY_WAIT'
                 else:
                     # Still gathering
                     f_data['status'] = 'GATHERING'
@@ -648,8 +734,7 @@ class FaceTracker:
                         else:
                             face.name = f"{name} (Dang Cho)"
                     elif data['status'] == 'RETRY_WAIT':
-                        wait_left = int(2 - (current_time - data['last_attempt_time']))
-                        face.name = f"Chua ro (Thu lai {max(0, wait_left)}s)"
+                        face.name = f"Chua ro (Dang quet lai...)"
                     elif data['status'] == 'UNAUTHORIZED':
                         face.name = "!!! TRUY CAP LA !!!"
                     elif data['status'] == 'SPOOF_DETECTED':
@@ -662,9 +747,7 @@ class FaceTracker:
                         total = getattr(RecognitionConfig, 'GATHER_FRAMES', 5)
                         face.name = f"Dang phan tich... ({count}/{total})"
                     elif data['status'] == 'RETRY_WAIT':
-                        wait_left = int(3 - (current_time - data['last_attempt_time']))
-                        attempts = data.get('unknown_attempts', 0)
-                        face.name = f"Chua nhan ra (lan {attempts}/5, thu lai sau {max(0, wait_left)}s)"
+                        face.name = f"Chua nhan ra (Dang quet lai...)"
                     elif data['status'] == 'UNAUTHORIZED':
                         face.name = "Nguoi la"
                     else:
@@ -676,11 +759,34 @@ class FaceTracker:
         for fid, fdata in updated_faces_map.items():
             self.active_faces[fid] = fdata
 
-        # 2. Xóa các face ID không xuất hiện trong vòng 1 giây (để giữ ổn định khi mất frame)
-        self.active_faces = {
-            k: v for k, v in self.active_faces.items() 
-            if current_time - v['last_seen'] < 1.0
-        }
+        # 2. Xóa các face ID không xuất hiện trong vòng 1 giây & XUẤT VIDEO
+        new_active_faces = {}
+        for fid, fdata in self.active_faces.items():
+            if current_time - fdata['last_seen'] < 1.0:
+                new_active_faces[fid] = fdata
+            else:
+                # Ngươi này đã rời đi: tiến hành ghi Video đối soát nếu có
+                v_path = fdata.get('video_path')
+                v_frames = fdata.get('video_frames', [])
+                if v_path and len(v_frames) > 5:
+                    # Tính toán FPS thực tế dựa trên thời gian xuất hiện
+                    duration = current_time - fdata.get('start_time', current_time)
+                    actual_fps = len(v_frames) / duration if duration > 0 else 15.0
+                    actual_fps = max(5.0, min(30.0, actual_fps)) # Giới hạn FPS hợp lý
+                    
+                    def save_video(path, frames, fps):
+                        try:
+                            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                            h, w = frames[0].shape[:2]
+                            out = cv2.VideoWriter(path, fourcc, fps, (w, h))
+                            for vf in frames:
+                                out.write(vf)
+                            out.release()
+                        except Exception as e:
+                            logger.error(f"Cannot save tracker video: {e}")
+                    threading.Thread(target=save_video, args=(v_path, v_frames, actual_fps), daemon=True).start()
+
+        self.active_faces = new_active_faces
         
         # 3. Cleanup spoof sync records cho các face đã biến mất hoàn toàn
         if self.spoof_checker:

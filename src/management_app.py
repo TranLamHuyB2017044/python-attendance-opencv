@@ -472,7 +472,12 @@ def main():
                 cam_port = mongo_db.get_setting("camera_port", CameraConfig.PORT, username=ui.session_username)
                 cam_user = mongo_db.get_setting("camera_user", CameraConfig.USER, username=ui.session_username)
                 cam_pass = mongo_db.get_setting("camera_pass", CameraConfig.PASS, username=ui.session_username)
+                
+                import os
                 new_url  = f"rtsp://{cam_user}:{cam_pass}@{cam_ip}:{cam_port}/ch1/main"
+                env_url = os.getenv("RTSP_URL")
+                if env_url and str(cam_ip) in env_url: new_url = env_url
+                
                 if cam_ip.isdigit():
                     new_url = cam_ip
 

@@ -46,7 +46,7 @@ class FaceRecognition:
                 name=self.model_name,
                 root=str(MODELS_DIR),
                 allowed_modules=['detection', 'landmark_2d_106'],
-                providers=['CPUExecutionProvider']
+                providers=['CUDAExecutionProvider', 'CPUExecutionProvider']
             )
             self.app.prepare(ctx_id=ctx_id, det_size=self.det_size, det_thresh=self.det_thresh)
             logger.info(f"InsightFace detection model ready. DET_SIZE={self.det_size}")
@@ -55,7 +55,7 @@ class FaceRecognition:
             from insightface.model_zoo import get_model
             rec_model_name = "w600k_r50.onnx" if "buffalo_l" in self.model_name else "w600k_mbf.onnx"
             rec_model_path = MODELS_DIR / "models" / self.model_name / rec_model_name
-            self.rec_model = get_model(str(rec_model_path), providers=['CPUExecutionProvider'])
+            self.rec_model = get_model(str(rec_model_path), providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
             self.rec_model.prepare(ctx_id=ctx_id)
             logger.info("ArcFace recognition model loaded.")
 
@@ -141,9 +141,36 @@ class FaceRecognition:
 
             real_faces = []
             for face in faces:
+                # --- TỐI ƯU HÓA: Cắt lấy vùng mặt kèm margin thay vì đưa cả frame lớn vào model ---
+                x1, y1, x2, y2 = face.bbox.astype(int)
+                h_b, w_b = y2 - y1, x2 - x1
+                margin_x = int(w_b * 0.5)
+                margin_y = int(h_b * 0.5)
+                
+                c_x1 = max(0, x1 - margin_x)
+                c_y1 = max(0, y1 - margin_y)
+                c_x2 = min(frame.shape[1], x2 + margin_x)
+                c_y2 = min(frame.shape[0], y2 + margin_y)
+                
+                face_crop = frame[c_y1:c_y2, c_x1:c_x2].copy()
+                
+                # Backup toạ độ
+                orig_bbox = face.bbox.copy()
+                orig_kps = face.kps.copy() if face.kps is not None else None
+                
+                # Tịnh tiến về gốc toạ độ của ảnh đã cắt
+                face.bbox[0] -= c_x1
+                face.bbox[1] -= c_y1
+                face.bbox[2] -= c_x1
+                face.bbox[3] -= c_y1
+                
+                if face.kps is not None:
+                    face.kps[:, 0] -= c_x1
+                    face.kps[:, 1] -= c_y1
+
                 # 2. Anti-Spoofing — chỉ chạy nếu được bật VÀ model đã load
                 if self.anti_spoof is not None and RecognitionConfig.ANTI_SPOOFING_ENABLED:
-                    as_label, as_score = self.anti_spoof.predict(frame, face)
+                    as_label, as_score = self.anti_spoof.predict(face_crop, face)
                     face.as_label = int(as_label)
                     face.as_score = float(as_score)
                     face.is_real = (face.as_label == 1)
@@ -155,7 +182,12 @@ class FaceRecognition:
 
                 # 3. Recognition (ArcFace embedding)
                 if face.is_real:
-                    self.rec_model.get(frame, face)
+                    self.rec_model.get(face_crop, face)
+                    
+                # Khôi phục toạ độ nguyên vẹn để trả về cho hệ thống
+                face.bbox = orig_bbox
+                if orig_kps is not None:
+                    face.kps = orig_kps
 
                 real_faces.append(face)
 

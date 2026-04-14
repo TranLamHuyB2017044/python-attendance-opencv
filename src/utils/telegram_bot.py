@@ -110,7 +110,9 @@ def send_telegram_report(title, message, image=None, level="ERROR"):
 
     # Determine emoji based on level or title
     emoji = "🚨"
-    if "SPOOF" in title.upper():
+    if "RECOVERY" in title.upper() or "SUCCESS" in title.upper():
+        emoji = "✅"
+    elif "SPOOF" in title.upper():
         emoji = "🛡️"
     elif "SYNC" in title.upper():
         emoji = "🔄"

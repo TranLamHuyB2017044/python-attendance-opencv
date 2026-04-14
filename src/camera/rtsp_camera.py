@@ -24,8 +24,10 @@ class RTSPCamera:
         height: Optional[int] = None,
         fps: Optional[int] = None,
         reconnect_delay: int = 3,
+        enable_notifications: bool = True,
     ):
         self.rtsp_url = rtsp_url or CameraConfig.RTSP_URL
+        self.enable_notifications = enable_notifications
         logger.info(f"RTSPCamera initialized with URL: {self.rtsp_url}")
         
         # Convert to int if it's a numeric string (webcam index)
@@ -51,6 +53,7 @@ class RTSPCamera:
         
         self.current_ping = "N/A"
         self.last_frame_time = 0
+        self._notified_error = False # Track if we've already sent an Error notification
         
         if self.is_webcam:
             logger.info(f"RTSPCamera initialized with WEBCAM mode: index {self.camera_source}")
@@ -80,23 +83,24 @@ class RTSPCamera:
                 else:
                     import os
                     # =============================================================
-                    # MINIMUM LATENCY FFMPEG FLAGS
-                    # Thứ tự ưu tiên: loại buffer ẩn > tắc độ thấp > giảm probe time
+                    # MINIMUM LATENCY FFMPEG FLAGS (Tối ưu tối đa latency RTSP)
                     # =============================================================
                     os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "|".join([
                         "rtsp_transport;tcp",        # Force TCP (tránh mất gói UDP)
                         "fflags;nobuffer",           # Tắt FFmpeg demuxer buffer
                         "flags;low_delay",           # Low-latency decode mode
-                        "framedrop",                 # Bỏ frame cũ khi không kịp thời gian
                         "avioflags;direct",          # I/O trực tiếp, không qua buffer OS
-                        "probesize;32",              # Giảm thời gian dò stream (mặc định 5MB!)
-                        "analyzeduration;0",         # Không phân tích dạng stream trước khi play
-                        "reorder_queue_size;0",      # Không reorder gói (thêm +50-100ms)
-                        "max_delay;100000",          # Max jitter buffer: 100ms (mặc định 500ms!)
+                        "probesize;32",              # Tối thiểu probe size (default=5MB!)
+                        "analyzeduration;0",         # Không phân tích stream trước khi play
+                        "reorder_queue_size;0",      # Không reorder gói (+50-100ms nếu bật)
+                        "max_delay;50000",           # Jitter buffer 50ms — ổn định hơn 0 với camera IP
+                        "stimeout;3000000",          # Socket timeout 3s (tránh treo khi mạng lag)
+                        "framedrop",                 # Bỏ frame cũ nếu decode không kịp
                     ])
 
                     cap = cv2.VideoCapture(self.camera_source, cv2.CAP_FFMPEG)
-                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)       # Chỉ giữ 1 frame trong bộ đệm
+                    # Chỉ giữ 1 frame trong bộ đệm OpenCV (FFmpeg vẫn có buffer riêng)
+                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
                     cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000)
                     cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000)
                 
@@ -129,8 +133,26 @@ class RTSPCamera:
             self.cap = self._connect_with_timeout(timeout_seconds=5)
             
             if self.cap is None or not self.cap.isOpened():
-                logger.error(f"Failed to open {'webcam' if self.is_webcam else 'RTSP stream'}")
+                if not self._notified_error and self.enable_notifications:
+                    logger.error(f"Failed to open {'webcam' if self.is_webcam else 'RTSP stream'}")
+                    self._notified_error = True # Mark that we've notified the error
+                else:
+                    # Subsequent failures log as warning to avoid Telegram spam
+                    logger.warning(f"Still cannot connect to {'webcam' if self.is_webcam else 'RTSP stream'}...")
                 return False
+
+            # If we were in error state, notify recovery (if enabled)
+            if self._notified_error and self.enable_notifications:
+                try:
+                    from src.utils.telegram_bot import send_telegram_report
+                    send_telegram_report("CAMERA RECOVERY", f"Camera {'webcam' if self.is_webcam else 'RTSP'} connection has been restored.")
+                except Exception:
+                    pass
+                logger.success(f"Camera {'webcam' if self.is_webcam else 'RTSP'} connection RECOVERED!")
+                self._notified_error = False
+            elif self._notified_error:
+                # Still reset state even if notifications disabled
+                self._notified_error = False
 
             self.is_connected = True
             
@@ -192,7 +214,8 @@ class RTSPCamera:
         """
         if self.is_webcam:
             # --- WEBCAM: giữ throttle cũ để tránh read nhanh hơn cảm biến ---
-            target_interval = 1.0 / max(1, CameraConfig.FPS)
+            # Nếu cfg FPS <= 0 -> chạy thả ga tẹt ga tự do với tốc độ tối đa của camera
+            target_interval = 1.0 / self.fps if self.fps > 0 else 0.0
             while self.running:
                 frame_start = time.time()
                 if self.is_connected and self.cap is not None:
@@ -215,16 +238,25 @@ class RTSPCamera:
                     time.sleep(sleep_time)
         else:
             # --- RTSP: MINIMUM LATENCY MODE ---
-            # cap.read() tự block chờ frame từ mạng → không cần sleep()
-            # Thread chạy đúng tốc độ camera (15fps) mà không tốn CPU vô ích
-            # KHÔNG dùng grab() drain loop — grab() RTSP cũng block như read()!
+            #
+            # THIẾT KẾ ĐÚNG CHO RTSP (Network Stream):
+            #   Background thread liên tục đọc và CẬP NHẬT self.frame với frame mới nhất.
+            #   Main thread gọi read_frame() → luôn nhận frame MỚI NHẤT đã được lưu.
+            #
+            # TẠI SAO KHÔNG DÙNG grab()-drain():
+            #   Với RTSP, grab() CŨNG BLOCK chờ gói tin mới từ mạng — không có
+            #   "buffer sẵn" để drain như video file. Dùng drain = gọi grab() nhiều
+            #   lần liên tiếp = tăng latency thay vì giảm!
+            #
+            # GIẢI PHÁP: cap.read() trong thread riêng, luôn chạy hết tốc độ.
+            #   Thread này chạy đúng tốc độ camera (15/25/30fps) do cap.read() tự block.
             while self.running:
                 if not self.is_connected or self.cap is None:
                     time.sleep(0.1)
                     continue
 
                 try:
-                    ret, frame = self.cap.read()  # block tại đây đến khi có frame mới
+                    ret, frame = self.cap.read()  # Block chờ frame mới từ mạng
 
                     if ret and frame is not None:
                         if CameraConfig.FLIP_H and CameraConfig.FLIP_V: frame = cv2.flip(frame, -1)

@@ -4,32 +4,33 @@ Loads environment variables and provides centralized configuration.
 """
 
 import os
+import sys
 from pathlib import Path
 from typing import Tuple, Optional
 
 from dotenv import load_dotenv
 from loguru import logger
 
-# Load environment variables
-import sys
-if getattr(sys, 'frozen', False):
-    # If running as a built .exe, look for .env in the same folder as the .exe
-    env_path = os.path.join(os.path.dirname(sys.executable), '.env')
-    load_dotenv(env_path)
-    # Also fallback to base_dir if not found in exe dir
-    if not os.path.exists(env_path):
-        load_dotenv()
-else:
-    # If running in dev mode
-    load_dotenv()
-
 # Project paths
 if getattr(sys, 'frozen', False):
     # If running as a built .exe, PROJECT_ROOT is the folder where .exe is located
     PROJECT_ROOT = Path(os.path.dirname(sys.executable))
 else:
-    # If running in dev mode
+    # If running in dev mode, PROJECT_ROOT is parent of src/
     PROJECT_ROOT = Path(__file__).parent.parent
+
+# Load environment variables
+if getattr(sys, 'frozen', False):
+    # If running as a built .exe, look for .env in the same folder as the .exe
+    env_path = PROJECT_ROOT / '.env'
+    load_dotenv(dotenv_path=env_path, override=True)
+    # Also fallback to default if not found
+    if not env_path.exists():
+        load_dotenv(override=True)
+else:
+    # If running in dev mode, always point to project root .env
+    env_path = PROJECT_ROOT / '.env'
+    load_dotenv(dotenv_path=env_path, override=True)
 
 LOGS_DIR = PROJECT_ROOT / "logs"
 DATA_DIR = PROJECT_ROOT / "data"
@@ -67,7 +68,7 @@ class CameraConfig:
     
     WIDTH: int = int(os.getenv("CAMERA_WIDTH", "1280"))
     HEIGHT: int = int(os.getenv("CAMERA_HEIGHT", "720"))
-    FPS: int = int(os.getenv("CAMERA_FPS", "30"))
+    FPS: int = max(1, int(os.getenv("CAMERA_FPS", "30")))  # Guard: tránh FPS=0 gây ZeroDivisionError
     FLIP_H: bool = os.getenv("CAMERA_FLIP_H", "false").lower() == "true"
     FLIP_V: bool = os.getenv("CAMERA_FLIP_V", "false").lower() == "true"
     CAMERA_NAME: str = os.getenv("CAMERA_NAME", "Main Camera")
@@ -137,7 +138,7 @@ class CameraConfig:
 class InsightFaceConfig:
     """InsightFace model configuration."""
     
-    MODEL_NAME: str = os.getenv("INSIGHTFACE_MODEL", "buffalo_sc")
+    MODEL_NAME: str = os.getenv("INSIGHTFACE_MODEL", "buffalo_s")
     DET_SIZE: Tuple[int, int] = tuple(
         map(int, os.getenv("INSIGHTFACE_DET_SIZE", "640,640").split(","))
     )

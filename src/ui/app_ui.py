@@ -1370,6 +1370,30 @@ class AttendanceUI:
                 else: messagebox.showerror("Lỗi", "Không thể giải mã hình ảnh")
             else: messagebox.showwarning("Thông báo", "Log này không chứa dữ liệu ảnh")
 
+        def on_view_video():
+            sel = tree.selection()
+            if not sel: return messagebox.showwarning("!", "Vui lòng chọn ít nhất 1 dòng")
+            l_id = str(tree.item(sel[0])['values'][0])
+            log_data = log_items_batch.get(l_id)
+            if not log_data: return
+            
+            video_path = log_data.get('video_path')
+            if not video_path or not os.path.exists(video_path):
+                messagebox.showwarning("Thông báo", "Log này không có video hoặc file video đã bị xóa.")
+                return
+            
+            try:
+                if sys.platform == 'win32':
+                    os.startfile(video_path)
+                elif sys.platform == 'darwin':
+                    import subprocess
+                    subprocess.call(['open', video_path])
+                else:
+                    import subprocess
+                    subprocess.call(['xdg-open', video_path])
+            except Exception as e:
+                messagebox.showerror("Lỗi", f"Không thể mở video: {e}")
+
         def on_batch_upload():
             from src.services.hkb_service import hkb_service
             sel_items = tree.selection()
@@ -1617,6 +1641,7 @@ class AttendanceUI:
         btn_frame.pack(pady=20)
         
         ctk.CTkButton(btn_frame, text="XEM ẢNH", command=on_view_image, width=150, fg_color="#f39c12", hover_color="#d35400").pack(side="left", padx=10)
+        ctk.CTkButton(btn_frame, text="XEM VIDEO", command=on_view_video, width=150, fg_color="#8e44ad", hover_color="#732d91").pack(side="left", padx=10)
         ctk.CTkButton(btn_frame, text="XEM LỖI (LOG)", command=on_view_log, width=150, fg_color="#e74c3c", hover_color="#c0392b").pack(side="left", padx=10)
         if session_role and str(session_role).lower() in ['admin', 'company']:
             ctk.CTkButton(btn_frame, text="TẢI LÊN HKB", command=on_batch_upload, width=180, fg_color="#28a745", hover_color="#218838").pack(side="left", padx=10)
@@ -2294,7 +2319,12 @@ class AttendanceUI:
             port = e_port.get().strip()
             user = e_user.get().strip()
             pwd = e_pass.get().strip()
+            
+            import os
             test_url = f"rtsp://{user}:{pwd}@{ip}:{port}/ch1/main"
+            env_url = os.getenv("RTSP_URL")
+            if env_url and str(ip) in env_url: test_url = env_url
+            
             if ip.isdigit(): test_url = ip
             
             try:
@@ -2437,6 +2467,10 @@ class AttendanceUI:
                 CameraConfig.USER = user
                 CameraConfig.PASS = pwd
                 CameraConfig.RTSP_URL = f"rtsp://{user}:{pwd}@{ip}:{port}/ch1/main"
+                
+                import os
+                env_url = os.getenv("RTSP_URL")
+                if env_url and str(ip) in env_url: CameraConfig.RTSP_URL = env_url
                 
                 try:
                     if roi_val and len(roi_val.split(',')) == 4:

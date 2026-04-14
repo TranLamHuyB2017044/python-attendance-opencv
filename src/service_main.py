@@ -120,16 +120,15 @@ def main():
     preview_path = DATA_DIR / "camera_preview.jpg"
     frame_count = 0
     # Time-based AI throttle: tối đa 3 lần/giây (333ms giữa 2 lần detect)
-    # Ổn định hơn frame-count vì không phụ thuộc vào FPS camera
-    AI_INTERVAL  = 1.0 / 3   # 333ms = ~3 detect/giây
+    # Đảm bảo mẫu số >= 1 để tránh lỗi ZeroDivisionError
+    DETECT_PER_SEC = 3
+    AI_INTERVAL  = 1.0 / max(1, DETECT_PER_SEC) 
     last_ai_time = 0.0
     faces = []
     ai_busy = False
     last_preview_time = 0
-    # Giới hạn preview FPS theo camera FPS thực tế (tối đa 30)
-    preview_fps = min(30, CameraConfig.FPS)
-    preview_interval = 1.0 / preview_fps
-
+    # Đã chuyển sang dùng worker cho preview
+    
     try:
         from src.attendance.mongodb_mgr import mongo_db
         CameraConfig.load_from_mongodb(mongo_db)
@@ -139,12 +138,8 @@ def main():
         camera = RTSPCamera()
         tracker = FaceTracker(threshold_seconds=2.0)
         
-        # Notify about successful startup (non-blocking)
-        from src.utils.notification import send_notification
-        send_notification("Bittech Camera Service", "DỊCH VỤ CAMERA ĐÃ BẬT THÀNH CÔNG!\n\nHệ thống đang chạy ẩn và sẽ tự động điểm danh.")
-
-        # Khởi động Ping Service — chỉ chạy khi camera service bật
-        ping_service.start()
+        # Startup logic moved into loop to ensure notifications only sent after CAMERA success
+        system_initialized_notified = False
 
         logger.info("Service is now running in the background.")
         
@@ -209,7 +204,9 @@ def main():
     # → Camera read loop không bao giờ bị block bởi annotation/SHM
     preview_queue = queue.Queue(maxsize=1)
     last_preview_push = 0.0
-    PREVIEW_INTERVAL  = 1.0 / 15  # push tối đa 15fps vào worker (đủ mượt)
+    # Đảm bảo mẫu số >= 1 để tránh lỗi ZeroDivisionError
+    PREVIEW_TARGET_FPS = 15
+    PREVIEW_INTERVAL  = 1.0 / max(1, PREVIEW_TARGET_FPS) 
 
     def preview_worker():
         import datetime, numpy as np
@@ -229,7 +226,10 @@ def main():
 
                 # FPS smooth (dựa trên timestamp frame từ main loop)
                 now = time.time()
-                dt = now - last_ts if now > last_ts else 0.001
+                # Bảo vệ dt cực kỳ nghiêm ngặt chống ZeroDivisionError
+                dt = now - last_ts
+                if dt <= 0: dt = 0.001 
+                
                 last_ts = now
                 fps_smooth = 0.8 * fps_smooth + 0.2 * (1.0 / dt)
 
@@ -285,6 +285,14 @@ def main():
                 if not camera.is_connected:
                     time.sleep(1)
                     continue
+                
+                # --- AUTO NOTIFY ONCE AFTER FIRST SUCCESSFUL STARTUP ---
+                if not system_initialized_notified:
+                    from src.utils.notification import send_notification
+                    send_notification("Bittech Camera Service", "DỊCH VỤ CAMERA ĐÃ HOẠT ĐỘNG!\n\nHệ thống bắt đầu quét khuôn mặt.")
+                    ping_service.start() # Bắt đầu gửi Ping khi đã có hình ảnh
+                    system_initialized_notified = True
+                    logger.success("Service reporting started after camera connection.")
 
             # 2. READ FRAME
             # wait_first_frame=True: cho background thread co it nhat 1 frame

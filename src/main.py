@@ -527,8 +527,8 @@ def main():
     setup_logger()
     logger.info("Initializing Face Attendance System...")
 
-    # Khởi động Ping Service — tự động gửi thông tin thiết bị khi app bật
-    ping_service.start()
+    # Ping Service is disabled for Management GUI to avoid double reporting on Dashboard
+    # ping_service.start()
 
     # Load config from MongoDB so that Cooldown/Anti-Spoofing settings take effect immediately
     CameraConfig.load_from_mongodb(mongo_db)
@@ -536,7 +536,8 @@ def main():
     try:
         face_rec = FaceRecognition()
         attendance = QdrantAttendanceManager()
-        camera = RTSPCamera()
+        # GUI app doesn't send telegram notifications to avoid spamming
+        camera = RTSPCamera(enable_notifications=False)
         tracker = FaceTracker(threshold_seconds=2.0)
         ui = AttendanceUI()
     except Exception as e:
@@ -551,6 +552,8 @@ def main():
     
     fps_start_time = time.time()
     fps_counter, fps = 0, 0
+    main.last_ai_time_detect = 0
+    main.cached_faces_detect = []
 
     display_frame = ui.draw_main_menu()
     cv2.imshow(win_name, display_frame)
@@ -562,6 +565,46 @@ def main():
         service_active = False
         last_heartbeat_check = 0
         last_w, last_h = 0, 0
+        
+        # --- DECOUPLED AI BACKGROUND THREAD FOR GUI ---
+        import queue
+        import threading
+        main.ai_queue = queue.Queue(maxsize=1)
+        main.cached_faces_detect = []
+        
+        def gui_ai_worker():
+            import time
+            import numpy as np
+            while True:
+                try:
+                    frame_data = main.ai_queue.get()
+                    if frame_data is None: 
+                        break # Stop signal
+                    frame, company_id = frame_data
+                    
+                    ai_frame_obj = frame.copy()
+                    if CameraConfig.ROI:
+                        x1, y1, x2, y2 = CameraConfig.ROI
+                        mask = np.zeros_like(ai_frame_obj)
+                        h, w = ai_frame_obj.shape[:2]
+                        x1, y1 = max(0, x1), max(0, y1)
+                        x2, y2 = min(w, x2), min(h, y2)
+                        mask[y1:y2, x1:x2] = 255
+                        ai_frame_obj = cv2.bitwise_and(ai_frame_obj, mask)
+                        
+                    faces = face_rec.detect_and_extract(ai_frame_obj, fast=True)
+                    tracker.update(faces, attendance, face_rec=face_rec, frame=frame, company_id=company_id)
+                    main.cached_faces_detect = faces
+                    
+                    time.sleep(0.01) # Small sleep to yield CPU
+                except Exception as e:
+                    logger.debug(f"GUI AI Worker error: {e}")
+                finally:
+                    if frame_data is not None:
+                        main.ai_queue.task_done()
+                        
+        ai_thread = threading.Thread(target=gui_ai_worker, daemon=True)
+        ai_thread.start()
         
         while True:
             # Get actual window size for responsive drawing (with safety checks)
@@ -672,12 +715,17 @@ def main():
                         cam_port = mongo_db.get_setting("camera_port", CameraConfig.PORT, username=ui.session_username)
                         cam_user = mongo_db.get_setting("camera_user", CameraConfig.USER, username=ui.session_username)
                         cam_pass = mongo_db.get_setting("camera_pass", CameraConfig.PASS, username=ui.session_username)
-                        new_url = f"rtsp://{cam_user}:{cam_pass}@{cam_ip}:{cam_port}/ch1/main"
-                        if cam_ip.isdigit(): new_url = str(cam_ip)
+                        
+                        # Use URL directly from centralized CameraConfig
+                        # CameraConfig already handles priority between .env and MongoDB
+                        new_url = CameraConfig.RTSP_URL
+                        
+                        if str(cam_ip).isdigit(): new_url = str(cam_ip)
                     
                     if str(camera.camera_source) != str(new_url):
                         camera.disconnect()
-                        camera = RTSPCamera(rtsp_url=str(new_url))
+                        # Reuse the notification-disabled setting
+                        camera = RTSPCamera(rtsp_url=str(new_url), enable_notifications=False)
 
                     if not camera.is_connected:
                         if not camera.connect():
@@ -689,20 +737,68 @@ def main():
                         display_frame = np.zeros((cur_h, cur_w, 3), dtype=np.uint8)
                         cv2.putText(display_frame, "DANG DOC DU LIEU TU CAMERA...", (cur_w//2 - 200, cur_h//2), 0, 0.7, (0, 255, 255), 2)
                     else:
-                        ai_frame_obj = frame.copy()
-                        if CameraConfig.ROI:
-                            x1, y1, x2, y2 = CameraConfig.ROI
-                            mask = np.zeros_like(ai_frame_obj)
-                            h, w = ai_frame_obj.shape[:2]
-                            x1, y1 = max(0, x1), max(0, y1)
-                            x2, y2 = min(w, x2), min(h, y2)
-                            mask[y1:y2, x1:x2] = 255
-                            ai_frame_obj = cv2.bitwise_and(ai_frame_obj, mask)
-                            
-                        faces = face_rec.detect_and_extract(ai_frame_obj, fast=True)
-                        tracker.update(faces, attendance, face_rec=face_rec, frame=frame, company_id=ui.session_company_id)
-                        
+                        # Update FPS
+                        fps_counter += 1
+                        if time.time() - fps_start_time > 1.0:
+                            fps = fps_counter / (time.time() - fps_start_time)
+                            fps_counter = 0
+                            fps_start_time = time.time()
+
+                        # Push to AI thread asynchronously (Non-blocking)
+                        if not main.ai_queue.full():
+                            try:
+                                main.ai_queue.put_nowait((frame.copy(), ui.session_company_id))
+                            except Exception:
+                                pass
+
+                        # Always use the latest available AI results
+                        faces = main.cached_faces_detect
+
                         display_frame = face_rec.draw_faces(frame, faces)
+                        cv2.putText(display_frame, f"FPS: {fps:.1f}", (cur_w - 150, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                        
+                        # --- START UI OVERLAY ---
+                        current_t = time.time()
+                        # 1. Ảnh Check-in thành công (Bên Trái) - Tồn tại 3 giây và mờ dần
+                        tracker.recent_snapshots = [s for s in getattr(tracker, 'recent_snapshots', []) if current_t - s["time"] < 3.0]
+                        
+                        overlay_x = 20
+                        overlay_y = 100
+                        for snap in tracker.recent_snapshots:
+                            thumb_w, thumb_h = 160, 90
+                            thumb = cv2.resize(snap["img"], (thumb_w, thumb_h))
+                            
+                            box_x = overlay_x
+                            box_y = overlay_y - 20
+                            box_w = thumb_w
+                            box_h = thumb_h + 20
+                            
+                            if box_x + box_w < cur_w and box_y + box_h < cur_h and box_x >= 0 and box_y >= 0:
+                                try:
+                                    elapsed = current_t - snap["time"]
+                                    if elapsed < 1.0:
+                                        alpha = 1.0 # 1 giây đầu hiển thị rõ 100%
+                                    else:
+                                        alpha = max(0.0, 1.0 - (elapsed - 1.0) / 2.0) # 2 giây sau mờ dần đi (Fade out)
+                                    
+                                    bg = display_frame[box_y:box_y+box_h, box_x:box_x+box_w].copy()
+                                    fg = bg.copy()
+                                    
+                                    # Vẽ đè lên background của region này
+                                    color = (0, 255, 0)
+                                    fg[20:20+thumb_h, 0:thumb_w] = thumb
+                                    cv2.rectangle(fg, (0, 20), (thumb_w, 20+thumb_h), color, 2)
+                                    cv2.putText(fg, snap.get("name", "Unknown"), (0, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                                    
+                                    # Trộn ảnh theo Alpha
+                                    blended = cv2.addWeighted(fg, alpha, bg, 1.0 - alpha, 0)
+                                    display_frame[box_y:box_y+box_h, box_x:box_x+box_w] = blended
+                                    
+                                except Exception:
+                                    pass
+                                overlay_y += box_h + 30
+                        # --- END UI OVERLAY ---
+                        
                         if CameraConfig.ROI:
                             x1, y1, x2, y2 = CameraConfig.ROI
                             cv2.rectangle(display_frame, (x1, y1), (x2, y2), (255, 120, 0), 3)
@@ -716,12 +812,15 @@ def main():
                 cam_port = mongo_db.get_setting("camera_port", CameraConfig.PORT, username=ui.session_username)
                 cam_user = mongo_db.get_setting("camera_user", CameraConfig.USER, username=ui.session_username)
                 cam_pass = mongo_db.get_setting("camera_pass", CameraConfig.PASS, username=ui.session_username)
-                new_url = f"rtsp://{cam_user}:{cam_pass}@{cam_ip}:{cam_port}/ch1/main"
-                if cam_ip.isdigit(): new_url = cam_ip # Keep as string for comparison
+                
+                # Use centralized config as single source of truth
+                new_url = CameraConfig.RTSP_URL
+                
+                if str(cam_ip).isdigit(): new_url = cam_ip # Keep as string for comparison
                 
                 if str(camera.camera_source) != str(new_url):
                     camera.disconnect()
-                    camera = RTSPCamera(rtsp_url=str(new_url))
+                    camera = RTSPCamera(rtsp_url=str(new_url), enable_notifications=False)
                 
                 if not camera.is_connected:
                     if not camera.connect():
@@ -734,6 +833,9 @@ def main():
                         continue
                 
                 # Inner loop for Direct Test
+                fps_test_start = time.time()
+                fps_test_counter = 0
+                fps_test = 0
                 while ui.current_state == STATE_TEST_CAM:
                     success, frame = camera.read_frame()
                     if not success or frame is None:
@@ -743,21 +845,25 @@ def main():
                         if cv2.waitKey(1) & 0xFF == ord('m'): break
                         continue
                     
-                    # Detection every few frames
-                    ai_frame_obj = frame.copy()
-                    if CameraConfig.ROI:
-                        x1, y1, x2, y2 = CameraConfig.ROI
-                        mask = np.zeros_like(ai_frame_obj)
-                        h, w = ai_frame_obj.shape[:2]
-                        x1, y1 = max(0, x1), max(0, y1)
-                        x2, y2 = min(w, x2), min(h, y2)
-                        mask[y1:y2, x1:x2] = 255
-                        ai_frame_obj = cv2.bitwise_and(ai_frame_obj, mask)
-                        
-                    faces = face_rec.detect_and_extract(ai_frame_obj, fast=True)
-                    tracker.update(faces, attendance, face_rec=face_rec, frame=frame, company_id=ui.session_company_id)
+                    # Update FPS display variables
+                    fps_test_counter += 1
+                    if time.time() - fps_test_start > 1.0:
+                        fps_test = fps_test_counter / (time.time() - fps_test_start)
+                        fps_test_counter = 0
+                        fps_test_start = time.time()
+
+                    # Push to AI thread asynchronously (Non-blocking)
+                    if not main.ai_queue.full():
+                        try:
+                            main.ai_queue.put_nowait((frame.copy(), ui.session_company_id))
+                        except Exception:
+                            pass
+                    
+                    # Always use the latest available AI results
+                    faces = main.cached_faces_detect
                     
                     display_frame = face_rec.draw_faces(frame, faces)
+                    cv2.putText(display_frame, f"FPS: {fps_test:.1f}", (cur_w - 150, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
                     
                     if CameraConfig.ROI:
                         x1, y1, x2, y2 = CameraConfig.ROI

@@ -162,7 +162,7 @@ class MongoDBManager:
             logger.error(f"MongoDB: Error getting status: {e}")
             return 'IN'
 
-    def log_attendance(self, user_id, user_name, status=None, frame=None, company_id=None, unknown_attempt=0):
+    def log_attendance(self, user_id, user_name, status=None, frame=None, company_id=None, unknown_attempt=0, video_path=None):
         """
         Record a new attendance entry to MongoDB Cloud.
         """
@@ -224,6 +224,7 @@ class MongoDBManager:
                 "shift": self.get_current_shift(),
                 "company_id": cid,
                 "image_webp": image_blob,
+                "video_path": video_path,
                 "unknown_attempt": unknown_attempt,
                 "session_id": str(uuid.uuid4()),
                 "uploaded_to": [],
