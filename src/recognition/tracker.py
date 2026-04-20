@@ -154,9 +154,18 @@ class FaceTracker:
                 name_no_accents = remove_accents(user_name)
                 
                 # 3. Format voice text for TTS
+                # Lấy giới tính từ database
+                employee = mongo_db.employees.find_one({"user_id": str(user_id)}) or {}
+                gender = employee.get("gender", "Nam") # Mặc định là Nam nếu không có
+                
+                prefix = "anh"
+                if str(gender).lower() in ["nữ", "nu", "female", "f"]:
+                    prefix = "chị"
+
                 name_parts = user_name.strip().split()
-                # Lấy tên đệm và tên (2 phần cuối của chuỗi tên)
-                short_name = " ".join(name_parts[-2:]) if len(name_parts) >= 2 else user_name
+                # Lấy tên (phần cuối cùng của chuỗi tên)
+                name_only = name_parts[-1] if name_parts else user_name
+                short_name = f"{prefix} {name_only}"
 
                 if custom_voice_text:
                     voice_text = custom_voice_text

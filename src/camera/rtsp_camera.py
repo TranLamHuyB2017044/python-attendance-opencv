@@ -111,7 +111,7 @@ class RTSPCamera:
                     if cap:
                         cap.release()
             except Exception as e:
-                logger.error(f"Exception during connection: {e}")
+                logger.warning(f"Exception during connection attempt: {e}")
         
         # Run connection in separate thread with timeout
         connect_thread = threading.Thread(target=_try_connect, daemon=True)
@@ -119,7 +119,7 @@ class RTSPCamera:
         connect_thread.join(timeout=timeout_seconds)
         
         if connect_thread.is_alive():
-            logger.error(f"Connection timeout after {timeout_seconds} seconds")
+            logger.warning(f"Connection timeout after {timeout_seconds} seconds")
             return None
         
         return result["cap"] if result["success"] else None
@@ -170,7 +170,7 @@ class RTSPCamera:
             return True
             
         except Exception as e:
-            logger.error(f"Error connecting to {'webcam' if self.is_webcam else 'RTSP'}: {e}")
+            logger.warning(f"Error connecting to {'webcam' if self.is_webcam else 'RTSP'}: {e}")
             return False
 
     def _ping_loop(self):
