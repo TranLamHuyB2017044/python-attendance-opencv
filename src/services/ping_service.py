@@ -1,5 +1,5 @@
 """
-Ping Service - Tự động gọi /api/v1/systems/ping mỗi 2 phút.
+Ping Service - Tự động gọi /api/v1/systems/ping mỗi 2 phút.mmmmmm
 
 Service này chạy trong một background thread riêng biệt.
 Nó sẽ hoạt động miễn là camera app còn đang chạy và stop_event chưa được set.
@@ -177,9 +177,9 @@ class PingService:
         payload = self._build_payload()
 
         logger.info(
-            f"PingService: 📡 Đang gửi ping → {url} | "
-            f"system_id={payload['system_id']} | ping_time={payload['ping_time']}"
+            f"PingService: [START] 📡 Đang chuẩn bị gửi ping tới {url}..."
         )
+        logger.debug(f"PingService: Payload: system_id={payload['system_id']} | time={payload['ping_time']}")
 
         try:
             response = requests.post(

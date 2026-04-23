@@ -290,7 +290,7 @@ def main():
                 if not system_initialized_notified:
                     from src.utils.notification import send_notification
                     send_notification("Bittech Camera Service", "DỊCH VỤ CAMERA ĐÃ HOẠT ĐỘNG!\n\nHệ thống bắt đầu quét khuôn mặt.")
-                    ping_service.start() # Bắt đầu gửi Ping khi đã có hình ảnh
+                    # ping_service.start() # Bắt đầu gửi Ping khi đã có hình ảnh
                     system_initialized_notified = True
                     logger.success("Service reporting started after camera connection.")
 

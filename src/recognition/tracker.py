@@ -773,6 +773,14 @@ class FaceTracker:
                                 f_data['user_data'] = user_data
                                 f_data['cooldown_remaining'] = int(RecognitionConfig.COOLDOWN_SECONDS - (current_time - self.user_cooldowns[user_id]))
                                 self._send_user_webhook(user_id, user_name, "COOLDOWN", is_unknown=False)
+                                
+                                # --- Vẫn gửi log báo cáo lên Dashboard ngay cả khi Cooldown ---
+                                try:
+                                    report_service.report_info(
+                                        message=f"Nhận diện (Cooldown): {user_name} (ID: {user_id}) vừa xuất hiện trước camera.",
+                                        status_code=200
+                                    )
+                                except Exception: pass
                             elif f_data['status'] == 'RECOGNIZED_SILENT':
                                 # SILENT MODE: Just update user_data for UI, NO logging, NO webhook
                                 f_data['user_data'] = user_data

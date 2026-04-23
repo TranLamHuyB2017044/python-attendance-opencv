@@ -561,7 +561,7 @@ def main():
     setup_logger()
     logger.info("Initializing Face Attendance System...")
 
-    # Ping Service is disabled for Management GUI to avoid double reporting on Dashboard
+    # Ping Service is temporarily disabled
     # ping_service.start()
 
     # Load config from MongoDB so that Cooldown/Anti-Spoofing settings take effect immediately
@@ -1155,7 +1155,7 @@ def main():
     finally:
         camera.disconnect()
         cv2.destroyAllWindows()
-        ping_service.stop()  # Dừng Ping Service khi app tắt
+        # ping_service.stop()  # Dừng Ping Service khi app tắt
         logger.info("Shutdown complete.")
 
 

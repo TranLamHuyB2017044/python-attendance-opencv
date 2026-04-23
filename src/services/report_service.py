@@ -30,6 +30,7 @@ class ReportService:
         3. Send the log to the Report System API.
         """
         try:
+            logger.info(f"ReportService: [START] Reporting {log_type} log: {message[:50]}...")
             # 1. Thu thập thông tin thiết bị nếu chưa có
             if devices_info is None:
                 devices_info = _build_devices_info()
@@ -56,11 +57,13 @@ class ReportService:
             log_system_id = os.getenv("LOGX_SYSTEM_ID")
             log_api_key = os.getenv("LOGX_API_KEY")
 
+            logger.debug(f"ReportService: Authenticating with LogX System ID: {log_system_id}")
             auth_result = hkb_service.authenticate(
                 system_id=log_system_id,
                 api_key=log_api_key,
                 user_id=1
             )
+            logger.debug(f"ReportService: Auth Result: Success={auth_result.success if auth_result else 'None'}")
             
             if not auth_result or not auth_result.success:
                 reason = getattr(auth_result, 'message', 'Unknown reason')
@@ -78,6 +81,7 @@ class ReportService:
 
             # 4. Gửi Log lên hệ thống trung tâm
             url = ReportSystemConfig.report_log_url()
+            logger.info(f"ReportService: Target URL: {url}")
             headers = {
                 "Authorization": f"Bearer {token}",
                 "X-Trace-Id": str(trace_id),

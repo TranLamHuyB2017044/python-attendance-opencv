@@ -2585,14 +2585,13 @@ class AttendanceUI:
             pwd = e_pass.get().strip()
             
             import os
-            test_url = f"rtsp://{user}:{pwd}@{ip}:{port}/ch1/main"
             env_url = os.getenv("RTSP_URL")
-            if env_url and str(ip) in env_url: test_url = env_url
+            # if env_url and str(ip) in env_url: test_url = env_url
             
-            if ip.isdigit(): test_url = ip
+            # if ip.isdigit(): test_url = ip
             
             try:
-                cam = RTSPCamera(rtsp_url=str(test_url))
+                cam = RTSPCamera(rtsp_url=str(env_url))
                 if not cam.connect():
                     messagebox.showerror("Lỗi", "Không thể kết nối Camera để vẽ ROI!")
                     return
