@@ -1,5 +1,6 @@
 import requests
 import json
+import os
 from loguru import logger
 from src.config import AuthServiceConfig, ReportSystemConfig
 from src.attendance.mongodb_mgr import mongo_db
@@ -51,16 +52,19 @@ class ReportService:
             if image_url:
                 full_message = f"{message}\n\n🖼️ Photo URL: {image_url}"
 
-            # 3. Lấy Token từ HKB Service
-            # Sử dụng thông tin từ AuthServiceConfig
+            # 3. Lấy Token từ HKB Service dành riêng cho Log System
+            log_system_id = os.getenv("LOGX_SYSTEM_ID")
+            log_api_key = os.getenv("LOGX_API_KEY")
+
             auth_result = hkb_service.authenticate(
-                system_id=AuthServiceConfig.SYSTEM_ID,
-                api_key=AuthServiceConfig.API_KEY,
-                user_id=1 # Default user_id
+                system_id=log_system_id,
+                api_key=log_api_key,
+                user_id=1
             )
             
             if not auth_result or not auth_result.success:
-                logger.error(f"ReportService: Authentication failed. Cannot report log. TraceID: {trace_id}")
+                reason = getattr(auth_result, 'message', 'Unknown reason')
+                logger.error(f"ReportService: Authentication failed ({reason}). Cannot report log. TraceID: {trace_id}")
                 return False
                 
             # Trích xuất token từ response (giả định cấu trúc data.access_token hoặc token)
@@ -69,7 +73,7 @@ class ReportService:
                 token = auth_result.data.get('access_token') or auth_result.data.get('token')
             
             if not token:
-                logger.error(f"ReportService: No token found in auth response. TraceID: {trace_id}")
+                logger.error(f"ReportService: No token found in auth response. Data: {auth_result.data} | TraceID: {trace_id}")
                 return False
 
             # 4. Gửi Log lên hệ thống trung tâm
@@ -81,7 +85,7 @@ class ReportService:
             }
             
             payload = {
-                "system_id": AuthServiceConfig.SYSTEM_ID,
+                "system_id": AuthServiceConfig.SYSTEM_ID.upper(),
                 "message": full_message,
                 "status_code": status_code,
                 "type": log_type,
@@ -89,7 +93,7 @@ class ReportService:
                 "devices_info": devices_info
             }
 
-            logger.info(f"ReportService: 📡 Sending log report to {url} | TraceID: {trace_id}")
+            logger.info(f"ReportService: 📡 Sending log report to {url} | TraceID: {trace_id} - Payload: {payload}")
             
             response = requests.post(url, json=payload, headers=headers, timeout=10)
             
@@ -101,7 +105,8 @@ class ReportService:
                 return False
 
         except Exception as e:
-            logger.error(f"ReportService: Error reporting log: {e}")
+            import traceback
+            logger.error(f"ReportService: Critical error reporting log: {e}\n{traceback.format_exc()}")
             return False
 
 # Singleton instance

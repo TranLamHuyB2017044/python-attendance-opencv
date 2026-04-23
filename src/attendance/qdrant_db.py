@@ -53,7 +53,12 @@ class QdrantAttendanceManager:
                 field_name="company_id",
                 field_schema=models.PayloadSchemaType.KEYWORD,
             )
-            logger.info(f"Payload indexes for 'user_id' and 'company_id' ensured in {self.collection_name}")
+            self.client.create_payload_index(
+                collection_name=self.collection_name,
+                field_name="active",
+                field_schema=models.PayloadSchemaType.BOOL,
+            )
+            logger.info(f"Payload indexes for 'user_id', 'company_id', and 'active' ensured in {self.collection_name}")
             
         except Exception as e:
             logger.error(f"Failed to ensure Qdrant collection/indexes: {e}")
@@ -131,20 +136,10 @@ class QdrantAttendanceManager:
         try:
             vector = query_embedding.tolist() if isinstance(query_embedding, np.ndarray) else list(query_embedding)
 
-            # Build query filter to only include active users
-            query_filter = models.Filter(
-                must=[
-                    models.FieldCondition(
-                        key="active",
-                        match=models.MatchValue(value=True)
-                    )
-                ]
-            )
-
+            # Build query filter - removed 'active: False' filter to recognize disabled users but skip them later
             search_result = self.client.query_points(
                 collection_name=self.collection_name,
                 query=vector,
-                query_filter=query_filter,
                 limit=1,
                 with_payload=True
             )
@@ -178,7 +173,8 @@ class QdrantAttendanceManager:
                 "company_id": payload.get("company_id", "Unknown"),
                 "score": score,
                 "detect_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "vector_count": count_res.count
+                "vector_count": count_res.count,
+                "active": payload.get("active", True)
             }
 
         except Exception as e:
@@ -384,6 +380,26 @@ class QdrantAttendanceManager:
                 return False
         except Exception as e:
             logger.error(f"Error deleting all Qdrant points for user_id {user_id}: {e}")
+            return False
+
+    def set_user_active_status(self, user_id: str, active: bool = True) -> bool:
+        """
+        Update the 'active' field in payload for all points of a user.
+        """
+        try:
+            self.client.set_payload(
+                collection_name=self.collection_name,
+                payload={"active": active},
+                points=models.FilterSelector(
+                    filter=models.Filter(
+                        must=[models.FieldCondition(key="user_id", match=models.MatchValue(value=str(user_id)))]
+                    )
+                )
+            )
+            logger.success(f"Qdrant: Set active={active} for user ID: {user_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Qdrant: Failed to set active status for user {user_id}: {e}")
             return False
 
 # Global instance for shared use

@@ -11,6 +11,7 @@ from src.attendance.mongodb_mgr import mongo_db
 from src.utils.string_utils import remove_accents
 from src.utils.time_manager import time_mgr
 from src.recognition.async_spoof import AsyncSpoofChecker
+from src.services.report_service import report_service
 
 class FaceTracker:
     """
@@ -706,26 +707,46 @@ class FaceTracker:
                     is_known = vote.get('name', 'Unknown') != 'Unknown'
 
                     if is_known:
-                        # Synchronous Spoof Check
-                        if self.spoof_checker and frame is not None:
-                            spoof_real, spoof_score = self.spoof_checker.check_sync(frame, face, timeout=0.15)
-                            if not spoof_real:
-                                logger.warning(f"[Spoof] ❌ SPOOF DETECTED — ID={matched_id} score={spoof_score:.2f}")
-                                f_data['status'] = 'SPOOF_DETECTED'
-                                f_data['last_attempt_time'] = current_time
-                                
-                                # Cơ chế chống Spam Spoof (5s báo 1 lần trên cùng 1 người)
-                                last_spoof = f_data.get('last_spoof_alert', 0)
-                                if current_time - last_spoof > 5.0:
-                                    f_data['last_spoof_alert'] = current_time
-                                    self._send_user_webhook("Spoof", "Ke gia mao", "SPOOF", is_unknown=True)
-                                    self._send_telegram_alert(
-                                        "CANH BAO GIA MAO", 
-                                        f"Phat hien hanh vi gia mao khuon mat!\nID: {matched_id}\nScore: {spoof_score:.2f}",
-                                        image=frame
-                                    )
-                                updated_faces_map[matched_id] = f_data
-                                continue
+                        # Check if user is active. If not, treat as "Recognized but Silent" (no log, no sync, no webhook)
+                        is_active = vote.get('active', True)
+                        
+                        if not is_active:
+                            logger.info(f"[Recognition] ⏩ {vote.get('name')} (ID: {vote.get('user_id')}) is INACTIVE. Processing silently (UI only).")
+                            f_data['status'] = 'RECOGNIZED_SILENT'
+                            f_data['user_data'] = vote
+                            # We don't 'continue' here, we let it proceed to fill face info for UI, 
+                            # but we will skip actions later.
+                        else:
+                            # Proceed with normal flow...
+                            pass
+
+                        if f_data['status'] != 'RECOGNIZED_SILENT':
+                            # Synchronous Spoof Check
+                            if self.spoof_checker and frame is not None:
+                                spoof_real, spoof_score = self.spoof_checker.check_sync(frame, face, timeout=0.15)
+                                if not spoof_real:
+                                    logger.warning(f"[Spoof] ❌ SPOOF DETECTED — ID={matched_id} score={spoof_score:.2f}")
+                                    f_data['status'] = 'SPOOF_DETECTED'
+                                    f_data['last_attempt_time'] = current_time
+                                    
+                                    # Cơ chế chống Spam Spoof (5s báo 1 lần trên cùng 1 người)
+                                    last_spoof = f_data.get('last_spoof_alert', 0)
+                                    if current_time - last_spoof > 5.0:
+                                        f_data['last_spoof_alert'] = current_time
+                                        self._send_user_webhook("Spoof", "Ke gia mao", "SPOOF", is_unknown=True)
+                                        self._send_telegram_alert(
+                                            "CANH BAO GIA MAO", 
+                                            f"Phat hien hanh vi gia mao khuon mat!\nID: {matched_id}\nScore: {spoof_score:.2f}",
+                                            image=frame
+                                        )
+                                        # Báo cáo lên Dashboard trung tâm
+                                        report_service.report_error(
+                                            message=f"CẢNH BÁO GIẢ MẠO: Phát hiện hành vi giả mạo khuôn mặt (ID: {matched_id}, Score: {spoof_score:.2f})",
+                                            status_code=403,
+                                            priority="HIGH"
+                                        )
+                                    updated_faces_map[matched_id] = f_data
+                                    continue
 
                         # Correct realization
                         user_data = vote
@@ -734,7 +755,8 @@ class FaceTracker:
                         logger.info(f"[Recognition] ✅ {user_name} (score={vote.get('score',0):.3f})")
 
                         if only_recognize:
-                            f_data['status'] = 'RECOGNIZED'
+                            if f_data['status'] != 'RECOGNIZED_SILENT':
+                                f_data['status'] = 'RECOGNIZED'
                             f_data['user_data'] = user_data
                         else:
                             target_cid = user_data.get('company_id') or active_company
@@ -751,6 +773,10 @@ class FaceTracker:
                                 f_data['user_data'] = user_data
                                 f_data['cooldown_remaining'] = int(RecognitionConfig.COOLDOWN_SECONDS - (current_time - self.user_cooldowns[user_id]))
                                 self._send_user_webhook(user_id, user_name, "COOLDOWN", is_unknown=False)
+                            elif f_data['status'] == 'RECOGNIZED_SILENT':
+                                # SILENT MODE: Just update user_data for UI, NO logging, NO webhook
+                                f_data['user_data'] = user_data
+                                logger.debug(f"[Recognition] SILENT: {user_name} recognized but all actions skipped.")
                             else:
                                 f_data['status'] = 'RECOGNIZED'
                                 f_data['user_data'] = user_data
@@ -769,7 +795,7 @@ class FaceTracker:
                         
                         # --- CƠ CHẾ THÔNG BÁO THẤT BẠI (CÁCH NHAU 1 GIÂY) ---
                         last_unknown = f_data.get('last_unknown_alert', 0)
-                        if current_time - last_unknown > 1.0:
+                        if current_time - last_unknown > 3.0:
                             f_data['last_unknown_alert'] = current_time
                             
                             voice_text = "Xin vui lòng thử lại"
@@ -789,6 +815,12 @@ class FaceTracker:
                                 
                                 self._send_telegram_alert("PHAT HIEN NGUOI LA", f"Phát hiện người lạ trước camera (Đã quét {f_data['unknown_attempts']} lần)", image=frame)
                                 self._send_user_webhook("Unknown", "Nguoi la", "unknown", is_unknown=True, custom_voice_text=voice_text)
+                                # Báo cáo lên Dashboard trung tâm
+                                report_service.report_error(
+                                    message=f"CẢNH BÁO NGƯỜI LẠ: Phát hiện đối tượng lạ trước camera (Đã quét {f_data['unknown_attempts']} lần)",
+                                    status_code=401,
+                                    priority="MEDIUM"
+                                )
                             else:
                                 # Gửi voice cách nhau 1 giây
                                 self._send_user_webhook("Unknown", "Nguoi la", "unknown", is_unknown=True, custom_voice_text=voice_text)
@@ -805,7 +837,7 @@ class FaceTracker:
             if matched_id in updated_faces_map:
                 data = updated_faces_map[matched_id]
                 # Flag cho draw_faces() biết màu nào cần tô
-                face.recognized = data['status'] in ['RECOGNIZED', 'COOLDOWN']
+                face.recognized = data['status'] in ['RECOGNIZED', 'COOLDOWN', 'RECOGNIZED_SILENT']
                 face.is_spoof   = data['status'] == 'SPOOF_DETECTED'
 
                 if data['user_data']:
@@ -816,10 +848,13 @@ class FaceTracker:
                     face.detect_time = (u_d.get('detect_time') or '').split(' ')[-1] or 'N/A'
                     face.vector_count = u_d.get('vector_count') if u_d.get('vector_count') is not None else 0
                     
-                    if data['status'] in ['COOLDOWN', 'RECOGNIZED']:
+                    if data['status'] in ['COOLDOWN', 'RECOGNIZED', 'RECOGNIZED_SILENT']:
                         name = remove_accents(u_d.get('name'))
                         uid = u_d.get('user_id')
-                        if uid in self.user_cooldowns:
+                        
+                        if data['status'] == 'RECOGNIZED_SILENT':
+                            face.name = name # JUST THE NAME, silent mode
+                        elif uid in self.user_cooldowns:
                             elapsed = current_time - self.user_cooldowns[uid]
                             remain_sec = int(max(0, RecognitionConfig.COOLDOWN_SECONDS - elapsed))
                             if remain_sec > 0:

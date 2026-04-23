@@ -69,12 +69,24 @@ def setup_logger() -> None:
         catch=True
     )
 
-    # Add Telegram sink for ERROR and CRITICAL levels
+    # Add Telegram sink for ERROR and CRITICAL levels with Anti-Spam
+    last_telegram_time = 0
     def telegram_sink(message):
+        nonlocal last_telegram_time
+        import time
+        current_time = time.time()
+        # Chỉ cho phép gửi Telegram mỗi 10 giây một lần để tránh Loop/Spam
+        if current_time - last_telegram_time < 10:
+            return
+            
+        from src.utils.time_manager import time_mgr
+        # from src.services.report_service import report_service  <-- REMOVE THIS TO AVOID CIRCULAR IMPORT / LOOP
         from src.utils.telegram_bot import send_telegram_report
         record = message.record
         title = f"System {record['level'].name}"
         error_msg = f"{record['name']}:{record['function']}:{record['line']} - {record['message']}"
+        
+        last_telegram_time = current_time
         send_telegram_report(title, error_msg)
 
     logger.add(

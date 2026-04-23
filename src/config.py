@@ -183,6 +183,7 @@ class AuthServiceConfig:
     SYSTEM_ID: str = os.getenv("SYSTEM_ID", "attendance_system")
     SYSTEM_NAME: str = os.getenv("SYSTEM_NAME", "FACE AI CHECKING")
     SYSTEM_REGISTER: str = os.getenv("SYSTEM_REGISTER", "")
+    CURRENT_USER_ID: int = 1  # Global session tracking for reporting
 
 
 class ApiConfig:

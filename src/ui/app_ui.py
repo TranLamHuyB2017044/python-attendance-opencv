@@ -20,6 +20,7 @@ if base_dir not in sys.path:
 
 from loguru import logger
 from src.attendance.mongodb_mgr import mongo_db
+from src.config import AuthServiceConfig
 import customtkinter as ctk
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -695,9 +696,23 @@ class AttendanceUI:
 
         ctk.CTkLabel(root, text=title, font=("Arial", 20, "bold"), text_color="#1f6aa5").pack(pady=20)
 
+        # --- Filter Bar ---
+        filter_frame = ctk.CTkFrame(root, fg_color="transparent")
+        filter_frame.pack(pady=(0, 10), padx=20, fill="x")
+
+        ctk.CTkLabel(filter_frame, text="Tìm kiếm:", font=("Arial", 12, "bold")).pack(side="left", padx=(0, 5))
+        search_var = tk.StringVar()
+        search_entry = ctk.CTkEntry(filter_frame, placeholder_text="Nhập tên hoặc mã NV...", width=250, textvariable=search_var)
+        search_entry.pack(side="left", padx=(0, 20))
+
+        ctk.CTkLabel(filter_frame, text="Trạng thái:", font=("Arial", 12, "bold")).pack(side="left", padx=(0, 5))
+        status_filter = ctk.CTkComboBox(filter_frame, values=["Tất cả", "Hoạt động", "Đã xóa"], width=150, command=lambda x: refresh_table())
+        status_filter.set("Tất cả")
+        status_filter.pack(side="left")
+
         # Frame for Treeview and Scrollbar
         frame_tree = ctk.CTkFrame(root)
-        frame_tree.pack(pady=10, padx=20, fill="both", expand=True)
+        frame_tree.pack(pady=5, padx=20, fill="both", expand=True)
 
         # Treeview
         columns = ("user_id", "user_name", "birthday", "has_face", "enrollment_status", "status")
@@ -725,26 +740,54 @@ class AttendanceUI:
         scrollbar.pack(side="right", fill="y")
         tree.pack(side="left", fill="both", expand=True)
 
-        # Populate Treeview
-        for emp in employees:
-            has_face_text = "Có" if emp.get("has_face") else "Không"
+        def refresh_table(event=None):
+            # Clear current items
+            for item in tree.get_children():
+                tree.delete(item)
             
-            enrollment_count = 0
-            if attendance_manager and emp.get("has_face"):
-                points = attendance_manager.get_user_points(emp["user_id"])
-                enrollment_count = len(points)
-            
-            enroll_status_str = f"{enrollment_count}/10"
-            active_text = "Hoạt động" if emp.get("active", True) else "Đã xóa"
+            search_query = search_var.get().lower().strip()
+            status_query = status_filter.get()
 
-            tree.insert("", "end", values=(
-                emp["user_id"], 
-                emp["user_name"], 
-                emp["birthday"], 
-                has_face_text,
-                enroll_status_str,
-                active_text
-            ))
+            # Filter and re-populate
+            for emp in employees:
+                # 1. Search filter
+                name = str(emp.get("user_name", "")).lower()
+                u_id = str(emp.get("user_id", "")).lower()
+                if search_query and (search_query not in name and search_query not in u_id):
+                    continue
+                
+                # 2. Status filter
+                is_active = emp.get("active", True)
+                if status_query == "Hoạt động" and not is_active:
+                    continue
+                if status_query == "Đã xóa" and is_active:
+                    continue
+
+                # 3. Populate
+                has_face_text = "Có" if emp.get("has_face") else "Không"
+                enrollment_count = 0
+                if attendance_manager and emp.get("has_face"):
+                    # Caching logic could be added here if it becomes slow
+                    points = attendance_manager.get_user_points(emp["user_id"])
+                    enrollment_count = len(points)
+                
+                enroll_status_str = f"{enrollment_count}/10"
+                active_text = "Hoạt động" if is_active else "Đã xóa"
+
+                tree.insert("", "end", values=(
+                    emp["user_id"], 
+                    emp["user_name"], 
+                    emp["birthday"], 
+                    has_face_text,
+                    enroll_status_str,
+                    active_text
+                ))
+
+        # Initial population
+        refresh_table()
+        
+        # Bind search entry to update on type
+        search_var.trace_add("write", lambda *args: refresh_table())
 
         # Action Buttons Frame
         btn_frame = ctk.CTkFrame(root, fg_color="transparent")
@@ -807,8 +850,55 @@ class AttendanceUI:
             else:
                 messagebox.showerror("Lỗi", f"Không thể xóa vĩnh viễn: {err_msg}")
 
+        def on_toggle_active():
+            if self.session_role != "admin":
+                messagebox.showerror("Lỗi quyền hạn", "Chỉ tài khoản Quản trị viên (Admin) mới có quyền thực hiện thao tác này.")
+                return
+
+            sel = tree.selection()
+            if not sel:
+                messagebox.showwarning("Cảnh báo", "Vui lòng chọn một nhân viên để thay đổi trạng thái.")
+                return
+            
+            item_id = sel[0]
+            values = tree.item(item_id, "values")
+            user_id = values[0]
+            user_name = values[1]
+            current_status = values[5]
+            
+            is_active = (current_status == "Hoạt động")
+            new_status = not is_active
+            action_text = "vô hiệu hóa" if is_active else "kích hoạt lại"
+            
+            confirm = messagebox.askyesno(
+                "Xác nhận thay đổi", 
+                f"Bạn có chắc chắn muốn {action_text} nhân viên '{user_name}' (ID: {user_id})?\n\n" +
+                ("Nhân viên này sẽ KHÔNG được nhận diện và KHÔNG gửi dữ liệu đồng bộ/webhook." if is_active else "Nhân viên này sẽ được nhận diện và đồng bộ dữ liệu trở lại.")
+            )
+            if not confirm:
+                return
+            
+            if mongo_db and company_id:
+                success, msg = mongo_db.set_employee_active_status(user_id, company_id, active=new_status)
+                if success:
+                    messagebox.showinfo("Thành công", f"Đã {action_text} nhân viên {user_name} thành công.")
+                    # Update local list state to avoid re-fetching from DB if possible
+                    for emp in employees:
+                        if str(emp.get("user_id")) == str(user_id):
+                            emp["active"] = new_status
+                            break
+                    refresh_table()
+                else:
+                    messagebox.showerror("Lỗi", f"Không thể thay đổi trạng thái: {msg}")
+            else:
+                messagebox.showerror("Lỗi", "Thiếu thông tin kết nối Database hoặc Công ty.")
+
         if self.session_role == "admin":
             ctk.CTkButton(btn_frame, text="Xem Ảnh", command=on_view_images, fg_color="#1f6aa5", hover_color="#154c75").pack(side="left", padx=10)
+            
+            # Dynamic button text based on selection could be better, but for now a simple toggle button works
+            ctk.CTkButton(btn_frame, text="Vô hiệu hóa / Kích hoạt", command=on_toggle_active, fg_color="#f39c12", hover_color="#d35400").pack(side="left", padx=10)
+            
             ctk.CTkButton(btn_frame, text="Xóa vĩnh viễn", command=on_hard_delete, fg_color="#e74c3c", hover_color="#c0392b").pack(side="left", padx=10)
         
         ctk.CTkButton(btn_frame, text="Đóng", command=root.destroy, fg_color="gray").pack(side="left", padx=10)
@@ -1765,11 +1855,34 @@ class AttendanceUI:
             sel = tree.selection()
             if not sel: return messagebox.showwarning("!", "Vui lòng chọn hệ thống")
             item = tree.item(sel[0])['values']
-            root.config(cursor="watch"); root.update()
-            res = hkb_service.register_client(system_id=item[2], external_id=current_user_id, description=f"Yêu cầu từ {item[1]}", user_info={"app": "Face Attendance"}, system_connection_id=item[0], system_register=AuthServiceConfig.SYSTEM_ID)
-            root.config(cursor=""); refresh_list()
-            if res and res.success: messagebox.showinfo("Thành công", "Đã gửi yêu cầu kết nối")
-            else: messagebox.showerror("Lỗi", res.message if res else "Thất bại")
+            
+            loading_win = ctk.CTkToplevel(root)
+            loading_win.title("Đang xử lý...")
+            loading_win.geometry("300x120")
+            loading_win.transient(root)
+            loading_win.grab_set()
+            _apply_icon(loading_win)
+            ctk.CTkLabel(loading_win, text="Đang gửi yêu cầu kết nối...", font=("Arial", 13)).pack(pady=30)
+
+            def worker():
+                try:
+                    res = hkb_service.register_client(
+                        system_id=item[2], 
+                        external_id=current_user_id, 
+                        description=f"Yêu cầu từ {item[1]}", 
+                        user_info={"app": "Face Attendance"}, 
+                        system_connection_id=item[0], 
+                        system_register=AuthServiceConfig.SYSTEM_ID
+                    )
+                    loading_win.after(0, lambda: [
+                        loading_win.destroy(),
+                        refresh_list(),
+                        messagebox.showinfo("Thành công", "Đã gửi yêu cầu kết nối") if res and res.success else messagebox.showerror("Lỗi", res.message if res else "Thất bại")
+                    ])
+                except Exception as e:
+                    loading_win.after(0, lambda: [loading_win.destroy(), messagebox.showerror("Lỗi", str(e))])
+
+            threading.Thread(target=worker, daemon=True).start()
 
         def on_get_employees():
             sel = tree.selection()
@@ -1780,11 +1893,30 @@ class AttendanceUI:
             auth_data = mongo_db.auth_services.find_one({"uuid": item[2]})
             if not auth_data: return messagebox.showerror("Lỗi", "Thiếu API Key")
             
-            root.config(cursor="watch"); root.update()
-            res = hkb_service.get_employees(endpoint=item[3], system_id=item[2], api_key=auth_data["key"], user_id=auth_data.get("user_id", current_user_id))
-            root.config(cursor="")
-            if res and res.success: self.show_remote_employees_ui(item[1], res.data, item[2], parent=root)
-            else: messagebox.showerror("Lỗi", res.message if res else "Thất bại")
+            loading_win = ctk.CTkToplevel(root)
+            loading_win.title("Đang tải...")
+            loading_win.geometry("300x120")
+            loading_win.transient(root)
+            loading_win.grab_set()
+            _apply_icon(loading_win)
+            ctk.CTkLabel(loading_win, text="Đang lấy dữ liệu nhân viên...", font=("Arial", 13)).pack(pady=30)
+
+            def worker():
+                try:
+                    res = hkb_service.get_employees(
+                        endpoint=item[3], 
+                        system_id=item[2], 
+                        api_key=auth_data["key"], 
+                        user_id=auth_data.get("user_id", current_user_id)
+                    )
+                    loading_win.after(0, lambda: [
+                        loading_win.destroy(),
+                        self.show_remote_employees_ui(item[1], res.data, item[2], parent=root) if res and res.success else messagebox.showerror("Lỗi", res.message if res else "Thất bại")
+                    ])
+                except Exception as e:
+                    loading_win.after(0, lambda: [loading_win.destroy(), messagebox.showerror("Lỗi", str(e))])
+
+            threading.Thread(target=worker, daemon=True).start()
 
         btn_frame = ctk.CTkFrame(root, fg_color="transparent")
         btn_frame.pack(pady=20)
@@ -1847,44 +1979,78 @@ class AttendanceUI:
                 confirm_msg = f"Đồng bộ tất cả {len(targets)} nhân viên? \nLưu ý: Nhân viên cũ không có trong danh sách này sẽ bị đánh dấu 'Đã xóa' (xóa mềm) khỏi hệ thống."
                 
             if not messagebox.askyesno("Xác nhận", confirm_msg): return
-            
-            # Nếu là đồng bộ tất cả, thực hiện xóa nhân viên cũ không có trong danh sách mới
-            if not selected_only:
-                try:
-                    # 1. Lấy danh sách nhân viên hiện tại trong MongoDB cho công ty này (bao gồm cả nhân viên đã xóa mềm để tránh tạo lại)
-                    existing_employees = mongo_db.get_all_employees(company_id=target_company_id, active_only=False)
-                    existing_ids = {str(e["user_id"]) for e in existing_employees}
-                    
-                    # 2. Lấy danh sách ID mới sẽ được lưu
-                    new_ids = {str(t["id"]) for t in targets}
-                    
-                    # 3. Tìm các ID cần xóa (có trong cũ nhưng không có trong mới)
-                    ids_to_delete = list(existing_ids - new_ids)
-                    
-                    if ids_to_delete:
-                        from src.attendance.qdrant_db import attendance as qdrant_mgr
-                        # Xóa mềm từ MongoDB
-                        mongo_db.soft_delete_employees_bulk(ids_to_delete, target_company_id)
-                        # Xóa mềm từ Qdrant
-                        for uid in ids_to_delete:
-                            qdrant_mgr.set_user_active_status(uid, False)
-                        logger.info(f"Sync: Soft deleted {len(ids_to_delete)} old employees not in the sync list.")
-                except Exception as e:
-                    logger.error(f"Sync: Error during cleanup of old employees: {e}")
 
-            saved = 0
-            from src.attendance.qdrant_db import attendance as qdrant_mgr
-            for t in targets:
-                # 1. Cập nhật MongoDB (Metadata) - Luôn giữ nguyên hình ảnh trong collection enrollment_images, set active=True
-                ok, _ = mongo_db.save_employee(t["id"], t["name"], t["bday"], t["cid"], active=True)
-                if ok:
-                    # 2. Cập nhật Qdrant (Metadata) - Giữ nguyên các vector khuôn mặt cũ, set active=True
-                    qdrant_mgr.update_user_info(t["id"], t["name"], t["bday"])
-                    qdrant_mgr.set_user_active_status(t["id"], True)
-                    saved += 1
+            # Create Progress Window
+            progress_win = ctk.CTkToplevel(root)
+            progress_win.title("Đang đồng bộ...")
+            progress_win.geometry("400x180")
+            progress_win.transient(root)
+            progress_win.grab_set()
+            _apply_icon(progress_win)
             
-            messagebox.showinfo("Kết quả", f"Đã lưu thành công {saved}/{len(targets)} nhân viên.")
-            if saved > 0: root.destroy()
+            progress_label = ctk.CTkLabel(progress_win, text="Đang chuẩn bị dữ liệu...", font=("Arial", 13))
+            progress_label.pack(pady=(20, 10))
+            
+            progress_bar = ctk.CTkProgressBar(progress_win, width=300)
+            progress_bar.pack(pady=10)
+            progress_bar.set(0)
+            
+            percent_label = ctk.CTkLabel(progress_win, text="0%", font=("Arial", 12))
+            percent_label.pack(pady=5)
+
+            def worker():
+                try:
+                    # 1. Cleanup old employees (only for Sync All)
+                    if not selected_only:
+                        progress_win.after(0, lambda: progress_label.configure(text="Đang dọn dẹp nhân viên cũ..."))
+                        try:
+                            existing_employees = mongo_db.get_all_employees(company_id=target_company_id, active_only=False)
+                            existing_ids = {str(e["user_id"]) for e in existing_employees}
+                            new_ids = {str(t["id"]) for t in targets}
+                            ids_to_delete = list(existing_ids - new_ids)
+                            
+                            if ids_to_delete:
+                                from src.attendance.qdrant_db import attendance as qdrant_mgr
+                                mongo_db.soft_delete_employees_bulk(ids_to_delete, target_company_id)
+                                for uid in ids_to_delete:
+                                    qdrant_mgr.set_user_active_status(uid, False)
+                                logger.info(f"Sync: Soft deleted {len(ids_to_delete)} old employees.")
+                        except Exception as e:
+                            logger.error(f"Sync: Error during cleanup: {e}")
+
+                    # 2. Save New/Updated Employees
+                    saved = 0
+                    total = len(targets)
+                    from src.attendance.qdrant_db import attendance as qdrant_mgr
+                    
+                    for i, t in enumerate(targets):
+                        # Update UI
+                        progress_win.after(0, lambda idx=i, item=t: [
+                            progress_label.configure(text=f"Đang lưu ({idx+1}/{total}): {item['name']}"),
+                            progress_bar.set((idx+1)/total),
+                            percent_label.configure(text=f"{int((idx+1)/total * 100)}%")
+                        ])
+                        
+                        ok, _ = mongo_db.save_employee(t["id"], t["name"], t["bday"], t["cid"], active=True)
+                        if ok:
+                            qdrant_mgr.update_user_info(t["id"], t["name"], t["bday"])
+                            qdrant_mgr.set_user_active_status(t["id"], True)
+                            saved += 1
+                    
+                    progress_win.after(0, lambda: [
+                        progress_win.destroy(),
+                        messagebox.showinfo("Kết quả", f"Đã lưu thành công {saved}/{total} nhân viên."),
+                        root.destroy() if saved > 0 else None
+                    ])
+                except Exception as e:
+                    logger.error(f"Sync Worker Error: {e}")
+                    progress_win.after(0, lambda: [
+                        progress_win.destroy(),
+                        messagebox.showerror("Lỗi", f"Có lỗi xảy ra trong quá trình đồng bộ: {e}")
+                    ])
+
+            import threading
+            threading.Thread(target=worker, daemon=True).start()
 
         btn_frame = ctk.CTkFrame(root, fg_color="transparent")
         btn_frame.pack(pady=20)
@@ -2150,6 +2316,7 @@ class AttendanceUI:
                 self.session_company_id = auth_info["company_id"]
                 self.session_username = auth_info["username"]
                 self.session_user_id = auth_info.get("user_id", 1)
+                AuthServiceConfig.CURRENT_USER_ID = self.session_user_id
                 login_root.destroy()
             else:
                 messagebox.showerror("Lỗi đăng nhập", "Sai tài khoản hoặc mật khẩu hệ thống Cloud!")

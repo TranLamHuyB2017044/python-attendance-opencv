@@ -6,7 +6,7 @@ from typing import Optional
 from loguru import logger
 import cv2
 import numpy as np
-from src.config import MongoDbConfig, RecognitionConfig
+from src.config import MongoDbConfig, RecognitionConfig, AuthServiceConfig
 
 class MongoDBManager:
     """
@@ -259,16 +259,31 @@ class MongoDBManager:
                 try: 
                     from src.services.hkb_service import hkb_service
                     from src.services.report_service import report_service
-                except ImportError: return
+                    from src.config import ApiConfig
+                except Exception as e: 
+                    logger.error(f"Sync Task: Import error - {e}")
+                    return
                 
                 user_id = log_entry.get("user_id")
                 cid = log_entry.get("company_id")
                 attempt = log_entry.get("unknown_attempt", 0)
 
-                # TEST_MODE check
+                # --- ALWAYS REPORT ATTENDANCE EVENT TO DASHBOARD (Even in TEST_MODE) ---
+                log_id_str = str(log_entry.get("_id", ""))
+                image_url = f"{ApiConfig.BASE_URL}/logs/{log_id_str}/image" if log_id_str else None
+                
+                logger.info(f"Sync Task: Đang gọi report_info cho nhân viên {user_id} với image_url={image_url}")
+                
+                report_service.report_info(
+                    message=f"Chấm công thành công: {log_entry['user_name']} (Mã NV: {user_id}) - Trạng thái: {log_entry['status']}",
+                    status_code=200,
+                    image_url=image_url
+                )
+
+                # TEST_MODE check (Only skip HKB Sync, keep Dashboard reporting)
                 from src.config import RecognitionConfig
                 if RecognitionConfig.TEST_MODE:
-                    logger.debug("Sync: TEST_MODE is enabled. Skipping cloud sync.")
+                    logger.debug("Sync: TEST_MODE is enabled. Skipping cloud HKB sync but reported to dashboard.")
                     return
                 
                 if user_id in ["Unknown", "Spoof"]:
@@ -301,17 +316,18 @@ class MongoDBManager:
                     if res and res.success:
                         self.mark_logs_uploaded([log_entry["_id"]], service["uuid"], details={"status": "SUCCESS", "message": res.message})
                         logger.success(f"Sync: Successfully synced to {service['app_name']}")
-                        # Thử lấy URL ảnh từ kết quả trả về (nếu có)
-                        image_url = None
-                        if res and hasattr(res, 'data') and isinstance(res.data, dict):
-                            # Tìm kiếm trường url hoặc link trong data
-                            image_url = res.data.get('image_url') or res.data.get('url') or res.data.get('link')
 
-                        report_service.report_info(
-                            message=f"Đồng bộ chấm công thành công: {log_entry['user_name']} -> {service['app_name']}",
-                            status_code=200,
-                            image_url=image_url
-                        )
+                        # TRÍCH XUẤT URL ẢNH ĐỂ GỬI LÊN DASHBOARD
+                        image_url = None
+                        if hasattr(res, 'data') and isinstance(res.data, dict):
+                            image_url = res.data.get('image_url') or res.data.get('url') or res.data.get('link')
+                        
+                        if image_url:
+                            report_service.report_info(
+                                message=f"Đã có ảnh chấm công: {log_entry['user_name']} ({service['app_name']})",
+                                status_code=200,
+                                image_url=image_url
+                            )
                     else:
                         msg = res.message if res else 'No response'
                         err_detail = None
@@ -327,7 +343,8 @@ class MongoDBManager:
                             
                         self.mark_logs_uploaded([log_entry["_id"]], service["uuid"], details=details_obj)
                         logger.warning(f"Sync: Failed to sync to {service['app_name']}: {msg}")
-                        # Báo cáo lỗi lên Dashboard
+                        
+                        # CHỈ GỬI LOG KHI ĐỒNG BỘ THẤT BẠI
                         report_service.report_error(
                             message=f"Lỗi đồng bộ chấm công: {log_entry['user_name']} -> {service['app_name']}. Lỗi: {msg}",
                             status_code=502
@@ -770,6 +787,35 @@ class MongoDBManager:
         except Exception as e:
             logger.error(f"Failed to save auth service: {e}")
             return False
+
+    def set_employee_active_status(self, user_id, company_id, active=True):
+        """
+        Set active status for an employee in both MongoDB and Qdrant.
+        """
+        try:
+            # 1. Update MongoDB
+            res = self.employees.update_one(
+                {"user_id": user_id, "company_id": company_id},
+                {"$set": {"active": active, "updated_at": datetime.datetime.utcnow()}}
+            )
+            
+            # 2. Update Qdrant
+            from src.attendance.qdrant_db import attendance as qdrant_mgr
+            qdrant_mgr.set_user_active_status(user_id, active)
+            
+            logger.info(f"MongoDB: Set active={active} for employee {user_id} (Company: {company_id})")
+            return True, "Success"
+        except Exception as e:
+            logger.error(f"MongoDB: Failed to set active status for {user_id}: {e}")
+            return False, str(e)
+
+    def get_auth_service(self, uuid):
+        """Retrieve auth service info by its UUID/SystemID."""
+        try:
+            return self.auth_services.find_one({"uuid": uuid})
+        except Exception as e:
+            logger.error(f"Failed to get auth service for {uuid}: {e}")
+            return None
 
     def mark_logs_uploaded(self, log_ids, system_id, details=None):
         """

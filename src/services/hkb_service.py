@@ -20,9 +20,13 @@ class HKBService:
     def _run_sync(self, coro):
         """Helper to run async code in a synchronous manner."""
         try:
+            if self.loop.is_closed():
+                return None
             return self.loop.run_until_complete(coro)
         except Exception as e:
-            logger.error(f"HKB Service: Sync execution error: {e}")
+            # Silent failure during shutdown
+            if "after shutdown" not in str(e):
+                logger.error(f"HKB Service: Sync execution error: {e}")
             return None
 
     def register_client(self, system_id, external_id, description, user_info, system_connection_id=1, system_register="face_recognition"):
