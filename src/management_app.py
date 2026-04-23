@@ -390,21 +390,23 @@ def main():
             elif ui.current_state == STATE_LIST:
                 target_cid = get_target_company(ui, mongo_db, allow_selection=True)
                 if target_cid:
-                    mongo_employees  = mongo_db.get_all_employees(company_id=target_cid)
-                    qdrant_employees = attendance.get_all_users(company_id=target_cid)
+                    mongo_employees  = mongo_db.get_all_employees(company_id=target_cid, active_only=False)
+                    qdrant_employees = attendance.get_all_users(company_id=target_cid, active_only=False)
                     all_employees, seen_ids = [], set()
                     for emp in qdrant_employees:
                         u = str(emp['user_id'])
                         if u not in seen_ids:
                             all_employees.append({'user_id': u, 'user_name': emp['user_name'],
-                                                  'birthday': emp['birthday'], 'has_face': True})
+                                                  'birthday': emp['birthday'], 'has_face': True,
+                                                  'active': emp.get('active', True)})
                             seen_ids.add(u)
                     for emp in mongo_employees:
                         if str(emp['user_id']) not in seen_ids:
                             all_employees.append({'user_id': emp['user_id'], 'user_name': emp['name'],
-                                                  'birthday': emp.get('birthday', 'N/A'), 'has_face': False})
+                                                  'birthday': emp.get('birthday', 'N/A'), 'has_face': False,
+                                                  'active': emp.get('active', True)})
                             seen_ids.add(str(emp['user_id']))
-                    ui.show_user_list_ui(all_employees, attendance_manager=attendance)
+                    ui.show_user_list_ui(all_employees, attendance_manager=attendance, company_id=target_cid, mongo_db=mongo_db)
                 ui.current_state = STATE_MENU
                 continue
 

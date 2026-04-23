@@ -33,7 +33,7 @@ def build_apps():
         "--icon", str(project_root / "app_icon.ico") if (project_root / "app_icon.ico").exists() else "NONE",
         "--add-data", f"{ctk_path};customtkinter",
         "--contents-directory", "_internal",
-        str(project_root / "src" / "service_main.py")
+        str(project_root / "service_launcher.py")
     ], check=True)
 
     # Move to our custom dist package

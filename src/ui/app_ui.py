@@ -195,21 +195,33 @@ class AttendanceUI:
             target_cid = get_target_company(self, mongo_db, allow_selection=True, parent=root)
             if target_cid and attendance:
                 # Same logic as management_app.py to get merged list
-                mongo_employees = mongo_db.get_all_employees(company_id=target_cid)
-                qdrant_employees = attendance.get_all_users(company_id=target_cid)
+                mongo_employees = mongo_db.get_all_employees(company_id=target_cid, active_only=False)
+                qdrant_employees = attendance.get_all_users(company_id=target_cid, active_only=False)
                 all_employees = []
                 seen_ids = set()
                 for emp in qdrant_employees:
                     u_id_str = str(emp['user_id'])
                     if u_id_str not in seen_ids:
-                        all_employees.append({'user_id': u_id_str, 'user_name': emp['user_name'], 'birthday': emp['birthday'], 'has_face': True})
+                        all_employees.append({
+                            'user_id': u_id_str, 
+                            'user_name': emp['user_name'], 
+                            'birthday': emp['birthday'], 
+                            'has_face': True,
+                            'active': emp.get('active', True)
+                        })
                         seen_ids.add(u_id_str)
                 for emp in mongo_employees:
                     if str(emp['user_id']) not in seen_ids:
-                        all_employees.append({'user_id': emp['user_id'], 'user_name': emp['name'], 'birthday': emp.get('birthday', 'N/A'), 'has_face': False})
+                        all_employees.append({
+                            'user_id': emp['user_id'], 
+                            'user_name': emp['name'], 
+                            'birthday': emp.get('birthday', 'N/A'), 
+                            'has_face': False,
+                            'active': emp.get('active', True)
+                        })
                         seen_ids.add(str(emp['user_id']))
                 company_name = mongo_db.get_company_name(target_cid)
-                self.show_user_list_ui(all_employees, title=f"Nhân viên - {company_name}", parent=root, attendance_manager=attendance)
+                self.show_user_list_ui(all_employees, title=f"Nhân viên - {company_name}", parent=root, attendance_manager=attendance, company_id=target_cid, mongo_db=mongo_db)
 
         def open_history():
             from src.main import get_target_company
@@ -664,7 +676,7 @@ class AttendanceUI:
             
         return result if result["name"] or result["delete"] or result["enroll_camera"] or result["enroll_upload"] else None
 
-    def show_user_list_ui(self, employees: list, title="Danh sách nhân viên", parent=None, attendance_manager=None):
+    def show_user_list_ui(self, employees: list, title="Danh sách nhân viên", parent=None, attendance_manager=None, company_id=None, mongo_db=None):
         """
         Displays a list of employees in a CustomTkinter window.
         """
@@ -677,7 +689,7 @@ class AttendanceUI:
             _apply_icon(root)
             
         root.title(title)
-        root.geometry("1000x600") # Increased width for new column
+        root.geometry("1100x600") # Increased width for new columns
         root.attributes('-topmost', False)
         root.focus_force()
 
@@ -688,7 +700,7 @@ class AttendanceUI:
         frame_tree.pack(pady=10, padx=20, fill="both", expand=True)
 
         # Treeview
-        columns = ("user_id", "user_name", "birthday", "has_face", "enrollment_status")
+        columns = ("user_id", "user_name", "birthday", "has_face", "enrollment_status", "status")
         tree = ttk.Treeview(frame_tree, columns=columns, show="headings")
         
         # Configure column headings
@@ -697,6 +709,7 @@ class AttendanceUI:
         tree.heading("birthday", text="Ngày Sinh")
         tree.heading("has_face", text="Khuôn mặt")
         tree.heading("enrollment_status", text="Số lượng ĐK")
+        tree.heading("status", text="Trạng thái")
 
         # Configure column widths
         tree.column("user_id", width=100, anchor="center")
@@ -704,6 +717,7 @@ class AttendanceUI:
         tree.column("birthday", width=120, anchor="center")
         tree.column("has_face", width=100, anchor="center")
         tree.column("enrollment_status", width=120, anchor="center")
+        tree.column("status", width=100, anchor="center")
 
         # Scrollbar
         scrollbar = ctk.CTkScrollbar(frame_tree, command=tree.yview)
@@ -721,13 +735,15 @@ class AttendanceUI:
                 enrollment_count = len(points)
             
             enroll_status_str = f"{enrollment_count}/10"
+            active_text = "Hoạt động" if emp.get("active", True) else "Đã xóa"
 
             tree.insert("", "end", values=(
                 emp["user_id"], 
                 emp["user_name"], 
                 emp["birthday"], 
                 has_face_text,
-                enroll_status_str
+                enroll_status_str,
+                active_text
             ))
 
         # Action Buttons Frame
@@ -747,8 +763,53 @@ class AttendanceUI:
             # Call the new function to show images
             self.show_user_images_ui(user_id, user_name, parent=root, attendance_manager=attendance_manager)
 
+        def on_hard_delete():
+            sel = tree.selection()
+            if not sel:
+                messagebox.showwarning("Cảnh báo", "Vui lòng chọn một nhân viên để xóa vĩnh viễn.")
+                return
+            
+            item_id = sel[0]
+            values = tree.item(item_id, "values")
+            user_id = values[0]
+            user_name = values[1]
+            
+            confirm = messagebox.askyesno(
+                "Xác nhận xóa vĩnh viễn", 
+                f"CẢNH BÁO: Bạn có chắc chắn muốn xóa VĨNH VIỄN nhân viên '{user_name}' (ID: {user_id}) khỏi cơ sở dữ liệu?\n\n"
+                f"Hành động này sẽ xóa toàn bộ dữ liệu metadata, hình ảnh đăng ký và vector khuôn mặt. Không thể hoàn tác!"
+            )
+            if not confirm:
+                return
+                
+            success = True
+            err_msg = ""
+            
+            # Delete from Qdrant
+            if attendance_manager:
+                if not attendance_manager.delete_user(user_id):
+                    success = False
+                    err_msg += "Lỗi xóa Qdrant. "
+            
+            # Delete from MongoDB
+            if mongo_db and company_id:
+                ok, msg = mongo_db.delete_employee(user_id, company_id)
+                if not ok:
+                    success = False
+                    err_msg += f"Lỗi xóa MongoDB: {msg}"
+            else:
+                success = False
+                err_msg += "Thiếu thông tin MongoDB hoặc Company ID."
+                
+            if success:
+                messagebox.showinfo("Thành công", f"Đã xóa vĩnh viễn nhân viên {user_name}.")
+                tree.delete(item_id)
+            else:
+                messagebox.showerror("Lỗi", f"Không thể xóa vĩnh viễn: {err_msg}")
+
         if self.session_role == "admin":
             ctk.CTkButton(btn_frame, text="Xem Ảnh", command=on_view_images, fg_color="#1f6aa5", hover_color="#154c75").pack(side="left", padx=10)
+            ctk.CTkButton(btn_frame, text="Xóa vĩnh viễn", command=on_hard_delete, fg_color="#e74c3c", hover_color="#c0392b").pack(side="left", padx=10)
         
         ctk.CTkButton(btn_frame, text="Đóng", command=root.destroy, fg_color="gray").pack(side="left", padx=10)
 
@@ -1779,12 +1840,48 @@ class AttendanceUI:
         def save_to_db(selected_only=False):
             targets = [emp_map[i] for i in tree.selection()] if selected_only else list(emp_map.values())
             if not targets: return messagebox.showwarning("!", "Không có nhân viên nào")
-            if not messagebox.askyesno("Xác nhận", f"Lưu {len(targets)} nhân viên vào hệ thống?"): return
             
+            if selected_only:
+                confirm_msg = f"Lưu {len(targets)} nhân viên vào hệ thống?"
+            else:
+                confirm_msg = f"Đồng bộ tất cả {len(targets)} nhân viên? \nLưu ý: Nhân viên cũ không có trong danh sách này sẽ bị đánh dấu 'Đã xóa' (xóa mềm) khỏi hệ thống."
+                
+            if not messagebox.askyesno("Xác nhận", confirm_msg): return
+            
+            # Nếu là đồng bộ tất cả, thực hiện xóa nhân viên cũ không có trong danh sách mới
+            if not selected_only:
+                try:
+                    # 1. Lấy danh sách nhân viên hiện tại trong MongoDB cho công ty này (bao gồm cả nhân viên đã xóa mềm để tránh tạo lại)
+                    existing_employees = mongo_db.get_all_employees(company_id=target_company_id, active_only=False)
+                    existing_ids = {str(e["user_id"]) for e in existing_employees}
+                    
+                    # 2. Lấy danh sách ID mới sẽ được lưu
+                    new_ids = {str(t["id"]) for t in targets}
+                    
+                    # 3. Tìm các ID cần xóa (có trong cũ nhưng không có trong mới)
+                    ids_to_delete = list(existing_ids - new_ids)
+                    
+                    if ids_to_delete:
+                        from src.attendance.qdrant_db import attendance as qdrant_mgr
+                        # Xóa mềm từ MongoDB
+                        mongo_db.soft_delete_employees_bulk(ids_to_delete, target_company_id)
+                        # Xóa mềm từ Qdrant
+                        for uid in ids_to_delete:
+                            qdrant_mgr.set_user_active_status(uid, False)
+                        logger.info(f"Sync: Soft deleted {len(ids_to_delete)} old employees not in the sync list.")
+                except Exception as e:
+                    logger.error(f"Sync: Error during cleanup of old employees: {e}")
+
             saved = 0
+            from src.attendance.qdrant_db import attendance as qdrant_mgr
             for t in targets:
-                ok, _ = mongo_db.save_employee(t["id"], t["name"], t["bday"], t["cid"])
-                if ok: saved += 1
+                # 1. Cập nhật MongoDB (Metadata) - Luôn giữ nguyên hình ảnh trong collection enrollment_images, set active=True
+                ok, _ = mongo_db.save_employee(t["id"], t["name"], t["bday"], t["cid"], active=True)
+                if ok:
+                    # 2. Cập nhật Qdrant (Metadata) - Giữ nguyên các vector khuôn mặt cũ, set active=True
+                    qdrant_mgr.update_user_info(t["id"], t["name"], t["bday"])
+                    qdrant_mgr.set_user_active_status(t["id"], True)
+                    saved += 1
             
             messagebox.showinfo("Kết quả", f"Đã lưu thành công {saved}/{len(targets)} nhân viên.")
             if saved > 0: root.destroy()

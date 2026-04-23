@@ -78,7 +78,7 @@ class FaceRecognition:
         """
         Architecture:
         1. [Optional ROI crop] - chỉ detect trên vùng quan tâm → nhanh hơn
-        2. InsightFace Detection (SCRFD)
+        2. InsightFace Detection (SCRFD) với cải tiến multi-angle
         3. InsightFace Recognition (ArcFace) — defer to tracker nếu fast=True
 
         roi: (x1, y1, x2, y2) tọa độ full frame.
@@ -98,7 +98,8 @@ class FaceRecognition:
                     detect_frame = frame[fy1:fy2, fx1:fx2]
                     offset_x, offset_y = fx1, fy1
 
-            # 1. Detection & Landmarks
+            # 1. Detection & Landmarks với cải tiến multi-angle
+            # Sử dụng detector với confidence threshold thấp hơn để detect mặt từ nhiều góc
             faces = self.app.get(detect_frame)
 
             # Remap bbox về tọa độ full frame nếu dùng ROI
@@ -115,7 +116,7 @@ class FaceRecognition:
 
             # Filter out faces that are too small or too far away
             valid_faces = []
-            min_size = getattr(RecognitionConfig, "MIN_FACE_SIZE", 80)
+            min_size = getattr(RecognitionConfig, "MIN_FACE_SIZE", 60)  # Giảm kích thước tối thiểu
             for face in faces:
                 w = face.bbox[2] - face.bbox[0]
                 h = face.bbox[3] - face.bbox[1]
@@ -180,7 +181,14 @@ class FaceRecognition:
                     face.as_label = 1
                     face.as_score = 1.0
 
-                # 3. Recognition (ArcFace embedding)
+                # 3. Face Alignment for better recognition from top-down angles
+                if face.is_real and hasattr(face, 'kps') and face.kps is not None:
+                    # Áp dụng face alignment để cải thiện recognition với góc từ trên xuống
+                    aligned_face = self._align_face_for_recognition(face_crop, face.kps)
+                    if aligned_face is not None:
+                        face_crop = aligned_face
+
+                # 4. Recognition (ArcFace embedding)
                 if face.is_real:
                     self.rec_model.get(face_crop, face)
                     
@@ -196,6 +204,45 @@ class FaceRecognition:
         except Exception as e:
             logger.error(f"Error during face detection/extraction: {e}")
             return []
+
+    def _align_face_for_recognition(self, face_crop: np.ndarray, landmarks: np.ndarray) -> Optional[np.ndarray]:
+        """
+        Áp dụng face alignment để cải thiện recognition với góc từ trên xuống và các góc không trực diện.
+        
+        Args:
+            face_crop: Ảnh mặt đã cắt
+            landmarks: 5 facial landmarks (mắt, mũi, miệng)
+            
+        Returns:
+            Aligned face image or None nếu alignment fails
+        """
+        try:
+            # Landmarks format: [[x1, y1], [x2, y2], [x3, y3], [x4, y4], [x5, y5]]
+            # [0,1]: left eye, right eye; [2]: nose; [3,4]: mouth corners
+            
+            left_eye = landmarks[0]
+            right_eye = landmarks[1]
+            
+            # Tính góc nghiêng của mặt dựa trên vị trí mắt
+            dY = right_eye[1] - left_eye[1]
+            dX = right_eye[0] - left_eye[0]
+            angle = np.degrees(np.arctan2(dY, dX))
+            
+            # Nếu góc nghiêng lớn (mặt nghiêng nhiều), áp dụng rotation
+            if abs(angle) > 10:  # Ngưỡng góc nghiêng
+                center = (face_crop.shape[1] // 2, face_crop.shape[0] // 2)
+                rotation_matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+                aligned_face = cv2.warpAffine(face_crop, rotation_matrix, 
+                                            (face_crop.shape[1], face_crop.shape[0]),
+                                            flags=cv2.INTER_CUBIC)
+                return aligned_face
+            
+            # Nếu mặt thẳng hoặc nghiêng ít, không cần alignment
+            return face_crop
+            
+        except Exception as e:
+            logger.warning(f"Face alignment failed: {e}")
+            return face_crop
 
     def draw_faces(self, frame: np.ndarray, faces: List[Any]) -> np.ndarray:
         """

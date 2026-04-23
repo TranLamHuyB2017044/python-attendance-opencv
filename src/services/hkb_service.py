@@ -1,6 +1,6 @@
 import asyncio
 from bittech_auth import HKBClient
-from src.config import AuthServiceConfig
+from src.config import AuthServiceConfig, MongoDbConfig
 from loguru import logger
 import os
 import json
@@ -152,8 +152,14 @@ class HKBService:
         Get list of connections for the current API Key.
         """
         try:
-            # Lấy danh sách Group Keys từ settings (nếu có, theo user)
-            custom_keys = mongo_db.get_setting("group_keys", "", username=username)
+            # Lấy danh sách Group Keys từ settings
+            # Ưu tiên lấy theo COMPANY_ID (Machine Scoped) để khớp với UI Settings
+            custom_keys = mongo_db.get_setting("group_keys", "", username=MongoDbConfig.COMPANY_ID)
+            
+            # Nếu không có và username khác COMPANY_ID, thử tìm theo username (fallback legacy)
+            if not custom_keys and username and username != MongoDbConfig.COMPANY_ID:
+                custom_keys = mongo_db.get_setting("group_keys", "", username=username)
+
             if custom_keys:
                 # Tách chuỗi comma-separated thành list và loại bỏ khoảng trắng
                 group_keys = [k.strip() for k in custom_keys.split(",") if k.strip()]

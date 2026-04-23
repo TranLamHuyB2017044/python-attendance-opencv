@@ -78,6 +78,8 @@ class QdrantAttendanceManager:
             else:
                 cid = str(raw_cid)
             
+            active = kwargs.get("active", True)
+            
             # If specified, remove existing vectors for this user first
             if clear_old:
                 self.delete_user(user_id_str)
@@ -90,6 +92,7 @@ class QdrantAttendanceManager:
                     "user_name": user_name,
                     "birthday": birthday,
                     "company_id": cid,
+                    "active": active,
                     "created_at": datetime.now().isoformat()
                 }
                 if enrollment_image_ids and i < len(enrollment_image_ids):
@@ -128,9 +131,20 @@ class QdrantAttendanceManager:
         try:
             vector = query_embedding.tolist() if isinstance(query_embedding, np.ndarray) else list(query_embedding)
 
+            # Build query filter to only include active users
+            query_filter = models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="active",
+                        match=models.MatchValue(value=True)
+                    )
+                ]
+            )
+
             search_result = self.client.query_points(
                 collection_name=self.collection_name,
                 query=vector,
+                query_filter=query_filter,
                 limit=1,
                 with_payload=True
             )
@@ -171,24 +185,28 @@ class QdrantAttendanceManager:
             logger.error(f"Error during recognition: {e}")
             return default_res
 
-    def get_all_users(self, company_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    def get_all_users(self, company_id: Optional[str] = None, active_only: bool = False) -> List[Dict[str, Any]]:
         """
-        Retrieves unique users. Optional filtering by company_id.
+        Retrieves unique users. Optional filtering by company_id and active status.
         """
         try:
             all_users = {}
             offset = None
             
-            scroll_filter = None
+            must_conditions = []
+            
             if company_id and company_id != "ALL":
                 if isinstance(company_id, list):
-                    scroll_filter = models.Filter(
-                        must=[models.FieldCondition(key="company_id", match=models.MatchAny(any=[str(c) for c in company_id]))]
-                    )
+                    must_conditions.append(models.FieldCondition(key="company_id", match=models.MatchAny(any=[str(c) for c in company_id])))
                 else:
-                    scroll_filter = models.Filter(
-                        must=[models.FieldCondition(key="company_id", match=models.MatchValue(value=str(company_id)))]
-                    )
+                    must_conditions.append(models.FieldCondition(key="company_id", match=models.MatchValue(value=str(company_id))))
+                    
+            if active_only:
+                # If active_only is True, we only fetch points where active is not False
+                # Because old data might not have 'active' field, we could just filter where active == True
+                must_conditions.append(models.FieldCondition(key="active", match=models.MatchValue(value=True)))
+
+            scroll_filter = models.Filter(must=must_conditions) if must_conditions else None
             
             while True:
                 results, offset = self.client.scroll(
@@ -208,7 +226,8 @@ class QdrantAttendanceManager:
                             all_users[u_id_str] = {
                                 "user_id": u_id_str,
                                 "user_name": payload.get("user_name"),
-                                "birthday": payload.get("birthday")
+                                "birthday": payload.get("birthday"),
+                                "active": payload.get("active", True) # Default to True if missing
                             }
                 
                 if offset is None:
@@ -244,6 +263,24 @@ class QdrantAttendanceManager:
         except Exception as e:
             logger.error(f"Error fetching user info for {user_id}: {e}")
             return None
+
+    def set_user_active_status(self, user_id: str, active: bool) -> bool:
+        """
+        Update the 'active' status for all points of a given user.
+        """
+        try:
+            self.client.set_payload(
+                collection_name=self.collection_name,
+                payload={"active": active},
+                points=models.Filter(
+                    must=[models.FieldCondition(key="user_id", match=models.MatchValue(value=str(user_id)))]
+                )
+            )
+            logger.success(f"Set active={active} for user ID: {user_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to set active status for user {user_id}: {e}")
+            return False
 
     def update_user_info(self, user_id: str, new_name: str, new_birthday: str) -> bool:
         """

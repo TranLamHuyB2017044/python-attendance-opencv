@@ -155,10 +155,15 @@ class RecognitionConfig:
     COOLDOWN_SECONDS: int = int(os.getenv("DETECTION_COOLDOWN", "3600")) # Default 1 hour
     MAX_FACES: int = int(os.getenv("MAX_FACES", "100"))
     CAPTURE_MAX_WIDTH: int = int(os.getenv("CAPTURE_MAX_WIDTH", "1280"))
-    MIN_FACE_SIZE: int = int(os.getenv("MIN_FACE_SIZE", "80"))
+    MIN_FACE_SIZE: int = int(os.getenv("MIN_FACE_SIZE", "60"))  # Giảm từ 80 xuống 60 để detect mặt nhỏ hơn
     # Số frame thu thập trước khi kết luận nhận diện (Best-of-N voting)
     # Tăng lên nhưng chậm hơn (khuyên dùng 3-7), giảm xuống nhưng nhanh hơn
     GATHER_FRAMES: int = int(os.getenv("GATHER_FRAMES", "3"))
+    
+    # Cấu hình mới cho detection đa góc
+    DETECTION_CONFIDENCE: float = float(os.getenv("DETECTION_CONFIDENCE", "0.5"))  # Giảm confidence threshold
+    ENABLE_MULTI_ANGLE: bool = os.getenv("ENABLE_MULTI_ANGLE", "true").lower() == "true"
+    FACE_DETECTION_INTERVAL: int = int(os.getenv("FACE_DETECTION_INTERVAL", "1"))  # Detect mỗi frame
 
 
 class QdrantConfig:
@@ -230,6 +235,7 @@ class ReportSystemConfig:
     """Report System configuration for periodic ping."""
     PING_INTERVAL_SECONDS: int = 120  # Ping mỗi 2 phút
     PING_ENDPOINT: str = "/api/v1/systems/ping"
+    REPORT_LOG_ENDPOINT: str = "/api/v1/report-log"
 
     @classmethod
     def base_url(cls) -> str:
@@ -240,6 +246,11 @@ class ReportSystemConfig:
     def ping_url(cls) -> str:
         """Returns the full ping URL."""
         return f"{cls.base_url()}{cls.PING_ENDPOINT}"
+
+    @classmethod
+    def report_log_url(cls) -> str:
+        """Returns the full report log URL."""
+        return f"{cls.base_url()}{cls.REPORT_LOG_ENDPOINT}"
 
     @classmethod
     def is_enabled(cls) -> bool:

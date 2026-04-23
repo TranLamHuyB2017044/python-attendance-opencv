@@ -25,6 +25,7 @@ class MongoDBManager:
             self.settings = self.db["settings"] # System Settings
             self.employees = self.db["employees"] # Metadata for registered employees
             self.enrollment_images = self.db["enrollment_images"] # Enrollment images
+            self.system_logs = self.db["system_logs"] # Logs for external monitoring
             
             # Create indexes for faster queries
             self.logs.create_index([("company_id", 1), ("date", -1)])
@@ -86,9 +87,11 @@ class MongoDBManager:
             vn_now = time_mgr.get_accurate_time()
             hour_val = vn_now.hour * 100 + vn_now.minute
             
-            if 730 <= hour_val <= 1200:
+            # Ca sáng: 00:05 - 12:59
+            if 5 <= hour_val <= 1259:
                 return "Morning"
-            elif 1250 <= hour_val <= 1800:
+            # Ca chiều: 13:00 - 23:59
+            elif 1300 <= hour_val <= 2359:
                 return "Afternoon"
             else:
                 return "Other"
@@ -126,8 +129,8 @@ class MongoDBManager:
                             return 'COOLDOWN'
 
             # 3. Shift Logic
-            # Morning: 07:30 - 12:00
-            if 730 <= current_time_val <= 1200:
+            # Ca sáng: 00:05 - 12:59
+            if 5 <= current_time_val <= 1259:
                 morning_in = self.logs.find_one({
                     "user_id": user_id, 
                     "company_id": cid, 
@@ -137,10 +140,10 @@ class MongoDBManager:
                 if not morning_in:
                     return 'IN'
                 
-            # Afternoon: 12:50 - 18:00
-            elif 1250 <= current_time_val <= 1800:
+            # Ca chiều: 13:00 - 23:59
+            elif 1300 <= current_time_val <= 2359:
                 # Define start of afternoon shift in UTC
-                vn_afternoon_start = vn_now.replace(hour=12, minute=50, second=0, microsecond=0)
+                vn_afternoon_start = vn_now.replace(hour=13, minute=0, second=0, microsecond=0)
                 utc_afternoon_start = vn_afternoon_start.astimezone(pytz.utc).replace(tzinfo=None)
                 
                 afternoon_in = self.logs.find_one({
@@ -253,7 +256,9 @@ class MongoDBManager:
         
         def sync_task():
             try:
-                try: from src.services.hkb_service import hkb_service
+                try: 
+                    from src.services.hkb_service import hkb_service
+                    from src.services.report_service import report_service
                 except ImportError: return
                 
                 user_id = log_entry.get("user_id")
@@ -296,6 +301,17 @@ class MongoDBManager:
                     if res and res.success:
                         self.mark_logs_uploaded([log_entry["_id"]], service["uuid"], details={"status": "SUCCESS", "message": res.message})
                         logger.success(f"Sync: Successfully synced to {service['app_name']}")
+                        # Thử lấy URL ảnh từ kết quả trả về (nếu có)
+                        image_url = None
+                        if res and hasattr(res, 'data') and isinstance(res.data, dict):
+                            # Tìm kiếm trường url hoặc link trong data
+                            image_url = res.data.get('image_url') or res.data.get('url') or res.data.get('link')
+
+                        report_service.report_info(
+                            message=f"Đồng bộ chấm công thành công: {log_entry['user_name']} -> {service['app_name']}",
+                            status_code=200,
+                            image_url=image_url
+                        )
                     else:
                         msg = res.message if res else 'No response'
                         err_detail = None
@@ -311,6 +327,11 @@ class MongoDBManager:
                             
                         self.mark_logs_uploaded([log_entry["_id"]], service["uuid"], details=details_obj)
                         logger.warning(f"Sync: Failed to sync to {service['app_name']}: {msg}")
+                        # Báo cáo lỗi lên Dashboard
+                        report_service.report_error(
+                            message=f"Lỗi đồng bộ chấm công: {log_entry['user_name']} -> {service['app_name']}. Lỗi: {msg}",
+                            status_code=502
+                        )
             
             except Exception as e:
                 logger.error(f"Sync: Background task error: {e}")
@@ -374,11 +395,12 @@ class MongoDBManager:
             logger.error(f"MongoDB: Error during login verification: {e}")
             return None
 
-    def save_employee(self, user_id, name, birthday, company_id, force_update=True):
+    def save_employee(self, user_id, name, birthday, company_id, force_update=True, active=True):
         """
         Store or update employee metadata in MongoDB.
         Args:
             force_update: If False, will fail if user_id already exists in company.
+            active: Boolean indicating if the employee is active (True) or soft-deleted (False).
         Returns: (success, message)
         """
         try:
@@ -402,6 +424,7 @@ class MongoDBManager:
                 "name": name,
                 "birthday": birthday,
                 "company_id": company_id,
+                "active": active,
                 "updated_at": datetime.datetime.utcnow()
             }
             self.employees.update_one(
@@ -415,12 +438,15 @@ class MongoDBManager:
             logger.error(f"MongoDB: Failed to save employee: {e}")
             return False, str(e)
 
-    def get_all_employees(self, company_id=None):
+    def get_all_employees(self, company_id=None, active_only=False):
         """
         Get all employees from MongoDB (includes employees without face embeddings).
         """
         try:
             query = {}
+            if active_only:
+                query["active"] = {"$ne": False}  # True or not set (for backward compatibility)
+
             if company_id and company_id != "ALL":
                 if isinstance(company_id, list):
                     query["company_id"] = {"$in": [str(c) for c in company_id]}
@@ -444,6 +470,89 @@ class MongoDBManager:
         except Exception as e:
             logger.error(f"MongoDB: Failed to get user company IDs: {e}")
             return []
+
+    def delete_employee(self, user_id, company_id):
+        """
+        Delete employee metadata and their enrollment images from MongoDB.
+        """
+        try:
+            user_id = str(user_id).strip()
+            company_id = str(company_id).strip()
+            
+            # 1. Delete employee metadata
+            self.employees.delete_one({"user_id": user_id, "company_id": company_id})
+            
+            # 2. Delete enrollment images
+            self.enrollment_images.delete_many({"user_id": user_id, "company_id": company_id})
+            
+            logger.info(f"MongoDB: Deleted employee {user_id} and their images for company {company_id}")
+            return True, "Thành công"
+        except Exception as e:
+            logger.error(f"MongoDB: Failed to delete employee {user_id}: {e}")
+            return False, str(e)
+
+    def delete_employees_bulk(self, user_ids, company_id):
+        """
+        Delete multiple employees and their enrollment images from MongoDB.
+        """
+        try:
+            if not user_ids:
+                return True, "No users to delete"
+                
+            user_ids = [str(uid).strip() for uid in user_ids]
+            company_id = str(company_id).strip()
+            
+            # 1. Delete employee metadata
+            self.employees.delete_many({"user_id": {"$in": user_ids}, "company_id": company_id})
+            
+            # 2. Delete enrollment images
+            self.enrollment_images.delete_many({"user_id": {"$in": user_ids}, "company_id": company_id})
+            
+            logger.info(f"MongoDB: Bulk deleted {len(user_ids)} employees for company {company_id}")
+            return True, "Thành công"
+        except Exception as e:
+            logger.error(f"MongoDB: Failed to bulk delete employees: {e}")
+            return False, str(e)
+
+    def soft_delete_employee(self, user_id, company_id):
+        """
+        Soft delete an employee by setting active=False.
+        """
+        try:
+            user_id = str(user_id).strip()
+            company_id = str(company_id).strip()
+            
+            self.employees.update_one(
+                {"user_id": user_id, "company_id": company_id},
+                {"$set": {"active": False, "updated_at": datetime.datetime.utcnow()}}
+            )
+            logger.info(f"MongoDB: Soft deleted employee {user_id} for company {company_id}")
+            return True, "Thành công"
+        except Exception as e:
+            logger.error(f"MongoDB: Failed to soft delete employee {user_id}: {e}")
+            return False, str(e)
+
+    def soft_delete_employees_bulk(self, user_ids, company_id):
+        """
+        Soft delete multiple employees by setting active=False.
+        """
+        try:
+            if not user_ids:
+                return True, "No users to soft delete"
+                
+            user_ids = [str(uid).strip() for uid in user_ids]
+            company_id = str(company_id).strip()
+            
+            self.employees.update_many(
+                {"user_id": {"$in": user_ids}, "company_id": company_id},
+                {"$set": {"active": False, "updated_at": datetime.datetime.utcnow()}}
+            )
+            
+            logger.info(f"MongoDB: Bulk soft deleted {len(user_ids)} employees for company {company_id}")
+            return True, "Thành công"
+        except Exception as e:
+            logger.error(f"MongoDB: Failed to bulk soft delete employees: {e}")
+            return False, str(e)
 
     # --- Management Methods ---
     
@@ -686,6 +795,25 @@ class MongoDBManager:
         except Exception as e:
             logger.error(f"Failed to mark logs as uploaded: {e}")
             return False
+            
+    def save_system_log(self, message, status_code, log_type="ERROR", priority="MEDIUM", devices_info=None):
+        """Save a system error/info log to MongoDB for external retrieval."""
+        try:
+            log_entry = {
+                "message": message,
+                "status_code": status_code,
+                "type": log_type,
+                "priority": priority,
+                "devices_info": devices_info or {},
+                "company_id": MongoDbConfig.COMPANY_ID,
+                "system_id": AuthServiceConfig.SYSTEM_ID,
+                "created_at": datetime.datetime.utcnow()
+            }
+            result = self.system_logs.insert_one(log_entry)
+            return str(result.inserted_id)
+        except Exception as e:
+            logger.error(f"Failed to save system log: {e}")
+            return None
 
 # Global instance
 mongo_db = MongoDBManager()

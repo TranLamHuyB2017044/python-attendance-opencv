@@ -354,8 +354,8 @@ def handle_edit_logic(attendance, face_rec, ui, camera, parent=None):
     # 2. Start editing loop
     while True:
         # Get merged employee list (MongoDB + Qdrant) for this company ONLY
-        mongo_employees = mongo_db.get_all_employees(company_id=filter_company)
-        qdrant_employees = attendance.get_all_users(company_id=filter_company)
+        mongo_employees = mongo_db.get_all_employees(company_id=filter_company, active_only=False)
+        qdrant_employees = attendance.get_all_users(company_id=filter_company, active_only=False)
         
         # Merge employee lists
         all_employees = []
@@ -369,7 +369,8 @@ def handle_edit_logic(attendance, face_rec, ui, camera, parent=None):
                     'user_id': u_id_str,
                     'user_name': emp['user_name'],
                     'birthday': emp['birthday'],
-                    'has_face': True
+                    'has_face': True,
+                    'active': emp.get('active', True)
                 })
                 seen_ids.add(u_id_str)
         
@@ -381,7 +382,8 @@ def handle_edit_logic(attendance, face_rec, ui, camera, parent=None):
                     'user_id': emp['user_id'],
                     'user_name': emp['name'],
                     'birthday': emp.get('birthday', 'N/A'),
-                    'has_face': False
+                    'has_face': False,
+                    'active': emp.get('active', True)
                 })
                 seen_ids.add(str(emp['user_id']))
         
@@ -419,10 +421,10 @@ def handle_edit_logic(attendance, face_rec, ui, camera, parent=None):
             )
             if edit_res:
                 if edit_res["delete"]:
-                    # Delete from both Qdrant and MongoDB
-                    attendance.delete_user(u_id)
-                    mongo_db.employees.delete_one({"user_id": str(u_id), "company_id": target_company})
-                    logger.success(f"Da xoa nhan vien ID: {u_id}")
+                    # Soft delete from both Qdrant and MongoDB
+                    attendance.set_user_active_status(u_id, False)
+                    mongo_db.soft_delete_employee(str(u_id), target_company)
+                    logger.success(f"Da xoa mem nhan vien ID: {u_id}")
                 
                 elif edit_res["enroll_camera"]:
                     # Update thong tin trước, sau đó dang ký qua camera
@@ -1025,10 +1027,10 @@ def main():
                         logger.info(f"Company user '{ui.session_username}' viewing merged list for IDs: {filter_company}")
 
                 # Get employees from MongoDB (includes all employees, even without face data) for this filter
-                mongo_employees = mongo_db.get_all_employees(company_id=filter_company)
+                mongo_employees = mongo_db.get_all_employees(company_id=filter_company, active_only=False)
                 
                 # Get employees from Qdrant (only those with face embeddings) for this filter
-                qdrant_employees = attendance.get_all_users(company_id=filter_company)
+                qdrant_employees = attendance.get_all_users(company_id=filter_company, active_only=False)
                 
                 # Merge: prioritize Qdrant data, add MongoDB-only employees
                 all_employees = []
@@ -1042,7 +1044,8 @@ def main():
                             'user_id': u_id_str,
                             'user_name': emp['user_name'],
                             'birthday': emp['birthday'],
-                            'has_face': True
+                            'has_face': True,
+                            'active': emp.get('active', True)
                         })
                         seen_ids.add(u_id_str)
                 
@@ -1054,12 +1057,13 @@ def main():
                             'user_id': emp['user_id'],
                             'user_name': emp['name'],
                             'birthday': emp.get('birthday', 'N/A'),
-                            'has_face': False
+                            'has_face': False,
+                            'active': emp.get('active', True)
                         })
                         seen_ids.add(str(emp['user_id']))
                 
                 logger.info(f"Merged employee list: {len(all_employees)} records found.")
-                ui.show_user_list_ui(all_employees)
+                ui.show_user_list_ui(all_employees, company_id=target_company, mongo_db=mongo_db)
                 ui.current_state = STATE_MENU
                 continue
 

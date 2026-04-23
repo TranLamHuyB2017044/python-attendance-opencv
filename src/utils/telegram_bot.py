@@ -7,6 +7,7 @@ import threading
 from loguru import logger
 from src.config import TelegramConfig, CameraConfig, AuthServiceConfig
 from src.utils.time_manager import time_mgr
+from src.services.report_service import report_service
 
 
 # ---------------------------------------------------------------------------
@@ -181,3 +182,31 @@ def send_telegram_report(title, message, image=None, level="ERROR"):
 
     # Run in background to not block the main process
     threading.Thread(target=thread_task, daemon=True).start()
+
+    # --- SONG SONG: Gửi log lên Dashboard trung tâm qua ReportService ---
+    try:
+        # Mapping title/level sang status_code cho Dashboard
+        status_code = 500 # Default Error
+        log_type = "ERROR"
+        priority = "MEDIUM"
+
+        title_up = title.upper()
+        if "SUCCESS" in title_up or "RECOVERY" in title_up:
+            status_code = 200
+            log_type = "INFO"
+            priority = "LOW"
+        elif "SPOOF" in title_up:
+            status_code = 403 # Forbidden
+            priority = "HIGH"
+        elif "SYNC" in title_up or "WEBHOOK" in title_up:
+            status_code = 502 # Bad Gateway / Sync issue
+            priority = "MEDIUM"
+
+        report_service.report_log(
+            message=f"[{title}] {message}",
+            status_code=status_code,
+            log_type=log_type,
+            priority=priority
+        )
+    except Exception as e:
+        logger.error(f"ReportService parallel call failed: {e}")

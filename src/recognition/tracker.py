@@ -156,7 +156,7 @@ class FaceTracker:
                 # 3. Format voice text for TTS
                 # Lấy giới tính từ database
                 employee = mongo_db.employees.find_one({"user_id": str(user_id)}) or {}
-                gender = employee.get("gender", "Nam") # Mặc định là Nam nếu không có
+                gender = employee.get("sex", "Nam") # Sử dụng trường "sex" thay vì "gender"
                 
                 prefix = "anh"
                 if str(gender).lower() in ["nữ", "nu", "female", "f"]:
@@ -177,7 +177,7 @@ class FaceTracker:
                     voice_text = f"{short_name} đã truy cập gần đây"
                 else:
                     # Default for unknown/unauthorized
-                    voice_text = "Vui lòng thử lại"
+                    voice_text = "Xin vui lòng thử lại"
 
                 payload = {
                     "user_id": user_id,
@@ -722,16 +722,24 @@ class FaceTracker:
                         f_data['unknown_attempts'] += 1
                         f_data['last_attempt_time'] = current_time
                         f_data['user_data'] = vote
-                        # --- CƠ CHẾ CHỐNG SPAM NHƯNG VẪN REALTIME ---
-                        # Chỉ phát báo động BẰNG GIỌNG NÓI khi thực sự đã phân tích 10 lần liên tiếp thất bại.
-                        # Vẫn giữ Rate-Limiter 5 giây 1 lần để tránh loa kêu dồn dập.
-                        if f_data['unknown_attempts'] >= 10:
-                            last_unknown = f_data.get('last_unknown_alert', 0)
-                            if current_time - last_unknown > 5.0:
-                                f_data['last_unknown_alert'] = current_time
-                                logger.warning(f"[Recognition] ❌ Unknown (10+ attempts) - Triggering Alert")
-                                
-                                # Cấp phát tên video cho người lạ
+                        
+                        # --- CƠ CHẾ THÔNG BÁO THẤT BẠI (MỚI) ---
+                        # 1. Phát voice ngay từ lần đầu tiên thất bại.
+                        # 2. Cứ mỗi 3 lần thất bại liên tiếp thì nhắc tháo khẩu trang.
+                        # 3. Giữ Rate-Limiter 5 giây để tránh loa kêu dồn dập.
+                        
+                        last_unknown = f_data.get('last_unknown_alert', 0)
+                        if current_time - last_unknown > 5.0:
+                            f_data['last_unknown_alert'] = current_time
+                            
+                            voice_text = "Xin vui lòng thử lại"
+                            if f_data['unknown_attempts'] % 3 == 0:
+                                voice_text = "Vui lòng nhìn thẳng vào camera và tháo khẩu trang"
+                            
+                            logger.warning(f"[Recognition] ❌ Fail #{f_data['unknown_attempts']} - Voice: {voice_text}")
+                            
+                            # Cấp phát tên video cho người lạ (Nếu đã quá 10 lần thì mới coi là người lạ thực sự để gửi Telegram)
+                            if f_data['unknown_attempts'] >= 10:
                                 if f_data.get('video_path') is None:
                                     from src.config import CAPTURES_DIR
                                     v_dir = CAPTURES_DIR / "Unknown_Videos"
@@ -740,7 +748,10 @@ class FaceTracker:
                                     f_data['video_path'] = str(v_path)
                                 
                                 self._send_telegram_alert("PHAT HIEN NGUOI LA", f"Phát hiện người lạ trước camera (Đã quét {f_data['unknown_attempts']} lần)", image=frame)
-                                self._send_user_webhook("Unknown", "Nguoi la", "unknown", is_unknown=True, custom_voice_text="Xin vui lòng thử lại")
+                                self._send_user_webhook("Unknown", "Nguoi la", "unknown", is_unknown=True, custom_voice_text=voice_text)
+                            else:
+                                # Chưa đủ 10 lần thì chỉ phát voice thông báo cho người dùng tại chỗ, không gửi Telegram/Webhook người lạ
+                                self._send_user_webhook("Unknown", "Nguoi la", "unknown", is_unknown=True, custom_voice_text=voice_text)
 
                         f_data['status'] = 'RETRY_WAIT'
                 else:
