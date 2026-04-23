@@ -16,7 +16,7 @@ GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
 SRC_DIR = "src"
 BACKUP_DIR = "src_backup"
-VERSION_FILE = "local_version.txt"
+VERSION_FILE = "src/version.json"
 ZIP_NAME = "src_update.zip"
 
 # Đọc cấu hình từ file .env (Để lấy Token Telegram)
@@ -92,8 +92,12 @@ def get_headers():
 
 def get_local_version():
     if os.path.exists(VERSION_FILE):
-        with open(VERSION_FILE, 'r', encoding='utf-8') as f:
-            return f.read().strip()
+        try:
+            with open(VERSION_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                return data.get("version", "0.0.0").replace('v', '')
+        except Exception:
+            pass
     return "0.0.0"
 
 # --- LOGIC CẬP NHẬT CHÍNH ---
@@ -154,8 +158,8 @@ def check_and_update_silently():
                 zip_ref.extractall(".")
             
             # Lưu version mới
-            with open(VERSION_FILE, 'w', encoding='utf-8') as f:
-                f.write(latest_ver)
+            # File version.json đã được tự động cập nhật khi giải nén thư mục src/ từ zip
+            pass
                 
             send_telegram(f"✅ Cập nhật thành công phần mềm lên phiên bản v{latest_ver}!")
             

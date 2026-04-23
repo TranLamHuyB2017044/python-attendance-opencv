@@ -85,7 +85,7 @@ class ReportService:
             }
             
             payload = {
-                "system_id": AuthServiceConfig.SYSTEM_ID.upper(),
+                "system_id": AuthServiceConfig.SYSTEM_ID,
                 "message": full_message,
                 "status_code": status_code,
                 "type": log_type,

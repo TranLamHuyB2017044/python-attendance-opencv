@@ -1,4 +1,4 @@
-name: Tự động đóng gói bản cập nhật OTA (Source Code)
+name: Tự động đóng gói bản cập nhật OTA (Patch Release)
 
 # Workflow này sẽ chạy tự động mỗi khi bạn tạo một Release tags mới nhãn v* (VD: v1.0.1, v1.0.2)
 on:
@@ -11,30 +11,39 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: 📥 Tải mã nguồn (Checkout)
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      # TÙY CHỌN: Nếu bạn muốn mã hóa/compile .py thành .pyc để bảo mật thì bật block này lên
-      - name: Thiết lập Python
+      - name: 🐍 Thiết lập Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
-      - name: Compile Python sang .pyc
-        run: |
-          python -m compileall src/
-          find src/ -name "*.py" -type f -delete 
-        # Xóa file .py gốc, chỉ để lại .pyc (nhớ chừa lại file init nếu cần)
 
-      - name: 📦 Nén riêng thư mục src lại thành src_update.zip
+      - name: 📝 Tạo file thông tin phiên bản
         run: |
-          # Nén lấy thư mục src (lưu ý lệnh nén sẽ lấy cấu trúc thư mục từ thư mục gốc,
-          # tức là khi giải nén ra sẽ có dạng: src/tracking.py, src/telegram_bot.py,...)
-          zip -r src_update.zip src/
+          echo "{\"version\": \"${{ github.ref_name }}\", \"build_date\": \"$(date +'%Y-%m-%d %H:%M:%S')\", \"commit\": \"${{ github.sha }}\"}" > src/version.json
+          echo "✅ Created version.json with version ${{ github.ref_name }}"
 
-      # Đẩy file zip này vào chính cái Release Tag mà bạn vừa mới tạo
-      - name: 🚀 Upload src_update.zip lên Github Release
+      - name: 📦 Đóng gói bản cập nhật (Zip)
+        run: |
+          # Nén thư mục src/ và file requirements.txt
+          # Loại bỏ các file không cần thiết để giảm dung lượng và tránh lỗi
+          zip -r src_update.zip src/ requirements.txt -x "*.pyc" -x "*/__pycache__/*" -x "*.log" -x ".env"
+          echo "✅ Packaged src_update.zip successfully."
+
+      - name: 🚀 Upload lên GitHub Release
         uses: softprops/action-gh-release@v1
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: src_update.zip
+          # Tự động tạo nội dung release dựa trên các commit (Optional)
+          generate_release_notes: true
+          body: |
+            Bản cập nhật tự động (OTA Patch) cho phiên bản ${{ github.ref_name }}.
+            
+            **Hướng dẫn cập nhật:**
+            1. Tải file `src_update.zip` bên dưới.
+            2. Giải nén và chép đè vào thư mục ứng dụng.
+            3. Chạy `pip install -r requirements.txt` nếu có thư viện mới.
+            4. Khởi động lại dịch vụ.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
