@@ -5,6 +5,7 @@ from typing import List, Dict, Any
 import cv2
 import requests
 import threading
+import queue
 from src.config import RecognitionConfig, CAPTURES_DIR, MODELS_DIR, ApiConfig, CameraConfig, WebhookConfig
 from src.attendance.mongodb_mgr import mongo_db
 from src.utils.string_utils import remove_accents
@@ -48,6 +49,115 @@ class FaceTracker:
             logger.info("[Tracker] Async Anti-Spoofing ENABLED (parallel mode)")
         else:
             logger.info("[Tracker] Anti-Spoofing DISABLED")
+
+        # ─── Sequential Webhook Queue ──────────────────────────────────────
+        # Đảm bảo Webhook được gửi tuần tự từng cái một (FIFO) qua 1 Worker duy nhất
+        self.webhook_queue = queue.Queue()
+        self.webhook_worker_thread = threading.Thread(target=self._webhook_worker, daemon=True)
+        self.webhook_worker_thread.start()
+
+    def _webhook_worker(self):
+        """Worker thread xử lý Webhook tuần tự."""
+        while True:
+            try:
+                task_data = self.webhook_queue.get()
+                if task_data is None: break
+                
+                self._execute_webhook_task(**task_data)
+                
+                self.webhook_queue.task_done()
+                # Nghỉ một chút giữa các lần gửi để tránh nghẽn mạng (optional)
+                time.sleep(0.1)
+            except Exception as e:
+                logger.error(f"Webhook Worker error: {e}")
+
+    def _execute_webhook_task(self, user_id, user_name, status, is_unknown=False, custom_voice_text=None):
+        """Thực thi gửi Webhook thực tế (được gọi từ Worker) với cơ chế Retry 3 lần."""
+        try:
+            from src.utils.string_utils import remove_accents
+            from src.utils.time_manager import time_mgr
+            
+            # === PREPARE PAYLOAD (Chỉ tạo 1 lần) ===
+            vn_now = time_mgr.get_accurate_time()
+            time_str = vn_now.strftime("%H:%M:%S")
+            name_no_accents = remove_accents(user_name)
+            
+            employee = mongo_db.employees.find_one({"user_id": str(user_id)}) or {}
+            gender = employee.get("sex", "Nam")
+            
+            prefix = "anh"
+            if str(gender).lower() in ["nữ", "nu", "female", "f"]:
+                prefix = "chị"
+
+            name_parts = user_name.strip().split()
+            name_only = name_parts[-1] if name_parts else user_name
+            short_name = f"{prefix} {name_only}"
+
+            if custom_voice_text:
+                voice_text = custom_voice_text
+            elif status in ["IN", "OUT"]:
+                voice_text = f"{short_name} đã chấm công"
+            elif status == "SPOOF":
+                voice_text = "Cảnh báo: Phát hiện hành vi giả mạo khuôn mặt"
+            elif status == "COOLDOWN":
+                voice_text = f"{short_name} đã truy cập gần đây"
+            else:
+                voice_text = "Xin vui lòng thử lại"
+
+            payload = {
+                "user_id": user_id,
+                "user_name": name_no_accents,
+                "status": status or "DETECTED",
+                "voice_text": voice_text,
+                "time": time_str
+            }
+
+            # === RETRY LOGIC (3 LẦN) ===
+            max_retries = 3
+            last_error = "Unknown"
+            
+            for attempt in range(1, max_retries + 1):
+                try:
+                    response = requests.post(
+                        WebhookConfig.USER_WEBHOOK_URL,
+                        json=payload,
+                        timeout=5
+                    )
+                    if response.status_code == 200:
+                        self.successful_webhook_counts[user_id] = self.successful_webhook_counts.get(user_id, 0) + 1
+                        logger.success(f"🚀 WEBHOOK THÀNH CÔNG (Lần {attempt}) -> [ {user_name} ]")
+                        return True
+                    else:
+                        last_error = f"HTTP {response.status_code}"
+                        logger.warning(f"⚠️ Webhook thử lại lần {attempt} thất bại: {last_error}")
+                except Exception as e:
+                    last_error = str(e)
+                    logger.warning(f"⚠️ Webhook thử lại lần {attempt} lỗi kết nối: {last_error}")
+                
+                if attempt < max_retries:
+                    time.sleep(1) # Đợi 1 giây trước khi thử lại
+
+            # Nếu chạy đến đây là đã thất bại cả 3 lần
+            error_msg = f"❌ WEBHOOK FAILED SAU {max_retries} LẦN THỬ -> [ {user_name} ]. Lỗi cuối: {last_error}"
+            logger.error(error_msg)
+            
+            # Gửi báo cáo lỗi cuối cùng (Telegram & Report Service)
+            from src.utils.telegram_bot import send_telegram_report
+            from src.services.report_service import report_service
+            
+            # 1. Telegram
+            send_telegram_report("Webhook Final Fail", f"Nhân viên: {user_name} ({user_id})\nĐã thử {max_retries} lần nhưng thất bại.\nLỗi cuối: {last_error}")
+            
+            # 2. Report Service (Dashboard)
+            report_service.report_error(
+                message=f"Webhook vĩnh viễn thất bại cho {user_name}. Details: {last_error}",
+                status_code=500
+            )
+            return False
+
+        except Exception as e:
+            logger.error(f"Lỗi nghiêm trọng trong _execute_webhook_task: {e}")
+            return False
 
     def _send_telegram_alert(self, title, details, image=None):
         """Sends an enhanced Telegram alert with device and shift info."""
@@ -95,7 +205,7 @@ class FaceTracker:
         - Known users: Max 1 webhook per 15 minutes per user_id
         - Unknown faces: Max 10 webhooks total, reset when any known user checks in
         """
-        # ── Always push to local log bus (for TEST_MODE log panel) ────────────────
+        # Ghi vào Log Bus local (cho UI)
         try:
             from src.utils.webhook_log_bus import push_sent
             import datetime
@@ -109,19 +219,16 @@ class FaceTracker:
         except Exception:
             pass
 
-
+        # === LOGIC CHỐNG TRÙNG LẶP (DEDUPLICATION) ===
         import os
-        current_time = time.time()  # Định nghĩa current_time local để tránh lỗi reference
-
-        # === CROSS-PROCESS DEDUPLICATION LOGIC TO PREVENT MULTI-PROCESS RACE CONDITIONS ===
+        current_time = time.time()
+        
         if is_unknown:
             if self.unknown_webhook_count >= self.unknown_webhook_limit:
                 return
             self.unknown_webhook_count += 1
         else:
-            # OS Cross-Process File Lock (Data Dir Shared Between All Instances)
             from src.config import DATA_DIR
-
             safe_id = "".join(x for x in str(user_id) if x.isalnum())
             lock_file = DATA_DIR / f"webhook_lock_{safe_id}.txt"
 
@@ -129,8 +236,9 @@ class FaceTracker:
                 if lock_file.exists():
                     last_mtime = os.path.getmtime(lock_file)
                     elapsed = current_time - last_mtime
+                    # Block duplicate trong 5 giây (trừ khi là trạng thái đặc biệt)
                     if status != 'COOLDOWN' and elapsed < 5:
-                        return  # Block duplicate webhook trong 5 giây
+                        return 
 
                 with open(lock_file, "w") as f:
                     f.write(str(current_time))
@@ -140,78 +248,14 @@ class FaceTracker:
             if self.unknown_webhook_count > 0:
                 self.unknown_webhook_count = 0
 
-        def thread_task():
-            try:
-                from src.utils.string_utils import remove_accents
-                from src.utils.time_manager import time_mgr
-                
-                # === PREPARE PAYLOAD ===
-                # 1. Format time HH:MM:SS from VN Time
-                vn_now = time_mgr.get_accurate_time()
-                time_str = vn_now.strftime("%H:%M:%S")
-                
-                # 2. Format user_name without accents for the JSON field
-                name_no_accents = remove_accents(user_name)
-                
-                # 3. Format voice text for TTS
-                # Lấy giới tính từ database
-                employee = mongo_db.employees.find_one({"user_id": str(user_id)}) or {}
-                gender = employee.get("sex", "Nam") # Sử dụng trường "sex" thay vì "gender"
-                
-                prefix = "anh"
-                if str(gender).lower() in ["nữ", "nu", "female", "f"]:
-                    prefix = "chị"
-
-                name_parts = user_name.strip().split()
-                # Lấy tên (phần cuối cùng của chuỗi tên)
-                name_only = name_parts[-1] if name_parts else user_name
-                short_name = f"{prefix} {name_only}"
-
-                if custom_voice_text:
-                    voice_text = custom_voice_text
-                elif status in ["IN", "OUT"]:
-                    voice_text = f"{short_name} đã chấm công"
-                elif status == "SPOOF":
-                    voice_text = "Cảnh báo: Phát hiện hành vi giả mạo khuôn mặt"
-                elif status == "COOLDOWN":
-                    voice_text = f"{short_name} đã truy cập gần đây"
-                else:
-                    # Default for unknown/unauthorized
-                    voice_text = "Xin vui lòng thử lại"
-
-                payload = {
-                    "user_id": user_id,
-                    "user_name": name_no_accents,
-                    "status": status or "DETECTED",
-                    "voice_text": voice_text,
-                    "time": time_str
-                }
-
-                response = requests.post(
-                    WebhookConfig.USER_WEBHOOK_URL,
-                    json=payload,
-                    timeout=5
-                )
-                if response.status_code == 200:
-                    self.successful_webhook_counts[user_id] = self.successful_webhook_counts.get(user_id, 0) + 1
-                    count = self.successful_webhook_counts[user_id]
-                    logger.success(f"=====================================================")
-                    logger.success(f"🚀 WEBHOOK GỬI THÀNH CÔNG -> [ {user_name} ] - Status: {status}")
-                    logger.success(f"📊 Đây là webhook thành công lần thứ {count} của nhân viên này.")
-                    logger.success(f"=====================================================")
-                else:
-                    error_msg = f"WEBHOOK FAILED -> [ {user_name} ] - Code: {response.status_code}"
-                    logger.warning(error_msg)
-                    from src.utils.telegram_bot import send_telegram_report
-                    send_telegram_report("Webhook Fail", f"Nhân viên: {user_name} ({user_id})\nStatus: {status}\nHTTP Code: {response.status_code}")
-            except Exception as e:
-                error_msg = f"Error sending webhook: {e}"
-                logger.error(error_msg)
-                from src.utils.telegram_bot import send_telegram_report
-                send_telegram_report("Webhook Fail", f"Nhân viên: {user_name} ({user_id})\nStatus: {status}\nError: {str(e)}")
-
-        # Run in background to not block the tracking loop
-        threading.Thread(target=thread_task, daemon=True).start()
+        # Đẩy vào Queue để xử lý tuần tự
+        self.webhook_queue.put({
+            'user_id': user_id,
+            'user_name': user_name,
+            'status': status,
+            'is_unknown': is_unknown,
+            'custom_voice_text': custom_voice_text
+        })
 
     def _get_center(self, bbox):
         return (int((bbox[0] + bbox[2]) / 2), int((bbox[1] + bbox[3]) / 2))
@@ -723,13 +767,9 @@ class FaceTracker:
                         f_data['last_attempt_time'] = current_time
                         f_data['user_data'] = vote
                         
-                        # --- CƠ CHẾ THÔNG BÁO THẤT BẠI (MỚI) ---
-                        # 1. Phát voice ngay từ lần đầu tiên thất bại.
-                        # 2. Cứ mỗi 3 lần thất bại liên tiếp thì nhắc tháo khẩu trang.
-                        # 3. Giữ Rate-Limiter 5 giây để tránh loa kêu dồn dập.
-                        
+                        # --- CƠ CHẾ THÔNG BÁO THẤT BẠI (CÁCH NHAU 1 GIÂY) ---
                         last_unknown = f_data.get('last_unknown_alert', 0)
-                        if current_time - last_unknown > 5.0:
+                        if current_time - last_unknown > 1.0:
                             f_data['last_unknown_alert'] = current_time
                             
                             voice_text = "Xin vui lòng thử lại"
@@ -750,7 +790,7 @@ class FaceTracker:
                                 self._send_telegram_alert("PHAT HIEN NGUOI LA", f"Phát hiện người lạ trước camera (Đã quét {f_data['unknown_attempts']} lần)", image=frame)
                                 self._send_user_webhook("Unknown", "Nguoi la", "unknown", is_unknown=True, custom_voice_text=voice_text)
                             else:
-                                # Chưa đủ 10 lần thì chỉ phát voice thông báo cho người dùng tại chỗ, không gửi Telegram/Webhook người lạ
+                                # Gửi voice cách nhau 1 giây
                                 self._send_user_webhook("Unknown", "Nguoi la", "unknown", is_unknown=True, custom_voice_text=voice_text)
 
                         f_data['status'] = 'RETRY_WAIT'

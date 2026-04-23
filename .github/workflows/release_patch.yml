@@ -1,0 +1,40 @@
+name: Tự động đóng gói bản cập nhật OTA (Source Code)
+
+# Workflow này sẽ chạy tự động mỗi khi bạn tạo một Release tags mới nhãn v* (VD: v1.0.1, v1.0.2)
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-release-patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Tải mã nguồn (Checkout)
+        uses: actions/checkout@v3
+
+      # TÙY CHỌN: Nếu bạn muốn mã hóa/compile .py thành .pyc để bảo mật thì bật block này lên
+      - name: Thiết lập Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - name: Compile Python sang .pyc
+        run: |
+          python -m compileall src/
+          find src/ -name "*.py" -type f -delete 
+        # Xóa file .py gốc, chỉ để lại .pyc (nhớ chừa lại file init nếu cần)
+
+      - name: 📦 Nén riêng thư mục src lại thành src_update.zip
+        run: |
+          # Nén lấy thư mục src (lưu ý lệnh nén sẽ lấy cấu trúc thư mục từ thư mục gốc,
+          # tức là khi giải nén ra sẽ có dạng: src/tracking.py, src/telegram_bot.py,...)
+          zip -r src_update.zip src/
+
+      # Đẩy file zip này vào chính cái Release Tag mà bạn vừa mới tạo
+      - name: 🚀 Upload src_update.zip lên Github Release
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: src_update.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
