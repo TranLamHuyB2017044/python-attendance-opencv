@@ -109,7 +109,23 @@ class CameraConfig:
             # Anti-spoofing config
             anti_spoofing = mongo_db.get_setting("anti_spoofing_enabled", str(RecognitionConfig.ANTI_SPOOFING_ENABLED), username=cid)
             RecognitionConfig.ANTI_SPOOFING_ENABLED = str(anti_spoofing).lower() == "true"
-            
+
+            # Recognition threshold — điều chỉnh từ xa để tăng/giảm độ chính xác
+            # Key MongoDB: "recognition_threshold", VD: "0.65"
+            threshold_str = mongo_db.get_setting("recognition_threshold", str(RecognitionConfig.THRESHOLD), username=cid)
+            try:
+                RecognitionConfig.THRESHOLD = float(threshold_str)
+            except (ValueError, TypeError):
+                logger.warning(f"Invalid recognition_threshold from MongoDB: '{threshold_str}', keeping current: {RecognitionConfig.THRESHOLD}")
+
+            # Gather frames — số frame tích lũy trước khi nhận diện
+            # Key MongoDB: "gather_frames", VD: "1" (nhanh) hoặc "5" (chính xác hơn)
+            gather_str = mongo_db.get_setting("gather_frames", str(RecognitionConfig.GATHER_FRAMES), username=cid)
+            try:
+                RecognitionConfig.GATHER_FRAMES = max(1, int(gather_str))  # Tối thiểu 1
+            except (ValueError, TypeError):
+                logger.warning(f"Invalid gather_frames from MongoDB: '{gather_str}', keeping current: {RecognitionConfig.GATHER_FRAMES}")
+
             # ROI Configuration
             roi_str = mongo_db.get_setting("camera_roi", "", username=cid)
             try:
@@ -119,8 +135,13 @@ class CameraConfig:
                     cls.ROI = None
             except:
                 cls.ROI = None
-            
-            logger.info(f"CameraConfig: Updated settings from MongoDB -> {cls.IP}:{cls.PORT} | Cooldown: {cooldown_sec}s | Anti-Spoof: {RecognitionConfig.ANTI_SPOOFING_ENABLED} | ROI: {cls.ROI}")
+
+            logger.info(
+                f"CameraConfig: Updated settings from MongoDB -> {cls.IP}:{cls.PORT} | "
+                f"Cooldown: {cooldown_sec}s | Anti-Spoof: {RecognitionConfig.ANTI_SPOOFING_ENABLED} | "
+                f"Threshold: {RecognitionConfig.THRESHOLD} | GatherFrames: {RecognitionConfig.GATHER_FRAMES} | "
+                f"ROI: {cls.ROI}"
+            )
             return True
         except Exception as e:
             logger.error(f"Failed to load camera settings from MongoDB: {e}")
