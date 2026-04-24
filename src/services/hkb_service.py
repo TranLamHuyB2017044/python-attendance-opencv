@@ -317,12 +317,20 @@ class HKBService:
             for log in attendance_logs:
                 # Map status to io field
                 io_status = log.get("status", "IN")  # IN, OUT, or FAILED
-                
+
+                # Normalize datetime → server yêu cầu format "Y-m-d H:i:s" (không có milliseconds)
+                # VD: "2026-04-24 11:31:03.361" → "2026-04-24 11:31:03"
+                raw_ts = log.get("timestamp", "")
+                try:
+                    normalized_dt = str(raw_ts).split(".")[0]
+                except Exception:
+                    normalized_dt = str(raw_ts)
+
                 payload_item = {
                     "session_id": log.get("session_id"),
                     "employee_code": log.get("user_id"),
                     "full_name": log.get("user_name"),
-                    "datetime": log.get("timestamp"),
+                    "datetime": normalized_dt,
                     "io": io_status
                 }
                 payload_data.append(payload_item)
