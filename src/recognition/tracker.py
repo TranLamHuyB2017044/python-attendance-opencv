@@ -6,7 +6,8 @@ import cv2
 import requests
 import threading
 import queue
-from src.config import RecognitionConfig, CAPTURES_DIR, MODELS_DIR, ApiConfig, CameraConfig, WebhookConfig
+from src.config import RecognitionConfig, CAPTURES_DIR, MODELS_DIR, ApiConfig, CameraConfig, WebhookConfig, TelegramConfig
+
 from src.attendance.mongodb_mgr import mongo_db
 from src.utils.string_utils import remove_accents
 from src.utils.time_manager import time_mgr
@@ -72,7 +73,7 @@ class FaceTracker:
             except Exception as e:
                 logger.error(f"Webhook Worker error: {e}")
 
-    def _execute_webhook_task(self, user_id, user_name, status, is_unknown=False, custom_voice_text=None):
+    def _execute_webhook_task(self, user_id, user_name, status, is_unknown=False, custom_voice_text=None, image=None):
         """Thực thi gửi Webhook thực tế (được gọi từ Worker) với cơ chế Retry 3 lần."""
         try:
             from src.utils.string_utils import remove_accents
@@ -127,6 +128,18 @@ class FaceTracker:
                     if response.status_code == 200:
                         self.successful_webhook_counts[user_id] = self.successful_webhook_counts.get(user_id, 0) + 1
                         logger.success(f"🚀 WEBHOOK THÀNH CÔNG (Lần {attempt}) -> [ {user_name} ]")
+                        
+                        # Gửi Telegram khi thành công (Bao gồm cả IN, OUT, DETECTED và COOLDOWN theo yêu cầu)
+                        if status in ["IN", "OUT", "DETECTED", "COOLDOWN"]:
+                            logger.info(f"🚀 Đang gửi thông báo Telegram cho: {user_name} (Trạng thái: {status})...")
+                            self._send_telegram_alert(
+                                title="Thông báo chấm công",
+                                details=f"Nhân viên: {user_name} ({user_id})\nTrạng thái: {status}",
+                                image=image
+                            )
+
+
+
                         return True
                     else:
                         last_error = f"HTTP {response.status_code}"
@@ -162,8 +175,13 @@ class FaceTracker:
 
     def _send_telegram_alert(self, title, details, image=None):
         """Sends an enhanced Telegram alert with device and shift info."""
-        if RecognitionConfig.TEST_MODE:
+        if not TelegramConfig.ENABLED:
+            logger.warning("[Telegram] Tính năng thông báo đang bị TẮT (ENABLED=false). Vui lòng kiểm tra .env hoặc Dashboard.")
             return
+        if not TelegramConfig.BOT_TOKEN or not TelegramConfig.CHAT_ID:
+            logger.warning("[Telegram] Thiếu BOT_TOKEN hoặc CHAT_ID. Không thể gửi thông báo.")
+            return
+
         try:
             from src.utils.telegram_bot import send_telegram_report
             from src.services.ping_service import _build_devices_info
@@ -198,7 +216,7 @@ class FaceTracker:
         except Exception as e:
             logger.error(f"Error sending enhanced Telegram alert: {e}")
 
-    def _send_user_webhook(self, user_id, user_name, status, is_unknown=False, custom_voice_text=None):
+    def _send_user_webhook(self, user_id, user_name, status, is_unknown=False, custom_voice_text=None, image=None):
         """
         Sends user detection info to the configured webhook URL in a background thread.
         
@@ -255,7 +273,8 @@ class FaceTracker:
             'user_name': user_name,
             'status': status,
             'is_unknown': is_unknown,
-            'custom_voice_text': custom_voice_text
+            'custom_voice_text': custom_voice_text,
+            'image': image
         })
 
     def _get_center(self, bbox):
@@ -783,7 +802,7 @@ class FaceTracker:
                                 self.user_cooldowns[user_id] = current_time
                                 _, status = self._save_log_with_bbox(frame, face, user_id, user_name, user_data.get('score', 0.0),
                                                                        company_id=target_cid, birthday=user_data.get('birthday', 'N/A'), vector_count=user_data.get('vector_count', 0), f_data=f_data)
-                                self._send_user_webhook(user_id, user_name, status, is_unknown=False)
+                                self._send_user_webhook(user_id, user_name, status, is_unknown=False, image=frame)
 
                             if user_data.get('vector_count', 0) < 10:
                                 self._auto_learn_face(frame, face, user_id, user_name, user_data.get('birthday', 'N/A'), target_cid, attendance_mgr)

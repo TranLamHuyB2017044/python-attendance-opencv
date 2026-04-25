@@ -110,6 +110,11 @@ class CameraConfig:
             anti_spoofing = mongo_db.get_setting("anti_spoofing_enabled", str(RecognitionConfig.ANTI_SPOOFING_ENABLED), username=cid)
             RecognitionConfig.ANTI_SPOOFING_ENABLED = str(anti_spoofing).lower() == "true"
 
+            # Telegram config (cho phép bật tắt từ xa)
+            telegram_enabled = mongo_db.get_setting("enable_telegram_notif", str(TelegramConfig.ENABLED), username=cid)
+            TelegramConfig.ENABLED = str(telegram_enabled).lower() == "true"
+
+
             # Recognition threshold — điều chỉnh từ xa để tăng/giảm độ chính xác
             # Key MongoDB: "recognition_threshold", VD: "0.65"
             threshold_str = mongo_db.get_setting("recognition_threshold", str(RecognitionConfig.THRESHOLD), username=cid)

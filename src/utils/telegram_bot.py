@@ -106,8 +106,13 @@ def send_telegram_report(title, message, image=None, level="ERROR"):
         image (Optional): OpenCV Frame (numpy array) or WebP bytes
         level (str): Log level emoji (default: ERROR)
     """
-    if not TelegramConfig.ENABLED or not TelegramConfig.BOT_TOKEN or not TelegramConfig.CHAT_ID:
+    if not TelegramConfig.ENABLED:
+        logger.warning("[Telegram] Tính năng thông báo đang bị TẮT (ENABLED=false).")
         return
+    if not TelegramConfig.BOT_TOKEN or not TelegramConfig.CHAT_ID:
+        logger.warning("[Telegram] Thiếu BOT_TOKEN hoặc CHAT_ID. Không thể gửi thông báo.")
+        return
+
 
     # Determine emoji based on level or title
     emoji = "🚨"
