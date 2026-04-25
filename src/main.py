@@ -93,7 +93,7 @@ def enroll_from_camera(camera, face_rec, attendance, ui):
         logger.warning("Enrollment cancelled: No user information provided.")
         return
     
-    user_id, user_name, birthday, _, selected_cid = user_info
+    user_id, user_name, birthday, _, selected_cid, user_gender = user_info
 
     samples = []
     enrollment_image_ids = []
@@ -179,7 +179,7 @@ def enroll_from_camera(camera, face_rec, attendance, ui):
                 root.destroy()
 
             # Try to save to MongoDB
-            ok, msg = mongo_db.save_employee(user_id, user_name, birthday, target_company, force_update=force_upd)
+            ok, msg = mongo_db.save_employee(user_id, user_name, birthday, target_company, sex=user_gender, force_update=force_upd)
             if not ok:
                 from tkinter import messagebox
                 import tkinter as tk
@@ -228,7 +228,7 @@ def enroll_by_upload(face_rec, attendance, ui, parent=None):
             logger.warning("Enrollment cancelled: No user information provided.")
             return
             
-        u_id, u_name, u_bday, file_paths, selected_cid = user_info
+        u_id, u_name, u_bday, file_paths, selected_cid, u_gender = user_info
         logger.info(f"Processing enrollment for {u_name} (ID: {u_id}) with {len(file_paths)} files.")
         
         target_company = MongoDbConfig.COMPANY_ID
@@ -289,7 +289,7 @@ def enroll_by_upload(face_rec, attendance, ui, parent=None):
                 root.destroy()
 
             # Validation via MongoDB
-            ok, msg = mongo_db.save_employee(u_id, u_name, u_bday, target_company, force_update=force_upd)
+            ok, msg = mongo_db.save_employee(u_id, u_name, u_bday, target_company, sex=u_gender, force_update=force_upd)
             if not ok:
                 from tkinter import messagebox
                 import tkinter as tk
@@ -353,22 +353,31 @@ def handle_edit_logic(attendance, face_rec, ui, camera, parent=None):
 
     # 2. Start editing loop
     while True:
-        # Get merged employee list (MongoDB + Qdrant) for this company ONLY
-        mongo_employees = mongo_db.get_all_employees(company_id=filter_company, active_only=False)
-        qdrant_employees = attendance.get_all_users(company_id=filter_company, active_only=False)
+        # Get merged employee list (MongoDB + Qdrant) for this company ONLY (Only Active Users)
+        mongo_employees = mongo_db.get_all_employees(company_id=filter_company, active_only=True)
+        qdrant_employees = attendance.get_all_users(company_id=filter_company, active_only=True)
+
         
         # Merge employee lists
         all_employees = []
         seen_ids = set()
         
+        # Create a map for mongo employees for easy lookup
+        mongo_map = {str(emp['user_id']): emp for emp in mongo_employees}
+        
         # First add all from Qdrant (have face data)
         for emp in qdrant_employees:
             u_id_str = str(emp['user_id'])
             if u_id_str not in seen_ids:
+                # Get sex from mongo if possible
+                mongo_emp = mongo_map.get(u_id_str)
+                sex = mongo_emp.get('sex', 'Nam') if mongo_emp else 'Nam'
+                
                 all_employees.append({
                     'user_id': u_id_str,
                     'user_name': emp['user_name'],
                     'birthday': emp['birthday'],
+                    'sex': sex,
                     'has_face': True,
                     'active': emp.get('active', True)
                 })
@@ -376,16 +385,18 @@ def handle_edit_logic(attendance, face_rec, ui, camera, parent=None):
         
         # Then add MongoDB-only employees (no face data yet)
         for emp in mongo_employees:
+            u_id_str = str(emp['user_id'])
             # Normalize to string for comparison
-            if str(emp['user_id']) not in seen_ids:
+            if u_id_str not in seen_ids:
                 all_employees.append({
                     'user_id': emp['user_id'],
                     'user_name': emp['name'],
                     'birthday': emp.get('birthday', 'N/A'),
+                    'sex': emp.get('sex', 'Nam'),
                     'has_face': False,
                     'active': emp.get('active', True)
                 })
-                seen_ids.add(str(emp['user_id']))
+                seen_ids.add(u_id_str)
         
         # 3. Pick User from merged list
         u_id = ui.pick_user_ui(all_employees, parent=parent)
@@ -406,16 +417,25 @@ def handle_edit_logic(attendance, face_rec, ui, camera, parent=None):
                 user_info = {
                     "user_id": mongo_emp['user_id'],
                     "user_name": mongo_emp['name'],
-                    "birthday": mongo_emp.get('birthday', 'N/A')
+                    "birthday": mongo_emp.get('birthday', 'N/A'),
+                    "sex": mongo_emp.get('sex', 'Nam')
                 }
             else:
                 logger.warning(f"User {u_id} not found in MongoDB either!")
+        else:
+            # If found in Qdrant, still check MongoDB for sex/gender
+            mongo_emp = next((e for e in mongo_employees if str(e['user_id']) == str(u_id)), None)
+            if mongo_emp:
+                user_info["sex"] = mongo_emp.get("sex", "Nam")
+            else:
+                user_info["sex"] = "Nam"
         
         if user_info:
             edit_res = ui.get_edit_user_form(
                 user_info["user_id"], 
                 user_info["user_name"], 
                 user_info["birthday"],
+                current_sex=user_info.get("sex", "Nam"),
                 session_role=ui.session_role,
                 parent=parent
             )
@@ -429,7 +449,7 @@ def handle_edit_logic(attendance, face_rec, ui, camera, parent=None):
                 elif edit_res["enroll_camera"]:
                     # Update thong tin trước, sau đó dang ký qua camera
                     attendance.update_user_info(u_id, edit_res["name"], edit_res["bday"])
-                    mongo_db.save_employee(str(u_id), edit_res["name"], edit_res["bday"], target_company, force_update=True)
+                    mongo_db.save_employee(str(u_id), edit_res["name"], edit_res["bday"], target_company, sex=edit_res["sex"], force_update=True)
                     
                     if not camera.is_connected: camera.connect()
                     
@@ -476,7 +496,7 @@ def handle_edit_logic(attendance, face_rec, ui, camera, parent=None):
                 elif edit_res["enroll_upload"]:
                     # Update thong tin truoc
                     attendance.update_user_info(u_id, edit_res["name"], edit_res["bday"])
-                    mongo_db.save_employee(str(u_id), edit_res["name"], edit_res["bday"], target_company, force_update=True)
+                    mongo_db.save_employee(str(u_id), edit_res["name"], edit_res["bday"], target_company, sex=edit_res["sex"], force_update=True)
                     
                     from tkinter import filedialog
                     # Dùng parent window (CTk dashboard) thay vì tạo tk.Tk() mới,
@@ -519,7 +539,7 @@ def handle_edit_logic(attendance, face_rec, ui, camera, parent=None):
                                 _msg_root.destroy()
                 else:
                     # Only update info
-                    mongo_db.save_employee(str(u_id), edit_res["name"], edit_res["bday"], target_company, force_update=True)
+                    mongo_db.save_employee(str(u_id), edit_res["name"], edit_res["bday"], target_company, sex=edit_res["sex"], force_update=True)
                     attendance.update_user_info(u_id, edit_res["name"], edit_res["bday"])
                     logger.success(f"Da cap nhat thong tin ID: {u_id}")
         else:

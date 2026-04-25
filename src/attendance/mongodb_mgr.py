@@ -412,7 +412,7 @@ class MongoDBManager:
             logger.error(f"MongoDB: Error during login verification: {e}")
             return None
 
-    def save_employee(self, user_id, name, birthday, company_id, force_update=True, active=True):
+    def save_employee(self, user_id, name, birthday, company_id, sex="Nam", force_update=True, active=True):
         """
         Store or update employee metadata in MongoDB.
         Args:
@@ -441,6 +441,7 @@ class MongoDBManager:
                 "name": name,
                 "birthday": birthday,
                 "company_id": company_id,
+                "sex": sex,
                 "active": active,
                 "updated_at": datetime.datetime.utcnow()
             }

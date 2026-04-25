@@ -200,27 +200,37 @@ class AttendanceUI:
                 qdrant_employees = attendance.get_all_users(company_id=target_cid, active_only=False)
                 all_employees = []
                 seen_ids = set()
+                # Create a map for mongo employees for easy lookup
+                mongo_map = {str(emp['user_id']): emp for emp in mongo_employees}
+                
                 for emp in qdrant_employees:
                     u_id_str = str(emp['user_id'])
                     if u_id_str not in seen_ids:
+                        # Get sex from mongo if possible
+                        mongo_emp = mongo_map.get(u_id_str)
+                        sex = mongo_emp.get('sex', 'Nam') if mongo_emp else 'Nam'
+                        
                         all_employees.append({
                             'user_id': u_id_str, 
                             'user_name': emp['user_name'], 
                             'birthday': emp['birthday'], 
+                            'sex': sex,
                             'has_face': True,
                             'active': emp.get('active', True)
                         })
                         seen_ids.add(u_id_str)
                 for emp in mongo_employees:
-                    if str(emp['user_id']) not in seen_ids:
+                    u_id_str = str(emp['user_id'])
+                    if u_id_str not in seen_ids:
                         all_employees.append({
                             'user_id': emp['user_id'], 
                             'user_name': emp['name'], 
                             'birthday': emp.get('birthday', 'N/A'), 
+                            'sex': emp.get('sex', 'Nam'),
                             'has_face': False,
                             'active': emp.get('active', True)
                         })
-                        seen_ids.add(str(emp['user_id']))
+                        seen_ids.add(u_id_str)
                 company_name = mongo_db.get_company_name(target_cid)
                 self.show_user_list_ui(all_employees, title=f"Nhân viên - {company_name}", parent=root, attendance_manager=attendance, company_id=target_cid, mongo_db=mongo_db)
 
@@ -491,6 +501,12 @@ class AttendanceUI:
             except Exception as e:
                 logger.error(f"UI: Error loading companies: {e}")
 
+        # Gender
+        ctk.CTkLabel(f, text="Giới tính:", font=("Arial", 12)).pack(anchor="w")
+        combo_gender = ctk.CTkComboBox(f, values=["Nam", "Nữ"], width=340, height=35)
+        combo_gender.set("Nam")
+        combo_gender.pack(pady=(2, 10))
+
         # File upload section
         lbl_file_count = None
         if include_upload:
@@ -513,6 +529,7 @@ class AttendanceUI:
             u_id = entry_id.get().strip()
             u_name = entry_name.get().strip()
             u_bday = date_entry.get().strip()
+            u_gender = combo_gender.get()
             
             if not u_id or not u_name:
                 messagebox.showwarning("Cảnh báo", "Vui lòng nhập đầy đủ Mã nhân viên và Họ tên!")
@@ -531,6 +548,7 @@ class AttendanceUI:
             form_data["id"] = u_id
             form_data["name"] = u_name
             form_data["bday"] = u_bday or "N/A"
+            form_data["gender"] = u_gender
             root.destroy()
 
         # Submit button
@@ -546,7 +564,7 @@ class AttendanceUI:
         if form_data["id"] is None:
             return None
             
-        return form_data["id"], form_data["name"], form_data["bday"], form_data["files"], form_data["company_id"]
+        return form_data["id"], form_data["name"], form_data["bday"], form_data["files"], form_data["company_id"], form_data["gender"]
 
     @staticmethod
     def get_id_form():
@@ -563,8 +581,7 @@ class AttendanceUI:
         return u_id
 
     @staticmethod
-    @staticmethod
-    def get_edit_user_form(current_id, current_name, current_bday, session_role=None, parent=None):
+    def get_edit_user_form(current_id, current_name, current_bday, current_sex="Nam", session_role=None, parent=None):
         """
         Modernized edit form using CustomTkinter and CTkDateEntry.
         """
@@ -580,13 +597,14 @@ class AttendanceUI:
             _apply_icon(root)
             
         root.title("Chỉnh sửa thông tin")
-        root.geometry("450x550")
+        root.geometry("450x620") # Increased height for gender field
         root.attributes('-topmost', False)
         root.focus_force()
 
         result = {
             "name": None, 
             "bday": None, 
+            "sex": None,
             "delete": False,
             "enroll_camera": False,
             "enroll_upload": False
@@ -595,6 +613,7 @@ class AttendanceUI:
         def on_save():
             result["name"] = entry_name.get().strip()
             result["bday"] = date_entry.get().strip()
+            result["sex"] = combo_gender.get()
             if not result["name"]:
                 messagebox.showwarning("Cảnh báo", "Họ tên không được để trống!")
                 return
@@ -608,6 +627,7 @@ class AttendanceUI:
         def on_enroll_camera():
             result["name"] = entry_name.get().strip()
             result["bday"] = date_entry.get().strip()
+            result["sex"] = combo_gender.get()
             if not result["name"]:
                 messagebox.showwarning("Cảnh báo", "Họ tên không được để trống!")
                 return
@@ -617,6 +637,7 @@ class AttendanceUI:
         def on_enroll_upload():
             result["name"] = entry_name.get().strip()
             result["bday"] = date_entry.get().strip()
+            result["sex"] = combo_gender.get()
             if not result["name"]:
                 messagebox.showwarning("Cảnh báo", "Họ tên không được để trống!")
                 return
@@ -645,6 +666,13 @@ class AttendanceUI:
             date_entry.btn.configure(state='disabled')
         date_entry.pack(pady=(2, 10))
 
+        # Gender
+        ctk.CTkLabel(f, text="Giới tính:", font=("Arial", 12)).pack(anchor="w")
+        combo_gender = ctk.CTkComboBox(f, values=["Nam", "Nữ"], width=370, height=35)
+        combo_gender.set(current_sex if current_sex in ["Nam", "Nữ"] else "Nam")
+        if is_company: combo_gender.configure(state='disabled')
+        combo_gender.pack(pady=(2, 10))
+
         # Separator
         ctk.CTkLabel(f, text="──────────────────────────────────", text_color="gray").pack(pady=10)
         ctk.CTkLabel(f, text="ĐĂNG KÝ KHUÔN MẶT", font=("Arial", 11, "bold"), text_color="#17a2b8").pack()
@@ -654,9 +682,9 @@ class AttendanceUI:
         face_btn_row.pack(pady=10, fill="x")
         
         ctk.CTkButton(face_btn_row, text="📷 Camera", command=on_enroll_camera, 
-                     width=165, height=35, fg_color="#007bff", hover_color="#0056b3").pack(side="left", padx=(0, 10))
+                     width=175, height=35, fg_color="#007bff", hover_color="#0056b3").pack(side="left", padx=(0, 10))
         ctk.CTkButton(face_btn_row, text="📁 File Ảnh", command=on_enroll_upload, 
-                     width=165, height=35, fg_color="#6c757d", hover_color="#5a6268").pack(side="left")
+                     width=175, height=35, fg_color="#6c757d", hover_color="#5a6268").pack(side="left")
         
         # Action buttons
         btn_save = ctk.CTkButton(root, text="LƯU THAY ĐỔI", command=on_save, width=300, height=45, fg_color="#28a745", hover_color="#218838", font=("Arial", 13, "bold"))
@@ -665,7 +693,7 @@ class AttendanceUI:
         if is_company:
             btn_save.configure(state='disabled', fg_color='#555555')
             btn_delete.configure(state='disabled', fg_color='#555555')
-            ctk.CTkLabel(root, text="* Quyền Company không được sửa tên/ngày sinh", text_color="#e74c3c", font=("Arial", 11)).pack()
+            ctk.CTkLabel(root, text="* Quyền Company không được sửa thông tin", text_color="#e74c3c", font=("Arial", 11)).pack()
 
         btn_save.pack(pady=(20, 10))
         btn_delete.pack(pady=5)
@@ -715,13 +743,14 @@ class AttendanceUI:
         frame_tree.pack(pady=5, padx=20, fill="both", expand=True)
 
         # Treeview
-        columns = ("user_id", "user_name", "birthday", "has_face", "enrollment_status", "status")
+        columns = ("user_id", "user_name", "birthday", "sex", "has_face", "enrollment_status", "status")
         tree = ttk.Treeview(frame_tree, columns=columns, show="headings")
         
         # Configure column headings
         tree.heading("user_id", text="Mã NV")
         tree.heading("user_name", text="Họ và Tên")
         tree.heading("birthday", text="Ngày Sinh")
+        tree.heading("sex", text="Giới tính")
         tree.heading("has_face", text="Khuôn mặt")
         tree.heading("enrollment_status", text="Số lượng ĐK")
         tree.heading("status", text="Trạng thái")
@@ -730,6 +759,7 @@ class AttendanceUI:
         tree.column("user_id", width=100, anchor="center")
         tree.column("user_name", width=250)
         tree.column("birthday", width=120, anchor="center")
+        tree.column("sex", width=80, anchor="center")
         tree.column("has_face", width=100, anchor="center")
         tree.column("enrollment_status", width=120, anchor="center")
         tree.column("status", width=100, anchor="center")
@@ -773,11 +803,13 @@ class AttendanceUI:
                 
                 enroll_status_str = f"{enrollment_count}/10"
                 active_text = "Hoạt động" if is_active else "Đã xóa"
+                sex_text = emp.get("sex", "Nam")
 
                 tree.insert("", "end", values=(
                     emp["user_id"], 
                     emp["user_name"], 
                     emp["birthday"], 
+                    sex_text,
                     has_face_text,
                     enroll_status_str,
                     active_text
@@ -864,9 +896,10 @@ class AttendanceUI:
             values = tree.item(item_id, "values")
             user_id = values[0]
             user_name = values[1]
-            current_status = values[5]
+            current_status = values[6]
             
             is_active = (current_status == "Hoạt động")
+
             new_status = not is_active
             action_text = "vô hiệu hóa" if is_active else "kích hoạt lại"
             
@@ -1966,8 +1999,9 @@ class AttendanceUI:
             u_id = emp.get("barcode") or emp.get("user_id") or emp.get("uid") or emp.get("id") or "N/A"
             u_name = emp.get("full_name") or emp.get("name") or emp.get("user_name") or "Unknown"
             u_bday = emp.get("birthday") or "N/A"
-            item_id = tree.insert("", tk.END, values=(u_id, u_name, u_bday, emp.get("sex", "-"), emp.get("group_id", "-")))
-            emp_map[item_id] = {"id": u_id, "name": u_name, "bday": u_bday, "cid": target_company_id}
+            u_sex = emp.get("sex") or "Nam"
+            item_id = tree.insert("", tk.END, values=(u_id, u_name, u_bday, u_sex, emp.get("group_id", "-")))
+            emp_map[item_id] = {"id": u_id, "name": u_name, "bday": u_bday, "sex": u_sex, "cid": target_company_id}
 
         def save_to_db(selected_only=False):
             targets = [emp_map[i] for i in tree.selection()] if selected_only else list(emp_map.values())
@@ -2031,11 +2065,14 @@ class AttendanceUI:
                             percent_label.configure(text=f"{int((idx+1)/total * 100)}%")
                         ])
                         
-                        ok, _ = mongo_db.save_employee(t["id"], t["name"], t["bday"], t["cid"], active=True)
+                        logger.info(f"Sync: Saving employee {t['id']} ({t['name']}) with sex={t.get('sex', 'Nam')}")
+                        ok, msg = mongo_db.save_employee(t["id"], t["name"], t["bday"], t["cid"], sex=t.get("sex", "Nam"), active=True)
                         if ok:
                             qdrant_mgr.update_user_info(t["id"], t["name"], t["bday"])
                             qdrant_mgr.set_user_active_status(t["id"], True)
                             saved += 1
+                        else:
+                            logger.error(f"Sync: Failed to save {t['id']}: {msg}")
                     
                     progress_win.after(0, lambda: [
                         progress_win.destroy(),
