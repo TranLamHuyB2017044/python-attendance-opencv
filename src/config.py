@@ -253,6 +253,30 @@ class TelegramConfig:
     ENABLED: bool = os.getenv("ENABLE_TELEGRAM_NOTIF", "false").lower() == "true"
 
 
+class SpecialUserConfig:
+    """Cấu hình đặc biệt cho nhân viên cụ thể"""
+    # Định nghĩa các user đặc biệt: {user_id: {"voice_text": "...", "cooldown_hours": ...}}
+    SPECIAL_USERS = {
+        "7980041": {
+            "voice_text": "Chào anh Thanh",
+            "cooldown_hours": 1
+        }
+    }
+    
+    @classmethod
+    def is_special_user(cls, user_id):
+        return str(user_id) in cls.SPECIAL_USERS
+    
+    @classmethod
+    def get_voice_text(cls, user_id):
+        return cls.SPECIAL_USERS.get(str(user_id), {}).get("voice_text")
+    
+    @classmethod
+    def get_cooldown_seconds(cls, user_id):
+        hours = cls.SPECIAL_USERS.get(str(user_id), {}).get("cooldown_hours", 0)
+        return hours * 3600
+
+
 class WebhookConfig:
     """Webhook configuration for attendance notifications."""
     USER_WEBHOOK_URL: str = os.getenv("USER_WEBHOOK_URL", "https://voice-cheking.bittechx.cloud/api/webhooks/user")
@@ -307,4 +331,5 @@ __all__ = [
     "WebhookConfig",
     "TelegramConfig",
     "ReportSystemConfig",
+    "SpecialUserConfig",
 ]

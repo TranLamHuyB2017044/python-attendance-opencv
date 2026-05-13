@@ -6,7 +6,7 @@ import cv2
 import requests
 import threading
 import queue
-from src.config import RecognitionConfig, CAPTURES_DIR, MODELS_DIR, ApiConfig, CameraConfig, WebhookConfig, TelegramConfig
+from src.config import RecognitionConfig, CAPTURES_DIR, MODELS_DIR, ApiConfig, CameraConfig, WebhookConfig, TelegramConfig, SpecialUserConfig
 
 from src.attendance.mongodb_mgr import mongo_db
 from src.utils.string_utils import remove_accents
@@ -52,9 +52,11 @@ class FaceTracker:
         else:
             logger.info("[Tracker] Anti-Spoofing DISABLED")
 
-        # ─── Sequential Webhook Queue ──────────────────────────────────────
-        # Đảm bảo Webhook được gửi tuần tự từng cái một (FIFO) qua 1 Worker duy nhất
-        self.webhook_queue = queue.Queue()
+        # ─── Priority Webhook Queue ──────────────────────────────────────
+        # Sử dụng PriorityQueue thay vì FIFO để ưu tiên IN/OUT trước Unknown
+        self.webhook_queue = queue.PriorityQueue()
+        self.webhook_sequence = 0
+        self.webhook_lock = threading.Lock()
         self.webhook_worker_thread = threading.Thread(target=self._webhook_worker, daemon=True)
         self.webhook_worker_thread.start()
 
@@ -62,7 +64,7 @@ class FaceTracker:
         """Worker thread xử lý Webhook tuần tự."""
         while True:
             try:
-                task_data = self.webhook_queue.get()
+                priority, sequence, task_data = self.webhook_queue.get()
                 if task_data is None: break
                 
                 self._execute_webhook_task(**task_data)
@@ -74,7 +76,7 @@ class FaceTracker:
                 logger.error(f"Webhook Worker error: {e}")
 
     def _execute_webhook_task(self, user_id, user_name, status, is_unknown=False, custom_voice_text=None, image=None):
-        """Thực thi gửi Webhook thực tế (được gọi từ Worker) với cơ chế Retry 3 lần."""
+        """Thực thi gửi Webhook thực tế (được gọi từ Worker) với cơ chế Retry theo loại event."""
         try:
             from src.utils.string_utils import remove_accents
             from src.utils.time_manager import time_mgr
@@ -84,27 +86,31 @@ class FaceTracker:
             time_str = vn_now.strftime("%H:%M:%S")
             name_no_accents = remove_accents(user_name)
             
-            employee = mongo_db.employees.find_one({"user_id": str(user_id)}) or {}
-            gender = employee.get("sex", "Nam")
-            
-            prefix = "anh"
-            if str(gender).lower() in ["nữ", "nu", "female", "f"]:
-                prefix = "chị"
-
-            name_parts = user_name.strip().split()
-            name_only = name_parts[-1] if name_parts else user_name
-            short_name = f"{prefix} {name_only}"
-
-            if custom_voice_text:
-                voice_text = custom_voice_text
-            elif status in ["IN", "OUT"]:
-                voice_text = f"{short_name} đã chấm công"
-            elif status == "SPOOF":
-                voice_text = "Cảnh báo: Phát hiện hành vi giả mạo khuôn mặt"
-            elif status == "COOLDOWN":
-                voice_text = f"{short_name} đã truy cập gần đây"
+            # Kiểm tra user đặc biệt để dùng voice text riêng
+            if SpecialUserConfig.is_special_user(user_id):
+                voice_text = SpecialUserConfig.get_voice_text(user_id)
             else:
-                voice_text = "Xin vui lòng thử lại"
+                employee = mongo_db.employees.find_one({"user_id": str(user_id)}) or {}
+                gender = employee.get("sex", "Nam")
+                
+                prefix = "anh"
+                if str(gender).lower() in ["nữ", "nu", "female", "f"]:
+                    prefix = "chị"
+
+                name_parts = user_name.strip().split()
+                name_only = name_parts[-1] if name_parts else user_name
+                short_name = f"{prefix} {name_only}"
+
+                if custom_voice_text:
+                    voice_text = custom_voice_text
+                elif status in ["IN", "OUT"]:
+                    voice_text = f"{short_name} đã chấm công"
+                elif status == "SPOOF":
+                    voice_text = "Cảnh báo: Phát hiện hành vi giả mạo khuôn mặt"
+                elif status == "COOLDOWN":
+                    voice_text = f"{short_name} đã truy cập gần đây"
+                else:
+                    voice_text = "Xin vui lòng thử lại"
 
             payload = {
                 "user_id": user_id,
@@ -114,8 +120,15 @@ class FaceTracker:
                 "time": time_str
             }
 
-            # === RETRY LOGIC (3 LẦN) ===
-            max_retries = 3
+            # === RETRY LOGIC THEO LOẠI EVENT ===
+            if status in ("IN", "OUT"):
+                max_retries = 3
+            elif status == "COOLDOWN":
+                max_retries = 2
+            elif status == "SPOOF":
+                max_retries = 1
+            else:
+                max_retries = 1
             last_error = "Unknown"
             
             for attempt in range(1, max_retries + 1):
@@ -173,6 +186,42 @@ class FaceTracker:
             logger.error(f"Lỗi nghiêm trọng trong _execute_webhook_task: {e}")
             return False
 
+    def _webhook_priority(self, status, is_unknown):
+        """Tính độ ưu tiên cho webhook dựa trên trạng thái và loại người dùng"""
+        if status in ("IN", "OUT"):
+            return 0
+        if status == "COOLDOWN":
+            return 1
+        if status == "SPOOF":
+            return 4
+        if is_unknown:
+            return 5
+        return 3
+    
+    def _unknown_voice_text(self, attempt):
+        """Trả về text voice cho unknown theo attempt, hoặc None nếu không đọc"""
+        if attempt in (1, 5):
+            return "Xin vui lòng thử lại"
+        if attempt in (3, 7):
+            return "Vui lòng nhìn thẳng vào camera và tháo khẩu trang"
+        return None
+    
+    def _drop_pending_unknowns(self):
+        """Drop tất cả các task unknown đang chờ trong queue"""
+        temp_queue = []
+        try:
+            while True:
+                try:
+                    item = self.webhook_queue.get_nowait()
+                    priority, sequence, task_data = item
+                    if not task_data.get('is_unknown'):
+                        temp_queue.append(item)
+                except queue.Empty:
+                    break
+        finally:
+            for item in temp_queue:
+                self.webhook_queue.put(item)
+    
     def _send_telegram_alert(self, title, details, image=None):
         """Sends an enhanced Telegram alert with device and shift info."""
         if not TelegramConfig.ENABLED:
@@ -216,7 +265,7 @@ class FaceTracker:
         except Exception as e:
             logger.error(f"Error sending enhanced Telegram alert: {e}")
 
-    def _send_user_webhook(self, user_id, user_name, status, is_unknown=False, custom_voice_text=None, image=None):
+    def _send_user_webhook(self, user_id, user_name, status, is_unknown=False, custom_voice_text=None, image=None, unknown_attempt=0):
         """
         Sends user detection info to the configured webhook URL in a background thread.
         
@@ -224,6 +273,14 @@ class FaceTracker:
         - Known users: Max 1 webhook per 15 minutes per user_id
         - Unknown faces: Max 10 webhooks total, reset when any known user checks in
         """
+        # Xử lý unknown voice text theo attempt
+        if is_unknown and not custom_voice_text:
+            voice_text = self._unknown_voice_text(unknown_attempt)
+            if not voice_text:
+                logger.info(f"[Tracker] Unknown attempt #{unknown_attempt}: Không gửi voice webhook (im lặng)")
+                return
+            custom_voice_text = voice_text
+        
         # Ghi vào Log Bus local (cho UI)
         try:
             from src.utils.webhook_log_bus import push_sent
@@ -266,16 +323,26 @@ class FaceTracker:
 
             if self.unknown_webhook_count > 0:
                 self.unknown_webhook_count = 0
-
-        # Đẩy vào Queue để xử lý tuần tự
-        self.webhook_queue.put({
+        
+        # Drop pending unknowns nếu đây là known user (IN/OUT hoặc COOLDOWN)
+        if not is_unknown and status in ("IN", "OUT", "COOLDOWN"):
+            self._drop_pending_unknowns()
+        
+        # Đẩy vào Queue với priority
+        priority = self._webhook_priority(status, is_unknown)
+        with self.webhook_lock:
+            self.webhook_sequence += 1
+            sequence = self.webhook_sequence
+        
+        task_data = {
             'user_id': user_id,
             'user_name': user_name,
             'status': status,
             'is_unknown': is_unknown,
             'custom_voice_text': custom_voice_text,
             'image': image
-        })
+        }
+        self.webhook_queue.put((priority, sequence, task_data))
 
     def _get_center(self, bbox):
         return (int((bbox[0] + bbox[2]) / 2), int((bbox[1] + bbox[3]) / 2))
@@ -780,18 +847,26 @@ class FaceTracker:
                         else:
                             target_cid = user_data.get('company_id') or active_company
                             
-                            # Check session-based cooldown for UI
+                            # Check session-based cooldown for UI (support special user cooldown)
                             in_cooldown = False
+                            # Lấy cooldown seconds từ config đặc biệt nếu có, ngược lại dùng mặc định
+                            if SpecialUserConfig.is_special_user(user_id):
+                                cooldown_seconds = SpecialUserConfig.get_cooldown_seconds(user_id)
+                            else:
+                                cooldown_seconds = RecognitionConfig.COOLDOWN_SECONDS
+                            
                             if not RecognitionConfig.TEST_MODE and user_id in self.user_cooldowns:
                                 elapsed = current_time - self.user_cooldowns[user_id]
-                                if elapsed < RecognitionConfig.COOLDOWN_SECONDS and RecognitionConfig.COOLDOWN_SECONDS > 0:
+                                if elapsed < cooldown_seconds and cooldown_seconds > 0:
                                     in_cooldown = True
 
                             if in_cooldown:
                                 f_data['status'] = 'COOLDOWN'
                                 f_data['user_data'] = user_data
-                                f_data['cooldown_remaining'] = int(RecognitionConfig.COOLDOWN_SECONDS - (current_time - self.user_cooldowns[user_id]))
-                                self._send_user_webhook(user_id, user_name, "COOLDOWN", is_unknown=False)
+                                f_data['cooldown_remaining'] = int(cooldown_seconds - (current_time - self.user_cooldowns[user_id]))
+                                # Nếu là user đặc biệt, không gửi webhook COOLDOWN
+                                if not SpecialUserConfig.is_special_user(user_id):
+                                    self._send_user_webhook(user_id, user_name, "COOLDOWN", is_unknown=False)
                             elif f_data['status'] == 'RECOGNIZED_SILENT':
                                 # SILENT MODE: Just update user_data for UI, NO logging, NO webhook
                                 f_data['user_data'] = user_data
@@ -821,7 +896,7 @@ class FaceTracker:
                             if f_data['unknown_attempts'] % 3 == 0:
                                 voice_text = "Vui lòng nhìn thẳng vào camera và tháo khẩu trang"
                             
-                            logger.warning(f"[Recognition] ❌ Fail #{f_data['unknown_attempts']} - Voice: {voice_text}")
+                            logger.warning(f"[Recognition] ❌ Fail #{f_data['unknown_attempts']}")
                             
                             # Cấp phát tên video cho người lạ (Nếu đã quá 10 lần thì mới coi là người lạ thực sự để gửi Telegram)
                             if f_data['unknown_attempts'] >= 10:
@@ -833,7 +908,7 @@ class FaceTracker:
                                     f_data['video_path'] = str(v_path)
                                 
                                 self._send_telegram_alert("PHAT HIEN NGUOI LA", f"Phát hiện người lạ trước camera (Đã quét {f_data['unknown_attempts']} lần)", image=frame)
-                                self._send_user_webhook("Unknown", "Nguoi la", "unknown", is_unknown=True, custom_voice_text=voice_text)
+                                self._send_user_webhook("Unknown", "Nguoi la", "unknown", is_unknown=True, unknown_attempt=f_data['unknown_attempts'])
                                 # Báo cáo lên Dashboard trung tâm
                                 report_service.report_error(
                                     message=f"CẢNH BÁO NGƯỜI LẠ: Phát hiện đối tượng lạ trước camera (Đã quét {f_data['unknown_attempts']} lần)",
@@ -842,7 +917,7 @@ class FaceTracker:
                                 )
                             else:
                                 # Gửi voice cách nhau 1 giây
-                                self._send_user_webhook("Unknown", "Nguoi la", "unknown", is_unknown=True, custom_voice_text=voice_text)
+                                self._send_user_webhook("Unknown", "Nguoi la", "unknown", is_unknown=True, unknown_attempt=f_data['unknown_attempts'])
 
                         f_data['status'] = 'RETRY_WAIT'
                 else:
