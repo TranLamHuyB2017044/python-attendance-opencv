@@ -78,15 +78,30 @@ def _build_device_block() -> str:
 # ---------------------------------------------------------------------------
 
 def _send_request(url, data=None, files=None):
-    """Internal helper to send requests to Telegram API."""
-    try:
-        response = requests.post(url, data=data, files=files, timeout=10)
-        if response.status_code != 200:
-            logger.warning(f"Telegram API error: {response.status_code} - {response.text}")
-        return response
-    except Exception as e:
-        logger.error(f"Failed to send Telegram notification: {e}")
-        return None
+    """Internal helper to send requests to Telegram API with simple retry logic."""
+    import time
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(url, data=data, files=files, timeout=15)
+            if response.status_code == 200:
+                return response
+            
+            logger.warning(f"Telegram API error (Attempt {attempt+1}): {response.status_code} - {response.text}")
+            if response.status_code == 429: # Too many requests
+                time.sleep(5)
+                continue
+                
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            logger.warning(f"Telegram connection error (Attempt {attempt+1}): {e}")
+            if attempt < max_retries - 1:
+                time.sleep(2) # Đợi 2 giây trước khi thử lại
+                continue
+            logger.error(f"Failed to send Telegram notification after {max_retries} attempts: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected error in Telegram notification: {e}")
+            break
+    return None
 
 
 # ---------------------------------------------------------------------------
