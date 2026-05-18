@@ -836,7 +836,7 @@ class AttendanceUI:
             user_id = values[0]
             user_name = values[1]
             # Call the new function to show images
-            self.show_user_images_ui(user_id, user_name, parent=root, attendance_manager=attendance_manager)
+            self.show_user_images_ui(user_id, user_name, parent=root, attendance_manager=attendance_manager, mongo_db=mongo_db)
 
         def on_hard_delete():
             sel = tree.selection()
@@ -938,10 +938,15 @@ class AttendanceUI:
 
         root.mainloop()
 
-    def show_user_images_ui(self, user_id: str, user_name: str, parent=None, attendance_manager=None):
+    def show_user_images_ui(self, user_id: str, user_name: str, parent=None, attendance_manager=None, mongo_db=None):
         """
         Displays a window with two tabs: Enrollment Images and Attendance Images for a specific user.
+        Supports multi-select, bulk delete, and delete all.
         """
+        from src.attendance.mongodb_mgr import mongo_db as _global_mongo_db
+        if mongo_db is None:
+            mongo_db = _global_mongo_db
+
         if parent:
             root = ctk.CTkToplevel(parent)
             root.transient(parent)
@@ -951,165 +956,432 @@ class AttendanceUI:
             _apply_icon(root)
             
         root.title(f"Ảnh của {user_name} (ID: {user_id})")
-        root.geometry("800x600")
+        root.geometry("960x700")
         root.attributes('-topmost', False)
         root.focus_force()
 
-        ctk.CTkLabel(root, text=f"Ảnh của {user_name} (ID: {user_id})", font=("Arial", 20, "bold"), text_color="#1f6aa5").pack(pady=15)
+        ctk.CTkLabel(root, text=f"Ảnh của {user_name} (ID: {user_id})", font=("Arial", 20, "bold"), text_color="#1f6aa5").pack(pady=(15, 5))
 
-        tabview = ctk.CTkTabview(root, width=750, height=450)
+        # ── Selection state ──────────────────────────────────────────────────────
+        enroll_selected: dict = {}   # key = (point_id, image_id) -> frame_widget
+        attend_selected: dict = {}   # key = log_id -> frame_widget
+        COLOR_NORMAL = "#2b2b2b"
+        COLOR_SELECTED = "#1f6aa5"
+
+        # ── helper: preview dialog ──────────────────────────────────────────────
+        def _open_preview(img_pil: Image.Image, caption: str = ""):
+            """Open a full-size image preview window."""
+            preview = ctk.CTkToplevel(root)
+            preview.title(f"Xem ảnh – {caption}")
+            preview.attributes('-topmost', True)
+            preview.focus_force()
+            _apply_icon(preview)
+
+            # Scale image to fit 700×700 while keeping aspect ratio
+            max_size = 700
+            w, h = img_pil.size
+            scale = min(max_size / w, max_size / h, 1.0)
+            disp_w, disp_h = max(1, int(w * scale)), max(1, int(h * scale))
+            preview.geometry(f"{disp_w + 40}x{disp_h + 100}")
+
+            big_img = ctk.CTkImage(light_image=img_pil, dark_image=img_pil, size=(disp_w, disp_h))
+            lbl = ctk.CTkLabel(preview, image=big_img, text="")
+            lbl._image = big_img
+            lbl.pack(padx=20, pady=10)
+
+            if caption:
+                ctk.CTkLabel(preview, text=caption, font=("Arial", 11), text_color="gray").pack()
+            ctk.CTkButton(preview, text="Đóng", command=preview.destroy, width=120).pack(pady=10)
+
+        # ── helper: download dialog ─────────────────────────────────────────────
+        def _download_image(img_pil: Image.Image, default_name: str):
+            """Save image to a user-chosen location."""
+            from tkinter import filedialog
+            path = filedialog.asksaveasfilename(
+                parent=root,
+                defaultextension=".jpg",
+                initialfile=default_name,
+                filetypes=[("JPEG Image", "*.jpg"), ("PNG Image", "*.png"), ("All Files", "*.*")]
+            )
+            if path:
+                try:
+                    img_pil.save(path)
+                    messagebox.showinfo("Thành công", f"Đã lưu ảnh:\n{path}")
+                except Exception as e:
+                    messagebox.showerror("Lỗi", f"Không thể lưu ảnh: {e}")
+
+        tabview = ctk.CTkTabview(root, width=920, height=530)
         tabview.pack(pady=5, padx=20, fill="both", expand=True)
 
         tabview.add("Ảnh Đăng Ký")
         tabview.add("Ảnh Chấm Công")
 
-        # Enrollment Images Tab
-        enrollment_frame = ctk.CTkScrollableFrame(tabview.tab("Ảnh Đăng Ký"))
-        enrollment_frame.pack(fill="both", expand=True)
-        
-        # Attendance Images Tab
-        attendance_frame = ctk.CTkScrollableFrame(tabview.tab("Ảnh Chấm Công"))
-        attendance_frame.pack(fill="both", expand=True)
+        # ── Enrollment tab layout ───────────────────────────────────────────────
+        enroll_tab = tabview.tab("Ảnh Đăng Ký")
 
+        # Enrollment Action bar (bottom)
+        enroll_bar = ctk.CTkFrame(enroll_tab, fg_color="#1e1e1e", corner_radius=8)
+        enroll_bar.pack(side="bottom", fill="x", pady=(4, 0), padx=4)
+
+        enroll_sel_label = ctk.CTkLabel(enroll_bar, text="Chưa chọn ảnh nào", font=("Arial", 12), text_color="#aaaaaa")
+        enroll_sel_label.pack(side="left", padx=10)
+
+        def _refresh_enroll_bar():
+            n = len(enroll_selected)
+            if n == 0:
+                enroll_sel_label.configure(text="Chưa chọn ảnh nào", text_color="#aaaaaa")
+            else:
+                enroll_sel_label.configure(text=f"✔ Đã chọn {n} ảnh", text_color="#1f9aff")
+
+        btn_bar_right_e = ctk.CTkFrame(enroll_bar, fg_color="transparent")
+        btn_bar_right_e.pack(side="right", padx=6, pady=4)
+
+        def _delete_selected_enrollment():
+            if not enroll_selected:
+                messagebox.showwarning("Cảnh báo", "Chưa chọn ảnh nào!")
+                return
+            n = len(enroll_selected)
+            if not messagebox.askyesno("Xác nhận", f"Xóa {n} ảnh đã chọn?"):
+                return
+            errors = []
+            keys_to_del = list(enroll_selected.keys())
+            for (p_id, i_id) in keys_to_del:
+                try:
+                    ok = attendance_manager.delete_point(p_id) if attendance_manager else False
+                    if ok:
+                        mongo_db.delete_enrollment_image(i_id)
+                        frame = enroll_selected.pop((p_id, i_id), None)
+                        if frame:
+                            frame.destroy()
+                    else:
+                        errors.append(i_id)
+                except Exception as ex:
+                    errors.append(str(ex))
+            _refresh_enroll_bar()
+            if errors:
+                messagebox.showerror("Lỗi", f"Không thể xóa {len(errors)} ảnh.")
+            else:
+                messagebox.showinfo("Thành công", f"Đã xóa {n} ảnh.")
+
+        def _delete_all_enrollment():
+            if not messagebox.askyesno(
+                "Xác nhận xóa tất cả",
+                f"Bạn có chắc muốn xóa TẤT CẢ ảnh đăng ký của {user_name}?\n\nHành động này không thể hoàn tác!"
+            ):
+                return
+            qdrant_ok = attendance_manager.delete_user_points(user_id) if attendance_manager else False
+            mongo_ok  = mongo_db.delete_enrollment_images_by_user(user_id)
+            if qdrant_ok and mongo_ok:
+                mongo_db.update_employee_has_face(user_id, False)
+                messagebox.showinfo("Thành công", f"Đã xóa tất cả ảnh đăng ký của {user_name}.")
+                enroll_selected.clear()
+                for w in enrollment_grid_frame.winfo_children():
+                    w.destroy()
+                _refresh_enroll_bar()
+                _load_enrollment_images()
+            else:
+                messagebox.showerror("Lỗi", "Không thể xóa toàn bộ ảnh. Kiểm tra log.")
+
+        if self.session_role == "admin":
+            ctk.CTkButton(btn_bar_right_e, text="🗑 Xóa đã chọn", width=130, height=30,
+                          fg_color="#c0392b", hover_color="#922b21",
+                          command=_delete_selected_enrollment).pack(side="left", padx=4)
+            ctk.CTkButton(btn_bar_right_e, text="☠ Xóa tất cả", width=120, height=30,
+                          fg_color="#7b0000", hover_color="#5a0000",
+                          command=_delete_all_enrollment).pack(side="left", padx=4)
+
+        enrollment_scroll = ctk.CTkScrollableFrame(enroll_tab)
+        enrollment_scroll.pack(fill="both", expand=True)
+
+        # Inner frame for grid layout
+        enrollment_grid_frame = ctk.CTkFrame(enrollment_scroll, fg_color="transparent")
+        enrollment_grid_frame.pack(fill="both", expand=True)
+
+        # ── Load enrollment images ──────────────────────────────────────────────
         def _load_enrollment_images():
-            # Add loading label
-            loading_label = ctk.CTkLabel(enrollment_frame, text="⏳ Đang tải ảnh đăng ký...", font=("Arial", 14, "bold"), text_color="#1f6aa5")
-            loading_label.pack(pady=40)
-            root.update_idletasks() # Force UI to show loading label
+            loading_label = ctk.CTkLabel(
+                enrollment_grid_frame, text="⏳ Đang tải ảnh đăng ký...",
+                font=("Arial", 14, "bold"), text_color="#1f6aa5"
+            )
+            loading_label.grid(row=0, column=0, pady=40)
+            root.update_idletasks()
 
             def task():
                 if not attendance_manager:
-                    root.after(0, lambda: [loading_label.destroy(), ctk.CTkLabel(enrollment_frame, text="Lỗi: Không có attendance_manager").pack()])
+                    root.after(0, lambda: [
+                        loading_label.destroy(),
+                        ctk.CTkLabel(enrollment_grid_frame, text="Lỗi: Không có attendance_manager").grid(row=0, column=0)
+                    ])
                     return
 
                 points = attendance_manager.get_user_points(user_id)
                 if not points:
-                    root.after(0, lambda: [loading_label.destroy(), ctk.CTkLabel(enrollment_frame, text="Không tìm thấy ảnh đăng ký.").pack()])
+                    root.after(0, lambda: [
+                        loading_label.destroy(),
+                        ctk.CTkLabel(enrollment_grid_frame, text="Không tìm thấy ảnh đăng ký.").grid(row=0, column=0)
+                    ])
                     return
 
-                # Remove loading label before showing images
                 root.after(0, loading_label.destroy)
 
-                # Grid configuration
-                cols_count = 4 
+                cols_count = 4
                 for i, point in enumerate(points):
                     image_id = point.payload.get("enrollment_image_id")
-                    if not image_id: continue
-
+                    if not image_id:
+                        continue
                     img_data = mongo_db.get_enrollment_image(image_id)
-                    if not img_data: continue
-
+                    if not img_data:
+                        continue
                     try:
-                        img_pil = Image.open(io.BytesIO(img_data))
+                        img_pil = Image.open(io.BytesIO(img_data)).copy()
                         ctk_img = ctk.CTkImage(light_image=img_pil, dark_image=img_pil, size=(150, 150))
-                        
-                        def show_img(idx=i, img=ctk_img, p_id=point.id, i_id=image_id):
-                            img_frame = ctk.CTkFrame(enrollment_frame)
-                            row = idx // cols_count
-                            col = idx % cols_count
-                            img_frame.grid(row=row, column=col, pady=10, padx=10)
-                            
-                            label = ctk.CTkLabel(img_frame, image=img, text="")
-                            label._image = img 
+
+                        def show_img(idx=i, img=ctk_img, raw_pil=img_pil, p_id=point.id, i_id=image_id):
+                            sel_key = (p_id, i_id)
+
+                            border = ctk.CTkFrame(enrollment_grid_frame, fg_color=COLOR_NORMAL,
+                                                  border_width=3, border_color=COLOR_NORMAL, corner_radius=8)
+                            border.grid(row=idx // cols_count, column=idx % cols_count, pady=8, padx=8)
+
+                            img_frame = ctk.CTkFrame(border, fg_color="transparent")
+                            img_frame.pack(padx=3, pady=3)
+
+                            def toggle_select(e, key=sel_key, brd=border, frm=img_frame):
+                                if key in enroll_selected:
+                                    enroll_selected.pop(key)
+                                    brd.configure(border_color=COLOR_NORMAL)
+                                else:
+                                    enroll_selected[key] = brd
+                                    brd.configure(border_color=COLOR_SELECTED)
+                                _refresh_enroll_bar()
+
+                            label = ctk.CTkLabel(img_frame, image=img, text="", cursor="hand2")
+                            label._image = img
                             label.pack()
                             
-                            def delete_enrollment_image(p_id=p_id, img_id=i_id, frame=img_frame):
-                                if messagebox.askyesno("Xác nhận", "Bạn có chắc muốn xóa ảnh này?"):
-                                    if attendance_manager.delete_point(p_id):
-                                        mongo_db.delete_enrollment_image(img_id)
-                                        frame.destroy()
-                                        messagebox.showinfo("Thành công", "Đã xóa ảnh.")
-                                    else:
-                                        messagebox.showerror("Lỗi", "Không thể xóa ảnh khỏi Qdrant.")
+                            # Left-click to select, Double-click to preview
+                            label.bind("<Button-1>", toggle_select)
+                            label.bind("<Double-Button-1>", lambda e, pil=raw_pil, iid=i_id: _open_preview(pil, f"Ảnh đăng ký – {iid}"))
+
+                            ctk.CTkLabel(img_frame, text="Click chọn  DoubleClick xem", font=("Arial", 8), text_color="#666666").pack()
+
+                            # Button row
+                            btn_row = ctk.CTkFrame(img_frame, fg_color="transparent")
+                            btn_row.pack(pady=3)
+
+                            # Download button
+                            ctk.CTkButton(
+                                btn_row, text="⬇", width=40, height=26,
+                                fg_color="#1f6aa5", hover_color="#154c75",
+                                command=lambda pil=raw_pil, iid=i_id: _download_image(pil, f"enroll_{user_id}_{iid}.jpg")
+                            ).pack(side="left", padx=2)
 
                             if self.session_role == "admin":
-                                ctk.CTkButton(img_frame, text="Xóa", command=delete_enrollment_image, fg_color="red").pack(pady=5)
-                        
+                                def delete_one(p_id=p_id, img_id=i_id, brd=border, key=sel_key):
+                                    if messagebox.askyesno("Xác nhận", "Bạn có chắc muốn xóa ảnh này?"):
+                                        if attendance_manager.delete_point(p_id):
+                                            mongo_db.delete_enrollment_image(img_id)
+                                            enroll_selected.pop(key, None)
+                                            _refresh_enroll_bar()
+                                            brd.destroy()
+                                            messagebox.showinfo("Thành công", "Đã xóa ảnh.")
+                                        else:
+                                            messagebox.showerror("Lỗi", "Không thể xóa ảnh khỏi Qdrant.")
+
+                                ctk.CTkButton(
+                                    btn_row, text="Xóa", width=55, height=26,
+                                    fg_color="#e74c3c", hover_color="#c0392b",
+                                    command=delete_one
+                                ).pack(side="left", padx=2)
+
                         root.after(0, show_img)
                     except Exception as e:
                         logger.error(f"Error loading enrollment image: {e}")
 
             threading.Thread(target=task, daemon=True).start()
 
+        # ── Attendance tab layout ───────────────────────────────────────────────
+        attend_tab = tabview.tab("Ảnh Chấm Công")
+
+        # Attendance Action bar (bottom)
+        attend_bar = ctk.CTkFrame(attend_tab, fg_color="#1e1e1e", corner_radius=8)
+        attend_bar.pack(side="bottom", fill="x", pady=(4, 0), padx=4)
+
+        attend_sel_label = ctk.CTkLabel(attend_bar, text="Chưa chọn ảnh nào", font=("Arial", 12), text_color="#aaaaaa")
+        attend_sel_label.pack(side="left", padx=10)
+
+        def _refresh_attend_bar():
+            n = len(attend_selected)
+            if n == 0:
+                attend_sel_label.configure(text="Chưa chọn ảnh nào", text_color="#aaaaaa")
+            else:
+                attend_sel_label.configure(text=f"✔ Đã chọn {n} ảnh", text_color="#1f9aff")
+
+        btn_bar_right_a = ctk.CTkFrame(attend_bar, fg_color="transparent")
+        btn_bar_right_a.pack(side="right", padx=6, pady=4)
+
+        def _delete_selected_attendance():
+            if not attend_selected:
+                messagebox.showwarning("Cảnh báo", "Chưa chọn ảnh nào!")
+                return
+            n = len(attend_selected)
+            if not messagebox.askyesno("Xác nhận", f"Xóa {n} ảnh đã chọn?"):
+                return
+            errors = []
+            keys_to_del = list(attend_selected.keys())
+            for l_id in keys_to_del:
+                try:
+                    if mongo_db.delete_log(l_id):
+                        frame = attend_selected.pop(l_id, None)
+                        if frame:
+                            frame.destroy()
+                    else:
+                        errors.append(l_id)
+                except Exception as ex:
+                    errors.append(str(ex))
+            _refresh_attend_bar()
+            if errors:
+                messagebox.showerror("Lỗi", f"Không thể xóa {len(errors)} ảnh.")
+            else:
+                messagebox.showinfo("Thành công", f"Đã xóa {n} ảnh.")
+
+        def _delete_all_attendance():
+            if not messagebox.askyesno(
+                "Xác nhận xóa tất cả",
+                f"Bạn có chắc muốn xóa TẤT CẢ ảnh chấm công của {user_name}?\n\nHành động này không thể hoàn tác!"
+            ):
+                return
+            logs = mongo_db.get_logs_by_user(user_id)
+            fail = 0
+            for log in logs:
+                if not mongo_db.delete_log(str(log["_id"])):
+                    fail += 1
+            attend_selected.clear()
+            for w in attendance_grid_frame.winfo_children():
+                w.destroy()
+            _refresh_attend_bar()
+            _load_attendance_images()
+            if fail:
+                messagebox.showerror("Lỗi", f"Không thể xóa {fail} ảnh.")
+            else:
+                messagebox.showinfo("Thành công", f"Đã xóa tất cả ảnh chấm công của {user_name}.")
+
+        if self.session_role == "admin":
+            ctk.CTkButton(btn_bar_right_a, text="🗑 Xóa đã chọn", width=130, height=30,
+                          fg_color="#c0392b", hover_color="#922b21",
+                          command=_delete_selected_attendance).pack(side="left", padx=4)
+            ctk.CTkButton(btn_bar_right_a, text="☠ Xóa tất cả", width=120, height=30,
+                          fg_color="#7b0000", hover_color="#5a0000",
+                          command=_delete_all_attendance).pack(side="left", padx=4)
+
+        attendance_scroll = ctk.CTkScrollableFrame(attend_tab)
+        attendance_scroll.pack(fill="both", expand=True)
+
+        attendance_grid_frame = ctk.CTkFrame(attendance_scroll, fg_color="transparent")
+        attendance_grid_frame.pack(fill="both", expand=True)
+
+        # ── Load attendance images ──────────────────────────────────────────────
         def _load_attendance_images():
-            # Add loading label
-            loading_label = ctk.CTkLabel(attendance_frame, text="⏳ Đang tải ảnh chấm công...", font=("Arial", 14, "bold"), text_color="#1f6aa5")
-            loading_label.pack(pady=40)
-            root.update_idletasks() # Force UI to show loading label
+            loading_label = ctk.CTkLabel(
+                attendance_grid_frame, text="⏳ Đang tải ảnh chấm công...",
+                font=("Arial", 14, "bold"), text_color="#1f6aa5"
+            )
+            loading_label.grid(row=0, column=0, pady=40)
+            root.update_idletasks()
 
             def task():
                 logs = mongo_db.get_logs_by_user(user_id)
                 if not logs:
-                    root.after(0, lambda: [loading_label.destroy(), ctk.CTkLabel(attendance_frame, text="Không tìm thấy ảnh chấm công.").pack()])
+                    root.after(0, lambda: [
+                        loading_label.destroy(),
+                        ctk.CTkLabel(attendance_grid_frame, text="Không tìm thấy ảnh chấm công.").grid(row=0, column=0)
+                    ])
                     return
 
-                # Remove loading label before showing images
                 root.after(0, loading_label.destroy)
 
-                # Grid configuration
-                cols_count = 4 
+                cols_count = 4
                 for i, log in enumerate(logs):
                     log_id = str(log["_id"])
                     img_data = mongo_db.get_log_image(log_id)
-                    if not img_data: continue
-
+                    if not img_data:
+                        continue
                     try:
-                        img_pil = Image.open(io.BytesIO(img_data))
+                        img_pil = Image.open(io.BytesIO(img_data)).copy()
+                        ts = log.get("timestamp", "")
+                        status = log.get("status", "")
                         ctk_img = ctk.CTkImage(light_image=img_pil, dark_image=img_pil, size=(150, 150))
-                        
-                        def show_img(idx=i, img=ctk_img, l_id=log_id):
-                            img_frame = ctk.CTkFrame(attendance_frame)
-                            row = idx // cols_count
-                            col = idx % cols_count
-                            img_frame.grid(row=row, column=col, pady=10, padx=10)
-                            
-                            label = ctk.CTkLabel(img_frame, image=img, text="")
-                            label._image = img 
+
+                        def show_img(idx=i, img=ctk_img, raw_pil=img_pil, l_id=log_id, timestamp=ts, st=status):
+                            sel_key = l_id
+
+                            border = ctk.CTkFrame(attendance_grid_frame, fg_color=COLOR_NORMAL,
+                                                  border_width=3, border_color=COLOR_NORMAL, corner_radius=8)
+                            border.grid(row=idx // cols_count, column=idx % cols_count, pady=8, padx=8)
+
+                            img_frame = ctk.CTkFrame(border, fg_color="transparent")
+                            img_frame.pack(padx=3, pady=3)
+
+                            def toggle_select(e, key=sel_key, brd=border):
+                                if key in attend_selected:
+                                    attend_selected.pop(key)
+                                    brd.configure(border_color=COLOR_NORMAL)
+                                else:
+                                    attend_selected[key] = brd
+                                    brd.configure(border_color=COLOR_SELECTED)
+                                _refresh_attend_bar()
+
+                            caption = f"{st} – {timestamp}"
+                            label = ctk.CTkLabel(img_frame, image=img, text="", cursor="hand2")
+                            label._image = img
                             label.pack()
                             
-                            def delete_attendance_image(l_id=l_id, frame=img_frame):
-                                if messagebox.askyesno("Xác nhận", "Bạn có chắc muốn xóa ảnh này?"):
-                                    if mongo_db.delete_log(l_id):
-                                        frame.destroy()
-                                        messagebox.showinfo("Thành công", "Đã xóa ảnh.")
-                                    else:
-                                        messagebox.showerror("Lỗi", "Không thể xóa ảnh khỏi MongoDB.")
+                            label.bind("<Button-1>", toggle_select)
+                            label.bind("<Double-Button-1>", lambda e, pil=raw_pil, cap=caption: _open_preview(pil, cap))
+
+                            # Status and Timestamp label
+                            ts_short = timestamp[:16] if len(timestamp) > 16 else timestamp
+                            ctk.CTkLabel(img_frame, text=f"{st}  {ts_short}", font=("Arial", 9), text_color="gray").pack()
+                            ctk.CTkLabel(img_frame, text="Click chọn  DoubleClick xem", font=("Arial", 8), text_color="#666666").pack()
+
+                            # Button row
+                            btn_row = ctk.CTkFrame(img_frame, fg_color="transparent")
+                            btn_row.pack(pady=3)
+
+                            # Download button
+                            ctk.CTkButton(
+                                btn_row, text="⬇", width=40, height=26,
+                                fg_color="#1f6aa5", hover_color="#154c75",
+                                command=lambda pil=raw_pil, lid=l_id: _download_image(pil, f"attend_{user_id}_{lid}.jpg")
+                            ).pack(side="left", padx=2)
 
                             if self.session_role == "admin":
-                                ctk.CTkButton(img_frame, text="Xóa", command=lambda l_id=l_id, frame=img_frame: delete_attendance_image(l_id, frame), fg_color="red").pack(pady=5)
-                        
+                                def delete_one(l_id=l_id, brd=border, key=sel_key):
+                                    if messagebox.askyesno("Xác nhận", "Bạn có chắc muốn xóa ảnh này?"):
+                                        if mongo_db.delete_log(l_id):
+                                            attend_selected.pop(key, None)
+                                            _refresh_attend_bar()
+                                            brd.destroy()
+                                            messagebox.showinfo("Thành công", "Đã xóa ảnh.")
+                                        else:
+                                            messagebox.showerror("Lỗi", "Không thể xóa ảnh khỏi MongoDB.")
+
+                                ctk.CTkButton(
+                                    btn_row, text="Xóa", width=55, height=26,
+                                    fg_color="#e74c3c", hover_color="#c0392b",
+                                    command=delete_one
+                                ).pack(side="left", padx=2)
+
                         root.after(0, show_img)
                     except Exception as e:
                         logger.error(f"Error loading attendance image: {e}")
 
             threading.Thread(target=task, daemon=True).start()
 
-        # Add "Delete All Enrollment Images" button for admin
-        if self.session_role == "admin":
-            def delete_all_enrollment_images():
-                if messagebox.askyesno("Xác nhận xóa", f"Bạn có chắc muốn xóa TẤT CẢ ảnh đăng ký của nhân viên {user_name} (ID: {user_id}) không?\n\nHành động này không thể hoàn tác!"):
-                    # Delete from Qdrant
-                    qdrant_success = attendance_manager.delete_user_points(user_id)
-                    # Delete from MongoDB
-                    mongo_success = mongo_db.delete_enrollment_images_by_user(user_id)
-
-                    if qdrant_success and mongo_success:
-                        # Update has_face status in MongoDB
-                        mongo_db.update_employee_has_face(user_id, False)
-                        messagebox.showinfo("Thành công", f"Đã xóa tất cả ảnh đăng ký của {user_name}.")
-                        # Refresh the UI
-                        for widget in enrollment_frame.winfo_children():
-                            widget.destroy()
-                        _load_enrollment_images()
-                    else:
-                        messagebox.showerror("Lỗi", "Không thể xóa tất cả ảnh đăng ký. Vui lòng kiểm tra log.")
-
-            ctk.CTkButton(enrollment_frame, text="Xóa TẤT CẢ Ảnh Đăng Ký", command=delete_all_enrollment_images, fg_color="red", hover_color="#8b0000").pack(pady=10)
-
         _load_enrollment_images()
         _load_attendance_images()
 
-        ctk.CTkButton(root, text="Đóng", command=root.destroy).pack(pady=10)
+        ctk.CTkButton(root, text="Đóng", command=root.destroy, width=150).pack(pady=10)
 
         root.mainloop()
 

@@ -107,7 +107,7 @@ def enroll_from_camera(camera, face_rec, attendance, ui):
         target_company = ui.session_company_id
 
     try:
-        while len(samples) < 5:
+        while len(samples) < 10:
             success, frame = camera.read_frame()
             if not success or frame is None:
                 continue
@@ -122,7 +122,7 @@ def enroll_from_camera(camera, face_rec, attendance, ui):
                 faces.sort(key=lambda x: (x.bbox[2]-x.bbox[0])*(x.bbox[3]-x.bbox[1]), reverse=True)
                 bbox = faces[0].bbox.astype(int)
                 cv2.rectangle(display_frame, (bbox[0], bbox[1]), (bbox[2], bbox[3]), (255, 255, 0), 2)
-                cv2.putText(display_frame, f"Mau {len(samples)}/5", (10, 30),
+                cv2.putText(display_frame, f"Mau {len(samples)}/10", (10, 30),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
             else:
                 cv2.putText(display_frame, "Khong tim thay mat!", (10, 30),
@@ -146,7 +146,7 @@ def enroll_from_camera(camera, face_rec, attendance, ui):
                         image_id = mongo_db.save_enrollment_image(user_id, target_company, image_blob)
                         if image_id:
                             enrollment_image_ids.append(image_id)
-                    logger.info(f"Captured sample {len(samples)}/5")
+                    logger.info(f"Captured sample {len(samples)}/10")
                 else:
                     logger.warning("No face detected to capture.")
             
@@ -455,8 +455,9 @@ def handle_edit_logic(attendance, face_rec, ui, camera, parent=None):
                     
                     # Trigger collection
                     samples = []
+                    enrollment_image_ids = []
                     try:
-                        while len(samples) < 5:
+                        while len(samples) < 10:
                             success, frame = camera.read_frame()
                             if not success or frame is None: continue
                             
@@ -468,7 +469,7 @@ def handle_edit_logic(attendance, face_rec, ui, camera, parent=None):
                                 faces.sort(key=lambda x: (x.bbox[2]-x.bbox[0])*(x.bbox[3]-x.bbox[1]), reverse=True)
                                 bbox = faces[0].bbox.astype(int)
                                 cv2.rectangle(display_frame, (bbox[0], bbox[1]), (bbox[2], bbox[3]), (255, 255, 0), 2)
-                                cv2.putText(display_frame, f"Mau {len(samples)}/5", (10, 30), 0, 0.8, (255, 255, 0), 2)
+                                cv2.putText(display_frame, f"Mau {len(samples)}/10", (10, 30), 0, 0.8, (255, 255, 0), 2)
                             else:
                                 cv2.putText(display_frame, "Khong tim thay mat!", (10, 30), 0, 0.8, (0, 0, 255), 2)
                             
@@ -479,12 +480,19 @@ def handle_edit_logic(attendance, face_rec, ui, camera, parent=None):
                             if key == ord('s'):
                                 if faces:
                                     samples.append(faces[0].normed_embedding)
-                                    logger.info(f"Captured sample {len(samples)}/5")
+                                    # Save frame to MongoDB enrollment_images
+                                    enc_ok, enc_img = cv2.imencode('.webp', frame, [int(cv2.IMWRITE_WEBP_QUALITY), 80])
+                                    if enc_ok:
+                                        img_id = mongo_db.save_enrollment_image(str(u_id), target_company, enc_img.tobytes())
+                                        if img_id:
+                                            enrollment_image_ids.append(img_id)
+                                    logger.info(f"Captured sample {len(samples)}/10")
                             elif key == ord('f') and len(samples) >= 1: break
                             elif key in [ord('m'), ord('c')]: break
                         
                         if len(samples) >= 1:
-                            attendance.upsert_user(edit_res["name"], u_id, edit_res["bday"], samples, clear_old=True, company_id=target_company)
+                            attendance.upsert_user(edit_res["name"], u_id, edit_res["bday"], samples, clear_old=True, company_id=target_company, enrollment_image_ids=enrollment_image_ids)
+                            mongo_db.update_employee_has_face(str(u_id), True)
                             from tkinter import messagebox
                             root = tk.Tk(); root.withdraw(); root.attributes("-topmost", False)
                             messagebox.showinfo("Thành công", f"Đã đăng ký khuôn mặt cho {edit_res['name']}")
@@ -522,14 +530,23 @@ def handle_edit_logic(attendance, face_rec, ui, camera, parent=None):
                     
                     if file_paths:
                         samples = []
-                        for fp in file_paths[:5]:
+                        enrollment_image_ids = []
+                        for fp in file_paths[:10]:
                             img = cv2.imdecode(np.fromfile(fp, dtype=np.uint8), cv2.IMREAD_COLOR)
                             if img is not None:
                                 faces = face_rec.detect_and_extract(img)
-                                if faces: samples.append(faces[0].normed_embedding)
+                                if faces:
+                                    samples.append(faces[0].normed_embedding)
+                                    # Save image to MongoDB enrollment_images
+                                    enc_ok, enc_img = cv2.imencode('.webp', img, [int(cv2.IMWRITE_WEBP_QUALITY), 80])
+                                    if enc_ok:
+                                        img_id = mongo_db.save_enrollment_image(str(u_id), target_company, enc_img.tobytes(), image_path=fp)
+                                        if img_id:
+                                            enrollment_image_ids.append(img_id)
                         
                         if len(samples) >= 1:
-                            attendance.upsert_user(edit_res["name"], u_id, edit_res["bday"], samples, clear_old=True, company_id=target_company)
+                            attendance.upsert_user(edit_res["name"], u_id, edit_res["bday"], samples, clear_old=True, company_id=target_company, enrollment_image_ids=enrollment_image_ids)
+                            mongo_db.update_employee_has_face(str(u_id), True)
                             from tkinter import messagebox
                             if parent:
                                 messagebox.showinfo("Thành công", f"Đã cập nhật {len(samples)} ảnh cho {edit_res['name']}", parent=parent)

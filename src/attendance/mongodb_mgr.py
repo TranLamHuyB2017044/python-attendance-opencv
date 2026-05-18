@@ -862,5 +862,20 @@ class MongoDBManager:
             logger.error(f"Failed to save system log: {e}")
             return None
 
+    def update_employee_has_face(self, user_id: str, has_face: bool = True) -> bool:
+        """
+        Update the has_face flag for an employee after enrollment or deletion.
+        """
+        try:
+            self.employees.update_many(
+                {"user_id": str(user_id)},
+                {"$set": {"has_face": has_face, "updated_at": datetime.datetime.utcnow()}}
+            )
+            logger.info(f"MongoDB: Set has_face={has_face} for employee {user_id}")
+            return True
+        except Exception as e:
+            logger.error(f"MongoDB: Failed to update has_face for {user_id}: {e}")
+            return False
+
 # Global instance
 mongo_db = MongoDBManager()
