@@ -916,14 +916,14 @@ class FaceTracker:
                                 self._auto_learn_face(frame, face, user_id, user_name, user_data.get('birthday', 'N/A'), target_cid, attendance_mgr)
                             f_data['unknown_attempts'] = 0
                     else:
-                        f_data['unknown_attempts'] += 1
                         f_data['last_attempt_time'] = current_time
                         f_data['user_data'] = vote
                         
-                        # --- CƠ CHẾ THÔNG BÁO THẤT BẠI (CÁCH NHAU 1 GIÂY) ---
+                        # --- CƠ CHẾ THÔNG BÁO THẤT BẠI (CÁCH NHAU 3 GIÂY) ---
                         last_unknown = f_data.get('last_unknown_alert', 0)
                         if current_time - last_unknown > 3.0:
                             f_data['last_unknown_alert'] = current_time
+                            f_data['unknown_attempts'] += 1
                             
                             voice_text = "Xin vui lòng thử lại"
                             if f_data['unknown_attempts'] % 3 == 0:
