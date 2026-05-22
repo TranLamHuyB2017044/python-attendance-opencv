@@ -846,6 +846,8 @@ class MongoDBManager:
     def save_system_log(self, message, status_code, log_type="ERROR", priority="MEDIUM", devices_info=None):
         """Save a system error/info log to MongoDB for external retrieval."""
         try:
+            from src.utils.time_manager import time_mgr
+            vn_now = time_mgr.get_accurate_time()
             log_entry = {
                 "message": message,
                 "status_code": status_code,
@@ -854,7 +856,8 @@ class MongoDBManager:
                 "devices_info": devices_info or {},
                 "company_id": MongoDbConfig.COMPANY_ID,
                 "system_id": AuthServiceConfig.SYSTEM_ID,
-                "created_at": datetime.datetime.utcnow()
+                "created_at": vn_now,
+                "time_str": vn_now.strftime("%Y-%m-%d %H:%M:%S")
             }
             result = self.system_logs.insert_one(log_entry)
             return str(result.inserted_id)

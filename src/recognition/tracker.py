@@ -123,8 +123,6 @@ class FaceTracker:
             # === RETRY LOGIC THEO LOẠI EVENT ===
             if status in ("IN", "OUT"):
                 max_retries = 3
-            elif status == "COOLDOWN":
-                max_retries = 2
             elif status == "SPOOF":
                 max_retries = 1
             else:

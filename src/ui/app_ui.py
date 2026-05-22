@@ -1966,6 +1966,22 @@ class AttendanceUI:
                 filter_frame = ctk.CTkFrame(detail_win, fg_color="transparent")
                 filter_frame.pack(fill="x", padx=20, pady=(0, 10))
                 
+                # Date filter
+                selected_date_var = tk.StringVar(value="")
+                ctk.CTkLabel(filter_frame, text="Ngày:").pack(side="left", padx=(0, 5))
+                
+                def select_date():
+                    date = AttendanceUI.get_date_form(title="Chọn ngày xem log", parent=detail_win, ok_button_text="CHỌN")
+                    if date:
+                        selected_date_var.set(date)
+                        fetch_sys_logs()
+                
+                date_entry = ctk.CTkEntry(filter_frame, width=120, textvariable=selected_date_var, placeholder_text="Tất cả")
+                date_entry.pack(side="left", padx=(0, 5))
+                date_entry.configure(state="readonly")
+                
+                ctk.CTkButton(filter_frame, text="📅 Chọn ngày", width=120, command=select_date).pack(side="left", padx=(0, 10))
+                
                 error_tree_frame = ctk.CTkFrame(detail_win)
                 error_tree_frame.pack(fill="both", expand=True, padx=20, pady=(0, 20))
                 
@@ -1988,26 +2004,46 @@ class AttendanceUI:
                 err_tree.pack(fill="both", expand=True)
                 
                 def fetch_sys_logs():
+                    import datetime
                     for item in err_tree.get_children(): err_tree.delete(item)
                     if not mongo_db: return
                     try:
-                        logs = list(mongo_db.db.system_logs.find().sort("_id", -1).limit(200))
+                        selected_date = selected_date_var.get()
+                        
+                        if selected_date:
+                            # Filter by date (now all times are stored in Vietnam time)
+                            query = {
+                                "$or": [
+                                    {"time_str": {"$regex": f"^{selected_date}"}},
+                                    {"created_at": {"$gte": datetime.datetime.strptime(selected_date, "%Y-%m-%d"), "$lt": datetime.datetime.strptime(selected_date, "%Y-%m-%d") + datetime.timedelta(days=1)}},
+                                    {"timestamp": {"$gte": datetime.datetime.strptime(selected_date, "%Y-%m-%d"), "$lt": datetime.datetime.strptime(selected_date, "%Y-%m-%d") + datetime.timedelta(days=1)}}
+                                ]
+                            }
+                            logs = list(mongo_db.db.system_logs.find(query).sort("_id", -1).limit(200))
+                        else:
+                            # No date filter, get all
+                            logs = list(mongo_db.db.system_logs.find().sort("_id", -1).limit(200))
+                        
                         for lg in logs:
                             # Handle both log structures
                             # Type 1: From mongodb_sink (logger.py) - has time_str, level, source
                             # Type 2: From save_system_log (report_service.py) - has type, priority, created_at
                             
-                            # Get time
+                            # Get time (now all in Vietnam time, no need to add +7)
                             if "time_str" in lg:
                                 time_val = lg["time_str"]
                             elif "created_at" in lg:
                                 created_at = lg["created_at"]
                                 if isinstance(created_at, datetime.datetime):
-                                    time_val = (created_at + datetime.timedelta(hours=7)).strftime("%Y-%m-%d %H:%M:%S")
+                                    time_val = created_at.strftime("%Y-%m-%d %H:%M:%S")
                                 else:
                                     time_val = str(created_at)
                             elif "timestamp" in lg:
-                                time_val = str(lg["timestamp"])
+                                timestamp = lg["timestamp"]
+                                if isinstance(timestamp, datetime.datetime):
+                                    time_val = timestamp.strftime("%Y-%m-%d %H:%M:%S")
+                                else:
+                                    time_val = str(timestamp)
                             else:
                                 time_val = ""
                             
@@ -2042,9 +2078,14 @@ class AttendanceUI:
                             ))
                     except Exception as e:
                         print("Fetch sys logs error:", e)
+                
+                def view_all():
+                    selected_date_var.set("")
+                    fetch_sys_logs()
                         
                 fetch_sys_logs()
-                ctk.CTkButton(filter_frame, text="LÀM MỚI", width=100, command=fetch_sys_logs).pack(side="left")
+                ctk.CTkButton(filter_frame, text="LÀM MỚI", width=100, command=fetch_sys_logs).pack(side="left", padx=(0, 5))
+                ctk.CTkButton(filter_frame, text="XEM TẤT CẢ", width=120, command=view_all, fg_color="#3498db", hover_color="#2980b9").pack(side="left")
                 
                 def on_msg_db_click(event):
                     sel_item = err_tree.selection()

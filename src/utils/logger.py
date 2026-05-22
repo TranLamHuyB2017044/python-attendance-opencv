@@ -50,10 +50,11 @@ def setup_logger() -> None:
         record = message.record
         try:
             from src.attendance.mongodb_mgr import mongo_db
-            import datetime
+            from src.utils.time_manager import time_mgr
+            vn_now = time_mgr.get_accurate_time()
             doc = {
-                "timestamp": datetime.datetime.utcnow(),
-                "time_str": record["time"].strftime("%Y-%m-%d %H:%M:%S"),
+                "timestamp": vn_now,
+                "time_str": vn_now.strftime("%Y-%m-%d %H:%M:%S"),
                 "level": record["level"].name,
                 "message": record["message"],
                 "source": f"{record['name']}:{record['function']}:{record['line']}"
