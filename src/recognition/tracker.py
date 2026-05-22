@@ -206,21 +206,52 @@ class FaceTracker:
             return "Vui lòng nhìn thẳng vào camera và tháo khẩu trang"
         return None
     
-    def _drop_pending_unknowns(self):
-        """Drop tất cả các task unknown đang chờ trong queue"""
+    def _is_unknown_voice_task(self, task_data):
+        """Chỉ coi là unknown voice task khi là unknown thực sự, không phải spoof."""
+        return bool(task_data.get('is_unknown')) and task_data.get('status') != "SPOOF"
+
+    def _drop_pending_webhooks(self, drop_unknowns=False, drop_cooldowns=False):
+        """Drop các webhook đang chờ theo policy ưu tiên hiện tại."""
         temp_queue = []
+        dropped_unknowns = 0
+        dropped_cooldowns = 0
         try:
             while True:
                 try:
                     item = self.webhook_queue.get_nowait()
                     priority, sequence, task_data = item
-                    if not task_data.get('is_unknown'):
-                        temp_queue.append(item)
+
+                    is_pending_unknown = self._is_unknown_voice_task(task_data)
+                    is_pending_cooldown = task_data.get('status') == "COOLDOWN"
+                    should_drop = (
+                        (drop_unknowns and is_pending_unknown) or
+                        (drop_cooldowns and is_pending_cooldown)
+                    )
+
+                    if should_drop:
+                        if is_pending_unknown:
+                            dropped_unknowns += 1
+                        if is_pending_cooldown:
+                            dropped_cooldowns += 1
+                        self.webhook_queue.task_done()
+                        continue
+
+                    temp_queue.append(item)
+                    self.webhook_queue.task_done()
                 except queue.Empty:
                     break
         finally:
             for item in temp_queue:
                 self.webhook_queue.put(item)
+
+        if dropped_unknowns or dropped_cooldowns:
+            logger.info(
+                "[Tracker] Dropped pending webhooks: unknowns={}, cooldowns={}",
+                dropped_unknowns,
+                dropped_cooldowns
+            )
+        
+        return dropped_unknowns, dropped_cooldowns
     
     def _send_telegram_alert(self, title, details, image=None):
         """Sends an enhanced Telegram alert with device and shift info."""
@@ -325,8 +356,12 @@ class FaceTracker:
                 self.unknown_webhook_count = 0
         
         # Drop pending unknowns nếu đây là known user (IN/OUT hoặc COOLDOWN)
+        # IN/OUT mới sẽ drop thêm cả COOLDOWN đang chờ để nhường lượt đọc chấm công mới.
         if not is_unknown and status in ("IN", "OUT", "COOLDOWN"):
-            self._drop_pending_unknowns()
+            self._drop_pending_webhooks(
+                drop_unknowns=True,
+                drop_cooldowns=status in ("IN", "OUT")
+            )
         
         # Đẩy vào Queue với priority
         priority = self._webhook_priority(status, is_unknown)

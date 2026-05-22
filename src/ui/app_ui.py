@@ -1993,12 +1993,52 @@ class AttendanceUI:
                     try:
                         logs = list(mongo_db.db.system_logs.find().sort("_id", -1).limit(200))
                         for lg in logs:
-                            time_val = lg.get("time_str", str(lg.get("timestamp", "")))
+                            # Handle both log structures
+                            # Type 1: From mongodb_sink (logger.py) - has time_str, level, source
+                            # Type 2: From save_system_log (report_service.py) - has type, priority, created_at
+                            
+                            # Get time
+                            if "time_str" in lg:
+                                time_val = lg["time_str"]
+                            elif "created_at" in lg:
+                                created_at = lg["created_at"]
+                                if isinstance(created_at, datetime.datetime):
+                                    time_val = (created_at + datetime.timedelta(hours=7)).strftime("%Y-%m-%d %H:%M:%S")
+                                else:
+                                    time_val = str(created_at)
+                            elif "timestamp" in lg:
+                                time_val = str(lg["timestamp"])
+                            else:
+                                time_val = ""
+                            
+                            # Get level/type
+                            if "level" in lg:
+                                level_val = lg["level"]
+                            elif "type" in lg:
+                                level_val = lg["type"]
+                            else:
+                                level_val = ""
+                            
+                            # Get source
+                            if "source" in lg:
+                                source_val = lg["source"]
+                            else:
+                                # For type 2 logs, build source from system_id or company_id
+                                source_parts = []
+                                if "system_id" in lg:
+                                    source_parts.append(f"System: {lg['system_id']}")
+                                if "company_id" in lg:
+                                    source_parts.append(f"Company: {lg['company_id']}")
+                                source_val = " | ".join(source_parts) if source_parts else ""
+                            
+                            # Get message
+                            message_val = lg.get("message", "")
+                            
                             err_tree.insert("", tk.END, values=(
                                 time_val,
-                                lg.get("level", ""),
-                                lg.get("source", ""),
-                                lg.get("message", "")
+                                level_val,
+                                source_val,
+                                message_val
                             ))
                     except Exception as e:
                         print("Fetch sys logs error:", e)
