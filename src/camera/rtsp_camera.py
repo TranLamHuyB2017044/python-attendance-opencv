@@ -124,8 +124,22 @@ class RTSPCamera:
         
         return result["cap"] if result["success"] else None
 
-    def connect(self) -> bool:
+    def connect(self, new_url: Optional[str] = None) -> bool:
         """Connect to stream and start background thread."""
+        if new_url is not None:
+            self.rtsp_url = new_url
+            try:
+                self.camera_source = int(self.rtsp_url)
+                self.is_webcam = True
+            except (ValueError, TypeError):
+                self.camera_source = self.rtsp_url
+                self.is_webcam = False
+            logger.info(f"RTSPCamera URL updated to: {self._mask_url(str(self.camera_source))}")
+
+        if not self.camera_source or str(self.camera_source).strip() in ["", "None"]:
+            logger.error("Failed to connect: Camera source (RTSP URL) is empty or not set.")
+            return False
+
         try:
             logger.info(f"Attempting to connect to {'webcam' if self.is_webcam else 'RTSP camera'}...")
             

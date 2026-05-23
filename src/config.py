@@ -50,21 +50,14 @@ class CameraConfig:
     """Camera configuration settings."""
     
     # Detailed components for RTSP
-    IP: str = os.getenv("CAMERA_IP", "192.168.1.1")
-    PORT: int = int(os.getenv("CAMERA_PORT", "554"))
-    USER: str = os.getenv("CAMERA_USER", "admin")
-    PASS: str = os.getenv("CAMERA_PASS", "password")
+    IP: str = ""
+    PORT: int = 554
+    USER: str = ""
+    PASS: str = ""
+    ROI = None
     
-    # Default RTSP template (Ezviz/Imou/Hikvision standard or custom)
-    # If RTSP_URL is already defined in .env, use it directly.
-    # Otherwise, build it from components if they exist.
-    _raw_url = os.getenv("RTSP_URL", "")
-    if _raw_url:
-        RTSP_URL: str = _raw_url
-    elif os.getenv("CAMERA_IP"): # Only build if at least IP is provided
-        RTSP_URL: str = f"rtsp://{USER}:{PASS}@{IP}:{PORT}/ch1/main"
-    else:
-        RTSP_URL: str = "0" # Default to webcam 0
+    # Priority 2: raw RTSP_URL from .env
+    RTSP_URL: str = os.getenv("RTSP_URL", "")
     
     WIDTH: int = int(os.getenv("CAMERA_WIDTH", "1280"))
     HEIGHT: int = int(os.getenv("CAMERA_HEIGHT", "720"))
@@ -84,23 +77,26 @@ class CameraConfig:
             from src.config import MongoDbConfig, RecognitionConfig
             cid = MongoDbConfig.COMPANY_ID
             
-            # 1. Get settings from DB, fallback to current class values (from .env)
-            ip = mongo_db.get_setting("camera_ip", cls.IP, username=cid)
-            port = mongo_db.get_setting("camera_port", str(cls.PORT), username=cid)
-            user = mongo_db.get_setting("camera_user", cls.USER, username=cid)
-            pwd = mongo_db.get_setting("camera_pass", cls.PASS, username=cid)
+            # 1. Get settings from DB, fallback to None (no static env component fallback)
+            ip = mongo_db.get_setting("camera_ip", None, username=cid)
+            port = mongo_db.get_setting("camera_port", None, username=cid)
+            user = mongo_db.get_setting("camera_user", None, username=cid)
+            pwd = mongo_db.get_setting("camera_pass", None, username=cid)
 
-            # 2. Update class attributes
-            cls.IP = ip
-            cls.PORT = int(port)
-            cls.USER = user
-            cls.PASS = pwd
-
-            # 3. Re-build RTSP_URL template
-            # If a full RTSP_URL exists in .env, we keep it, otherwise build from parts
-            raw_env_url = os.getenv("RTSP_URL")
-            if not raw_env_url:
+            # 2. Update class attributes and build RTSP URL if database config is present
+            if ip and user and pwd:
+                cls.IP = ip
+                cls.PORT = int(port or "554")
+                cls.USER = user
+                cls.PASS = pwd
                 cls.RTSP_URL = f"rtsp://{cls.USER}:{cls.PASS}@{cls.IP}:{cls.PORT}/ch1/main"
+            else:
+                # Priority 2: Fallback strictly to .env's RTSP_URL
+                cls.RTSP_URL = os.getenv("RTSP_URL", "")
+                if cls.RTSP_URL:
+                    logger.info("CameraConfig: MongoDB settings incomplete, using RTSP_URL from .env")
+                else:
+                    logger.warning("CameraConfig: No camera config found in MongoDB or .env!")
             
             # 4. Update Recognition & Cooldown Settings
             cooldown_sec = mongo_db.get_setting("detection_cooldown", str(RecognitionConfig.COOLDOWN_SECONDS), username=cid)
@@ -156,8 +152,7 @@ class CameraConfig:
     def validate(cls) -> bool:
         """Validate camera configuration."""
         if not cls.RTSP_URL or cls.RTSP_URL == "":
-            logger.warning("RTSP_URL is not set, using default webcam (index 0)")
-            cls.RTSP_URL = "0"
+            logger.warning("RTSP_URL is not set and no fallback is permitted!")
         return True
 
 

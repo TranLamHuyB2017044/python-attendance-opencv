@@ -129,6 +129,7 @@ def main():
     last_preview_time = 0
     # Đã chuyển sang dùng worker cho preview
     
+    settings_watcher = None
     try:
         from src.attendance.mongodb_mgr import mongo_db
         CameraConfig.load_from_mongodb(mongo_db)
@@ -137,6 +138,11 @@ def main():
         attendance = QdrantAttendanceManager()
         camera = RTSPCamera()
         tracker = FaceTracker(threshold_seconds=2.0)
+        
+        # Start background settings watcher to support hot-reloading (Change Streams or Polling fallback)
+        from src.services.settings_watcher import SettingsWatcher
+        settings_watcher = SettingsWatcher(camera)
+        settings_watcher.start()
         
         # Startup logic moved into loop to ensure notifications only sent after CAMERA success
         system_initialized_notified = False
@@ -334,6 +340,11 @@ def main():
         logger.error(f"Runtime error: {e}")
     finally:
         ping_service.stop()  # Dừng Ping Service khi camera service tắt
+        if settings_watcher:
+            try:
+                settings_watcher.stop()
+            except Exception:
+                pass
         camera.disconnect()
         logger.info("Service shutdown complete.")
 

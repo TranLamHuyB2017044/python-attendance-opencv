@@ -2885,13 +2885,19 @@ class AttendanceUI:
         ctk.CTkButton(change_win, text="XÁC NHẬN ĐỔI", command=do_change, width=200, height=40).pack(pady=20)
         ctk.CTkButton(change_win, text="HỦY", command=change_win.destroy, fg_color="gray").pack()
 
-    @staticmethod
-    def show_system_settings_ui(mongo_db, session_username="GLOBAL", parent=None):
+    def show_system_settings_ui(self, mongo_db, session_username="GLOBAL", parent=None):
         """Modernized UI to manage settings like Group Keys and Camera using CustomTkinter."""
         from src.config import MongoDbConfig
         
-        # Use COMPANY_ID to ensure that settings are physical-machine scoped in DB instead of user-session scoped.
-        config_scope = MongoDbConfig.COMPANY_ID
+        # 1. Determine company scope based on user role and session
+        is_admin = str(self.session_role).lower() == "admin"
+        
+        if is_admin:
+            default_company = MongoDbConfig.COMPANY_ID
+        else:
+            default_company = self.session_company_id or MongoDbConfig.COMPANY_ID
+            
+        config_scope = default_company
         
         if parent:
             root = ctk.CTkToplevel(parent)
@@ -2902,14 +2908,18 @@ class AttendanceUI:
             _apply_icon(root)
             
         root.title("Bittech AI - Cài đặt hệ thống")
-        root.geometry("650x600")
+        root.geometry("650x650")
         root.attributes('-topmost', False)
         root.resizable(False, False)
 
-        ctk.CTkLabel(root, text="CẤU HÌNH HỆ THỐNG", font=("Arial", 20, "bold"), text_color="#1f6aa5").pack(pady=20)
+        ctk.CTkLabel(root, text="CẤU HÌNH HỆ THỐNG", font=("Arial", 20, "bold"), text_color="#1f6aa5").pack(pady=15)
 
         main_frame = ctk.CTkFrame(root)
         main_frame.pack(fill="both", expand=True, padx=20, pady=10)
+
+        # --- Scope Selector Frame (Admin: Dropdown, Company: Readonly label) ---
+        scope_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
+        scope_frame.pack(fill="x", padx=20, pady=(10, 5))
 
         # --- A. CAMERA CONFIG ---
         cam_group = ctk.CTkFrame(main_frame, fg_color="transparent")
@@ -2921,23 +2931,19 @@ class AttendanceUI:
         ctk.CTkLabel(cam_group, text="IP Camera:").grid(row=1, column=0, sticky="w", pady=5)
         e_ip = ctk.CTkEntry(cam_group, width=180, placeholder_text="192.168.1.100")
         e_ip.grid(row=1, column=1, padx=5, sticky="w")
-        e_ip.insert(0, mongo_db.get_setting("camera_ip", "192.168.1.1", username=config_scope))
         
         ctk.CTkLabel(cam_group, text="Port:").grid(row=1, column=2, sticky="w", pady=5, padx=(10, 0))
         e_port = ctk.CTkEntry(cam_group, width=80, placeholder_text="554")
         e_port.grid(row=1, column=3, padx=5, sticky="w")
-        e_port.insert(0, mongo_db.get_setting("camera_port", "554", username=config_scope))
         
         # User & Pass row
         ctk.CTkLabel(cam_group, text="Tài khoản:").grid(row=2, column=0, sticky="w", pady=5)
         e_user = ctk.CTkEntry(cam_group, width=180, placeholder_text="admin")
         e_user.grid(row=2, column=1, padx=5, sticky="w")
-        e_user.insert(0, mongo_db.get_setting("camera_user", "admin", username=config_scope))
         
         ctk.CTkLabel(cam_group, text="Mật khẩu:").grid(row=2, column=2, sticky="w", pady=5, padx=(10, 0))
         e_pass = ctk.CTkEntry(cam_group, width=180, placeholder_text="password", show="*")
         e_pass.grid(row=2, column=3, padx=5, sticky="w")
-        e_pass.insert(0, mongo_db.get_setting("camera_pass", "password", username=config_scope))
 
         # Recognition & Cooldown Settings
         ctk.CTkLabel(cam_group, text="NHẬN DIỆN & KHÓA", font=("Arial", 13, "bold")).grid(row=3, column=0, columnspan=2, sticky="w", pady=(15, 10))
@@ -2945,16 +2951,9 @@ class AttendanceUI:
         ctk.CTkLabel(cam_group, text="Thời gian khóa (phút):").grid(row=4, column=0, sticky="w", pady=5)
         e_cooldown = ctk.CTkEntry(cam_group, width=180, placeholder_text="60")
         e_cooldown.grid(row=4, column=1, padx=5, sticky="w")
-        
-        # Get current cooldown (stored in SECONDS, display in MINUTES)
-        from src.config import RecognitionConfig
-        current_cooldown_sec = int(mongo_db.get_setting("detection_cooldown", str(RecognitionConfig.COOLDOWN_SECONDS), username=config_scope))
-        e_cooldown.insert(0, str(current_cooldown_sec // 60))
 
         # Anti-spoofing toggle
         anti_spoof_var = ctk.StringVar()
-        is_anti_spoof_enabled = str(mongo_db.get_setting("anti_spoofing_enabled", str(RecognitionConfig.ANTI_SPOOFING_ENABLED), username=config_scope)).lower() == "true"
-        anti_spoof_var.set("True" if is_anti_spoof_enabled else "False")
         chk_anti_spoof = ctk.CTkCheckBox(cam_group, text="Bật chống giả mạo (Anti-Spoofing)", variable=anti_spoof_var, onvalue="True", offvalue="False", font=("Arial", 12))
         chk_anti_spoof.grid(row=4, column=2, columnspan=2, padx=(10, 0), pady=5, sticky="w")
         
@@ -2962,8 +2961,84 @@ class AttendanceUI:
         ctk.CTkLabel(cam_group, text="Vùng quét thẻ (ROI):").grid(row=5, column=0, sticky="w", pady=5)
         e_roi = ctk.CTkEntry(cam_group, width=180, placeholder_text="Mặc định (Toàn màn hình)")
         e_roi.grid(row=5, column=1, padx=5, sticky="w")
-        e_roi.insert(0, mongo_db.get_setting("camera_roi", "", username=config_scope))
+
+        # --- B. GROUP KEYS ---
+        keys_group = ctk.CTkFrame(main_frame, fg_color="transparent")
+        keys_group.pack(fill="both", expand=True, padx=20, pady=10)
         
+        ctk.CTkLabel(keys_group, text="GROUP KEYS (Phân cách bởi dấu phẩy)", font=("Arial", 13, "bold")).pack(anchor="w", pady=(0, 5))
+        
+        text_keys = ctk.CTkTextbox(keys_group, height=120, font=("Consolas", 12))
+        text_keys.pack(fill="both", expand=True, pady=5)
+
+        def load_values_for_company(company_id):
+            nonlocal config_scope
+            config_scope = company_id
+            
+            # Load Camera Config
+            ip = mongo_db.get_setting("camera_ip", "192.168.1.1", username=company_id)
+            port = mongo_db.get_setting("camera_port", "554", username=company_id)
+            user = mongo_db.get_setting("camera_user", "admin", username=company_id)
+            pwd = mongo_db.get_setting("camera_pass", "password", username=company_id)
+            
+            e_ip.delete(0, 'end')
+            e_ip.insert(0, ip)
+            e_port.delete(0, 'end')
+            e_port.insert(0, port)
+            e_user.delete(0, 'end')
+            e_user.insert(0, user)
+            e_pass.delete(0, 'end')
+            e_pass.insert(0, pwd)
+            
+            # Load Cooldown
+            from src.config import RecognitionConfig
+            current_cooldown_sec = int(mongo_db.get_setting("detection_cooldown", str(RecognitionConfig.COOLDOWN_SECONDS), username=company_id))
+            e_cooldown.delete(0, 'end')
+            e_cooldown.insert(0, str(current_cooldown_sec // 60))
+            
+            # Load Anti-Spoofing
+            is_anti_spoof_enabled = str(mongo_db.get_setting("anti_spoofing_enabled", str(RecognitionConfig.ANTI_SPOOFING_ENABLED), username=company_id)).lower() == "true"
+            anti_spoof_var.set("True" if is_anti_spoof_enabled else "False")
+            
+            # Load ROI
+            roi_val = mongo_db.get_setting("camera_roi", "", username=company_id)
+            e_roi.delete(0, 'end')
+            e_roi.insert(0, roi_val)
+            
+            # Load Group Keys
+            current_keys = mongo_db.get_setting("group_keys", "", username=company_id)
+            text_keys.delete("1.0", "end")
+            text_keys.insert("1.0", current_keys)
+
+        # Setup Company Selector behavior
+        if is_admin:
+            ctk.CTkLabel(scope_frame, text="Chọn Công ty:", font=("Arial", 12, "bold")).pack(side=tk.LEFT, padx=(0, 10))
+            
+            companies = mongo_db.get_all_companies()
+            company_map = {f"{c['name']} ({c['company_id']})": c['company_id'] for c in companies}
+            
+            default_disp = f"Mặc định ({default_company})"
+            for k, v in list(company_map.items()):
+                if v == default_company:
+                    default_disp = k
+                    break
+            if default_company not in company_map.values():
+                company_map[default_disp] = default_company
+                
+            def on_company_change(selected_disp):
+                sel_cid = company_map.get(selected_disp, default_company)
+                load_values_for_company(sel_cid)
+                
+            company_combo = ctk.CTkComboBox(scope_frame, values=list(company_map.keys()), width=350, command=on_company_change)
+            company_combo.set(default_disp)
+            company_combo.pack(side=tk.LEFT)
+        else:
+            company_name = mongo_db.get_company_name(config_scope)
+            ctk.CTkLabel(scope_frame, text=f"Công ty: {company_name} ({config_scope})", font=("Arial", 13, "bold"), text_color="#1f6aa5").pack(side=tk.LEFT)
+            
+        # Initial population of fields
+        load_values_for_company(config_scope)
+
         def pick_roi():
             import cv2
             from src.camera.rtsp_camera import RTSPCamera
@@ -3067,17 +3142,6 @@ class AttendanceUI:
         roi_btn = ctk.CTkButton(cam_group, text="Vẽ khung Camera", command=pick_roi, width=120, fg_color="#2196F3")
         roi_btn.grid(row=5, column=2, columnspan=2, padx=(10, 0), pady=5, sticky="w")
 
-        # --- B. GROUP KEYS ---
-        keys_group = ctk.CTkFrame(main_frame, fg_color="transparent")
-        keys_group.pack(fill="both", expand=True, padx=20, pady=10)
-        
-        ctk.CTkLabel(keys_group, text="GROUP KEYS (Phân cách bởi dấu phẩy)", font=("Arial", 13, "bold")).pack(anchor="w", pady=(0, 5))
-        
-        current_keys = mongo_db.get_setting("group_keys", "", username=config_scope)
-        text_keys = ctk.CTkTextbox(keys_group, height=120, font=("Consolas", 12))
-        text_keys.pack(fill="both", expand=True, pady=5)
-        text_keys.insert("1.0", current_keys)
-
         def save_settings():
             new_keys = text_keys.get("1.0", "end-1c").strip()
             ip = e_ip.get().strip()
@@ -3135,7 +3199,7 @@ class AttendanceUI:
                     CameraConfig.ROI = None
 
                 # Attempt to restart background service if needed, but for now we apply the config
-                messagebox.showinfo("Thành công", "Đã lưu cài đặt hệ thống và cập nhật cấu hình trực tiếp (Live).\nNếu dùng dịch vụ ngầm (Service), Camera sẽ tự nhận luồng mới ở lần kết nối lại tiếp theo.")
+                messagebox.showinfo("Thành công", f"Đã lưu cài đặt hệ thống và cập nhật cấu hình trực tiếp (Live) cho công ty '{config_scope}'.\nNếu dùng dịch vụ ngầm (Service), Camera sẽ tự nhận luồng mới ở lần kết nối lại tiếp theo.")
                 root.destroy()
             else:
                 messagebox.showerror("Lỗi", "Không thể lưu cài đặt!")
