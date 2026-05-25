@@ -228,7 +228,7 @@ class FaceTracker:
         """Chỉ coi là unknown voice task khi là unknown thực sự, không phải spoof."""
         return bool(task_data.get('is_unknown')) and task_data.get('status') != "SPOOF"
 
-    def _drop_pending_webhooks(self, drop_unknowns=False, drop_cooldowns=False):
+    def _drop_pending_webhooks(self, drop_unknowns=False, drop_cooldowns=False, cooldown_user_id=None):
         """Drop các webhook đang chờ theo policy ưu tiên hiện tại."""
         temp_queue = []
         dropped_unknowns = 0
@@ -241,10 +241,16 @@ class FaceTracker:
 
                     is_pending_unknown = self._is_unknown_voice_task(task_data)
                     is_pending_cooldown = task_data.get('status') == "COOLDOWN"
-                    should_drop = (
-                        (drop_unknowns and is_pending_unknown) or
-                        (drop_cooldowns and is_pending_cooldown)
-                    )
+                    
+                    should_drop = False
+                    if drop_unknowns and is_pending_unknown:
+                        should_drop = True
+                    if drop_cooldowns and is_pending_cooldown:
+                        if cooldown_user_id is None:
+                            should_drop = True
+                        else:
+                            if task_data.get('user_id') == cooldown_user_id:
+                                should_drop = True
 
                     if should_drop:
                         if is_pending_unknown:
@@ -374,11 +380,14 @@ class FaceTracker:
                 self.unknown_webhook_count = 0
         
         # Drop pending TRƯỚC khi enqueue webhook mới:
-        # - COOLDOWN: drop Unknown đang chờ (ưu tiên voice cooldown nhân viên đã biết)
+        # - Unknown: drop tất cả Unknown đang chờ
+        # - COOLDOWN: drop Unknown đang chờ và COOLDOWN của cùng user đang chờ
         # - IN/OUT: drop cả Unknown + COOLDOWN đang chờ (ưu tiên chấm công mới)
-        if not is_unknown:
+        if is_unknown:
+            self._drop_pending_webhooks(drop_unknowns=True, drop_cooldowns=False)
+        else:
             if status == "COOLDOWN":
-                self._drop_pending_webhooks(drop_unknowns=True, drop_cooldowns=False)
+                self._drop_pending_webhooks(drop_unknowns=True, drop_cooldowns=True, cooldown_user_id=user_id)
             elif status in ("IN", "OUT"):
                 self._drop_pending_webhooks(drop_unknowns=True, drop_cooldowns=True)
             # Cập nhật thời gian enqueue người hợp lệ cuối cùng
