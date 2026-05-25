@@ -34,6 +34,8 @@ class FaceTracker:
         # Webhook cooldown for known users: {user_id: last_webhook_time}
         # Prevents sending duplicate webhooks within 15 minutes
         self.webhook_sent_time: Dict[str, float] = {}
+        # Chống gửi voice COOLDOWN lặp trong cùng kỳ user_cooldowns
+        self.cooldown_webhook_sent: Dict[str, float] = {}
         
         # Track successful webhook counts per user session
         self.successful_webhook_counts: Dict[str, int] = {}
@@ -379,6 +381,119 @@ class FaceTracker:
 
     def _get_center(self, bbox):
         return (int((bbox[0] + bbox[2]) / 2), int((bbox[1] + bbox[3]) / 2))
+
+    def _get_cooldown_seconds(self, user_id: str) -> int:
+        if SpecialUserConfig.is_special_user(user_id):
+            return SpecialUserConfig.get_cooldown_seconds(user_id)
+        return RecognitionConfig.COOLDOWN_SECONDS
+
+    def _is_user_in_cooldown(self, user_id: str, current_time: float) -> bool:
+        """True khi user vừa chấm công và còn trong DETECTION_COOLDOWN (theo user_id, không khóa cả phiên đứng)."""
+        if RecognitionConfig.TEST_MODE or not user_id:
+            return False
+        if user_id not in self.user_cooldowns:
+            return False
+        cooldown_seconds = self._get_cooldown_seconds(user_id)
+        if cooldown_seconds <= 0:
+            return False
+        return (current_time - self.user_cooldowns[user_id]) < cooldown_seconds
+
+    def _should_send_cooldown_webhook(self, user_id: str, current_time: float) -> bool:
+        """Tối đa một webhook COOLDOWN voice mỗi kỳ cooldown/user."""
+        if SpecialUserConfig.is_special_user(user_id):
+            return False
+        cooldown_seconds = self._get_cooldown_seconds(user_id)
+        if cooldown_seconds <= 0:
+            return True
+        last = self.cooldown_webhook_sent.get(str(user_id), 0)
+        if current_time - last < cooldown_seconds:
+            return False
+        self.cooldown_webhook_sent[str(user_id)] = current_time
+        return True
+
+    def _sync_track_cooldown_ui(self, f_data: Dict[str, Any], current_time: float) -> None:
+        """Cập nhật trạng thái COOLDOWN trên track khi user_id còn trong cooldown."""
+        user_data = f_data.get('user_data') or {}
+        user_id = user_data.get('user_id')
+        if not user_id or not self._is_user_in_cooldown(user_id, current_time):
+            return
+        if f_data.get('status') == 'RECOGNIZED_SILENT':
+            return
+        f_data['status'] = 'COOLDOWN'
+        elapsed = current_time - self.user_cooldowns[user_id]
+        f_data['cooldown_remaining'] = int(
+            max(0, self._get_cooldown_seconds(user_id) - elapsed)
+        )
+
+    def _resolve_can_attempt(self, f_data: Dict[str, Any], current_time: float) -> bool:
+        """
+        Quyết định có gather embedding + gọi recognize hay không.
+        - Trong cooldown (user_id): không recognize, không spam webhook.
+        - Hết cooldown: cho recognize lại trên cùng track (không cần rời camera 1s).
+        """
+        status = f_data.get('status')
+
+        if status == 'RECOGNIZED_SILENT':
+            return False
+
+        user_data = f_data.get('user_data') or {}
+        user_id = user_data.get('user_id')
+
+        if user_id and self._is_user_in_cooldown(user_id, current_time):
+            return False
+
+        if status in ('RECOGNIZED', 'COOLDOWN'):
+            if user_id:
+                f_data['status'] = 'GATHERING'
+                f_data['gathering_embeddings'] = []
+                f_data['gather_count'] = 0
+                return True
+            return False
+
+        if status == 'GATHERING':
+            return True
+
+        if status in ('RETRY_WAIT', 'UNAUTHORIZED', 'SPOOF_DETECTED'):
+            f_data['status'] = 'GATHERING'
+            f_data['gathering_embeddings'] = []
+            f_data['gather_count'] = 0
+            return True
+
+        return False
+
+    def _is_good_recognition_frame(self, face, frame) -> tuple:
+        """
+        Chỉ thu thập frame frontal, đủ lớn và đủ nét cho recognize.
+        Returns (is_good, hint_message_for_ui).
+        """
+        if frame is None:
+            return False, "Khong co frame..."
+
+        int_bbox = face.bbox.astype(int)
+        x1, y1 = max(0, int_bbox[0]), max(0, int_bbox[1])
+        x2, y2 = min(frame.shape[1], int_bbox[2]), min(frame.shape[0], int_bbox[3])
+        crop_h, crop_w = y2 - y1, x2 - x1
+        if crop_h <= 40 or crop_w <= 40:
+            return False, "Mat qua nho hoac sat bien..."
+
+        crop = frame[y1:y2, x1:x2]
+        if crop.size == 0:
+            return False, "Khong cat duoc vung mat..."
+
+        blur_val = cv2.Laplacian(
+            cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), cv2.CV_64F
+        ).var()
+        if blur_val < RecognitionConfig.MIN_BLUR_VARIANCE:
+            return False, "Anh mo, vui long dung yen..."
+
+        if hasattr(face, 'pose') and face.pose is not None:
+            pitch, yaw = float(face.pose[0]), float(face.pose[1])
+            if abs(yaw) > RecognitionConfig.MAX_YAW_DEG:
+                return False, "Vui long nhin thang vao camera (dung xoay ngang)..."
+            if abs(pitch) > RecognitionConfig.MAX_PITCH_DEG:
+                return False, "Anh mo hoac goc nghieng..."
+
+        return True, ""
 
     def _render_frame_for_video(self, frame, detected_faces):
         """Tạo một bản sao frame có vẽ các khung detect để lưu vào video."""
@@ -758,43 +873,14 @@ class FaceTracker:
             # ———————————————————————————
             # RECOGNITION ATTEMPT LOGIC
             # ———————————————————————————
-            wait_time = current_time - f_data.get('last_attempt_time', 0)
-            can_attempt = False
-            
-            if f_data['status'] in ['RECOGNIZED', 'COOLDOWN']:
-                can_attempt = False
-            elif f_data['status'] == 'GATHERING':
-                can_attempt = True
-            elif f_data['status'] in ['RETRY_WAIT', 'UNAUTHORIZED', 'SPOOF_DETECTED']:
-                # Xóa độ trễ (delay) để retry ngay lập tức (Real-time quét)
-                f_data['status'] = 'GATHERING'
-                f_data['gathering_embeddings'] = [] 
-                f_data['gather_count'] = 0
-                can_attempt = True
+            self._sync_track_cooldown_ui(f_data, current_time)
+            can_attempt = self._resolve_can_attempt(f_data, current_time)
 
             if can_attempt and face_rec is not None and attendance_mgr is not None:
                 GATHER_FRAMES = getattr(RecognitionConfig, 'GATHER_FRAMES', 1)
 
-                # Bộ lọc Face Quality
-                is_good_frame = True
-                
-                # 1. Box Bounds & Blur
-                int_bbox = face.bbox.astype(int)
-                x1, y1 = max(0, int_bbox[0]), max(0, int_bbox[1])
-                x2, y2 = min(frame.shape[1], int_bbox[2]), min(frame.shape[0], int_bbox[3])
-                crop_h, crop_w = y2 - y1, x2 - x1
-                # Skip nếu mặt quá sát biên hoặc quá nhỏ
-                if crop_h > 40 and crop_w > 40:
-                    crop = frame[y1:y2, x1:x2]
-                    if crop.size > 0:
-                        blur_val = cv2.Laplacian(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), cv2.CV_64F).var()
-                        if blur_val < 30: is_good_frame = False
-                
-                # 2. Angle (Pitch/Yaw/Roll)
-                if hasattr(face, 'pose') and face.pose is not None:
-                    pitch, yaw, roll = face.pose
-                    if abs(yaw) > 30 or abs(pitch) > 30: is_good_frame = False
-                
+                is_good_frame, quality_hint = self._is_good_recognition_frame(face, frame)
+
                 if is_good_frame:
                     # Step 1: Extract embedding
                     face_rec.rec_model.get(frame, face)
@@ -804,7 +890,7 @@ class FaceTracker:
                     f_data.setdefault('gathering_embeddings', []).append(emb)
                     f_data['gather_count'] = len(f_data['gathering_embeddings'])
                 else:
-                    face.name = "Anh mo hoac goc nghieng..."
+                    face.name = quality_hint or "Anh mo hoac goc nghieng..."
                     f_data['gather_count'] = len(f_data.setdefault('gathering_embeddings', []))
 
                 # Step 3: Check if reached count
@@ -880,25 +966,16 @@ class FaceTracker:
                         else:
                             target_cid = user_data.get('company_id') or active_company
                             
-                            # Check session-based cooldown for UI (support special user cooldown)
-                            in_cooldown = False
-                            # Lấy cooldown seconds từ config đặc biệt nếu có, ngược lại dùng mặc định
-                            if SpecialUserConfig.is_special_user(user_id):
-                                cooldown_seconds = SpecialUserConfig.get_cooldown_seconds(user_id)
-                            else:
-                                cooldown_seconds = RecognitionConfig.COOLDOWN_SECONDS
-                            
-                            if not RecognitionConfig.TEST_MODE and user_id in self.user_cooldowns:
-                                elapsed = current_time - self.user_cooldowns[user_id]
-                                if elapsed < cooldown_seconds and cooldown_seconds > 0:
-                                    in_cooldown = True
+                            in_cooldown = self._is_user_in_cooldown(user_id, current_time)
 
                             if in_cooldown:
                                 f_data['status'] = 'COOLDOWN'
                                 f_data['user_data'] = user_data
-                                f_data['cooldown_remaining'] = int(cooldown_seconds - (current_time - self.user_cooldowns[user_id]))
-                                # Nếu là user đặc biệt, không gửi webhook COOLDOWN
-                                if not SpecialUserConfig.is_special_user(user_id):
+                                cooldown_seconds = self._get_cooldown_seconds(user_id)
+                                f_data['cooldown_remaining'] = int(
+                                    cooldown_seconds - (current_time - self.user_cooldowns[user_id])
+                                )
+                                if self._should_send_cooldown_webhook(user_id, current_time):
                                     self._send_user_webhook(user_id, user_name, "COOLDOWN", is_unknown=False)
                             elif f_data['status'] == 'RECOGNIZED_SILENT':
                                 # SILENT MODE: Just update user_data for UI, NO logging, NO webhook
@@ -983,7 +1060,7 @@ class FaceTracker:
                             face.name = name # JUST THE NAME, silent mode
                         elif uid in self.user_cooldowns:
                             elapsed = current_time - self.user_cooldowns[uid]
-                            remain_sec = int(max(0, RecognitionConfig.COOLDOWN_SECONDS - elapsed))
+                            remain_sec = int(max(0, self._get_cooldown_seconds(uid) - elapsed))
                             if remain_sec > 0:
                                 if remain_sec >= 60:
                                     face.name = f"{name} (Cho: {remain_sec // 60}p {remain_sec % 60}s)"

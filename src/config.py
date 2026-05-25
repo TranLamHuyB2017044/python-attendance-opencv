@@ -180,6 +180,12 @@ class RecognitionConfig:
     # Số frame thu thập trước khi kết luận nhận diện (Best-of-N voting)
     # Tăng lên nhưng chậm hơn (khuyên dùng 3-7), giảm xuống nhưng nhanh hơn
     GATHER_FRAMES: int = int(os.getenv("GATHER_FRAMES", "3"))
+
+    # Ngưỡng chất lượng frame trước gather/recognize
+    MIN_BLUR_VARIANCE: float = float(os.getenv("MIN_BLUR_VARIANCE", "50"))
+    # Chỉ siết xoay ngang (yaw); pitch giữ 30° cho người cao/thấp trước camera
+    MAX_YAW_DEG: float = float(os.getenv("MAX_YAW_DEG", "20"))
+    MAX_PITCH_DEG: float = float(os.getenv("MAX_PITCH_DEG", "30"))
     
     # Cấu hình mới cho detection đa góc
     DETECTION_CONFIDENCE: float = float(os.getenv("DETECTION_CONFIDENCE", "0.5"))  # Giảm confidence threshold
