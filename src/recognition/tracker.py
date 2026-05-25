@@ -75,9 +75,9 @@ class FaceTracker:
                 is_low_priority = is_unknown or status == "COOLDOWN"
                 task_enqueue_time = time.time()
                 
-                # Đối với Unknown hoặc COOLDOWN: Đợi 0.7s để chờ xem có người hợp lệ (IN/OUT) xuất hiện không
+                # Đối với Unknown hoặc COOLDOWN: Đợi 2s để chờ xem có người hợp lệ (IN/OUT) xuất hiện không
                 if is_low_priority:
-                    delay_seconds = 0.7
+                    delay_seconds = 2.0
                     logger.debug(f"[Webhook Worker] Low-priority task ({status}): waiting {delay_seconds}s before processing...")
                     time.sleep(delay_seconds)
                     
