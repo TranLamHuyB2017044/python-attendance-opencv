@@ -59,6 +59,7 @@ class FaceTracker:
         self.webhook_queue = queue.PriorityQueue()
         self.webhook_sequence = 0
         self.webhook_lock = threading.Lock()
+        self.last_known_user_time = 0  # Theo dõi thời gian enqueue người hợp lệ cuối cùng
         self.webhook_worker_thread = threading.Thread(target=self._webhook_worker, daemon=True)
         self.webhook_worker_thread.start()
 
@@ -68,6 +69,23 @@ class FaceTracker:
             try:
                 priority, sequence, task_data = self.webhook_queue.get()
                 if task_data is None: break
+                
+                is_unknown = task_data.get('is_unknown', False)
+                status = task_data.get('status')
+                is_low_priority = is_unknown or status == "COOLDOWN"
+                task_enqueue_time = time.time()
+                
+                # Đối với Unknown hoặc COOLDOWN: Đợi 0.7s để chờ xem có người hợp lệ (IN/OUT) xuất hiện không
+                if is_low_priority:
+                    delay_seconds = 0.7
+                    logger.debug(f"[Webhook Worker] Low-priority task ({status}): waiting {delay_seconds}s before processing...")
+                    time.sleep(delay_seconds)
+                    
+                    # Kiểm tra xem có người hợp lệ (IN/OUT) nào được enqueue trong thời gian chờ không
+                    if self.last_known_user_time > task_enqueue_time:
+                        logger.info(f"[Webhook Worker] Skipping low-priority task ({status}) - known user enqueued during delay")
+                        self.webhook_queue.task_done()
+                        continue
                 
                 self._execute_webhook_task(**task_data)
                 
@@ -363,6 +381,8 @@ class FaceTracker:
                 self._drop_pending_webhooks(drop_unknowns=True, drop_cooldowns=False)
             elif status in ("IN", "OUT"):
                 self._drop_pending_webhooks(drop_unknowns=True, drop_cooldowns=True)
+            # Cập nhật thời gian enqueue người hợp lệ cuối cùng
+            self.last_known_user_time = time.time()
         
         # Đẩy vào Queue với priority
         priority = self._webhook_priority(status, is_unknown)
