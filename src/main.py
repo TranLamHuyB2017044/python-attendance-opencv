@@ -817,7 +817,6 @@ def main():
                     if getattr(ui, 'use_local_webcam', False):
                         new_url = "0"
                     else:
-                        from src.config import MongoDbConfig
                         company_scope = ui.session_company_id or MongoDbConfig.COMPANY_ID
                         new_url = CameraConfig.resolve_rtsp_url_for_company(mongo_db, company_scope)
                         CameraConfig.RTSP_URL = new_url
@@ -934,7 +933,6 @@ def main():
 
             elif ui.current_state == STATE_TEST_CAM:
                 # 1. Refresh camera config from DB before connecting (User-specific)
-                from src.config import MongoDbConfig
                 company_scope = ui.session_company_id or MongoDbConfig.COMPANY_ID
                 new_url = CameraConfig.resolve_rtsp_url_for_company(mongo_db, company_scope)
                 CameraConfig.RTSP_URL = new_url

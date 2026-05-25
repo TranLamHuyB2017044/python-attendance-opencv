@@ -355,13 +355,14 @@ class FaceTracker:
             if self.unknown_webhook_count > 0:
                 self.unknown_webhook_count = 0
         
-        # Drop pending unknowns nếu đây là known user (IN/OUT hoặc COOLDOWN)
-        # IN/OUT mới sẽ drop thêm cả COOLDOWN đang chờ để nhường lượt đọc chấm công mới.
-        if not is_unknown and status in ("IN", "OUT", "COOLDOWN"):
-            self._drop_pending_webhooks(
-                drop_unknowns=True,
-                drop_cooldowns=status in ("IN", "OUT")
-            )
+        # Drop pending TRƯỚC khi enqueue webhook mới:
+        # - COOLDOWN: drop Unknown đang chờ (ưu tiên voice cooldown nhân viên đã biết)
+        # - IN/OUT: drop cả Unknown + COOLDOWN đang chờ (ưu tiên chấm công mới)
+        if not is_unknown:
+            if status == "COOLDOWN":
+                self._drop_pending_webhooks(drop_unknowns=True, drop_cooldowns=False)
+            elif status in ("IN", "OUT"):
+                self._drop_pending_webhooks(drop_unknowns=True, drop_cooldowns=True)
         
         # Đẩy vào Queue với priority
         priority = self._webhook_priority(status, is_unknown)
@@ -428,26 +429,21 @@ class FaceTracker:
     def _resolve_can_attempt(self, f_data: Dict[str, Any], current_time: float) -> bool:
         """
         Quyết định có gather embedding + gọi recognize hay không.
+        - Đã nhận diện (identity_locked): chỉ cập nhật bbox, không recognize lại.
         - Trong cooldown (user_id): không recognize, không spam webhook.
-        - Hết cooldown: cho recognize lại trên cùng track (không cần rời camera 1s).
         """
+        if f_data.get('identity_locked'):
+            return False
+
         status = f_data.get('status')
 
-        if status == 'RECOGNIZED_SILENT':
+        if status in ('RECOGNIZED_SILENT', 'RECOGNIZED', 'COOLDOWN'):
             return False
 
         user_data = f_data.get('user_data') or {}
         user_id = user_data.get('user_id')
 
         if user_id and self._is_user_in_cooldown(user_id, current_time):
-            return False
-
-        if status in ('RECOGNIZED', 'COOLDOWN'):
-            if user_id:
-                f_data['status'] = 'GATHERING'
-                f_data['gathering_embeddings'] = []
-                f_data['gather_count'] = 0
-                return True
             return False
 
         if status == 'GATHERING':
@@ -460,6 +456,29 @@ class FaceTracker:
             return True
 
         return False
+
+    def _get_face_pose_deg(self, face) -> tuple:
+        """Trả về (pitch_deg, yaw_deg) hoặc (None, None) nếu không ước lượng được."""
+        if hasattr(face, 'pose') and face.pose is not None and len(face.pose) >= 2:
+            return float(face.pose[0]), float(face.pose[1])
+
+        kps = getattr(face, 'kps', None)
+        if kps is None or len(kps) < 3:
+            return None, None
+
+        left_eye = np.asarray(kps[0], dtype=float)
+        right_eye = np.asarray(kps[1], dtype=float)
+        nose = np.asarray(kps[2], dtype=float)
+        eye_center = (left_eye + right_eye) / 2.0
+        eye_dist = float(np.linalg.norm(right_eye - left_eye))
+        if eye_dist < 1e-3:
+            return None, None
+
+        yaw_ratio = (nose[0] - eye_center[0]) / eye_dist
+        pitch_ratio = (nose[1] - eye_center[1]) / eye_dist
+        yaw_deg = float(np.degrees(np.arctan(yaw_ratio * 1.8)))
+        pitch_deg = float(np.degrees(np.arctan(pitch_ratio * 1.4)))
+        return pitch_deg, yaw_deg
 
     def _is_good_recognition_frame(self, face, frame) -> tuple:
         """
@@ -486,12 +505,16 @@ class FaceTracker:
         if blur_val < RecognitionConfig.MIN_BLUR_VARIANCE:
             return False, "Anh mo, vui long dung yen..."
 
-        if hasattr(face, 'pose') and face.pose is not None:
-            pitch, yaw = float(face.pose[0]), float(face.pose[1])
-            if abs(yaw) > RecognitionConfig.MAX_YAW_DEG:
-                return False, "Vui long nhin thang vao camera (dung xoay ngang)..."
-            if abs(pitch) > RecognitionConfig.MAX_PITCH_DEG:
-                return False, "Anh mo hoac goc nghieng..."
+        pitch, yaw = self._get_face_pose_deg(face)
+        if pitch is None or yaw is None:
+            return False, "Khong do duoc goc mat, nhin thang vao camera..."
+
+        max_yaw = RecognitionConfig.MAX_YAW_DEG
+        max_pitch = min(RecognitionConfig.MAX_PITCH_DEG, 20.0)
+        if abs(yaw) > max_yaw:
+            return False, "Vui long nhin thang vao camera (dung xoay ngang)..."
+        if abs(pitch) > max_pitch:
+            return False, "Vui long ngua dau nhin thang vao camera..."
 
         return True, ""
 
@@ -823,9 +846,16 @@ class FaceTracker:
                 
                 dist = np.sqrt((center[0] - prev_center[0])**2 + (center[1] - prev_center[1])**2)
                 iou = calc_iou(face.bbox, prev_bbox)
-                
-                if dist < max_dist or iou > 0.15: 
-                    score = dist - iou * 1000 # High IoU rewards match heavily
+
+                track_max_dist = max_dist
+                min_iou = 0.15
+                if f_data.get('identity_locked'):
+                    # Đã nhận diện: ưu tiên giữ track khi cúi đầu (IoU giảm nhưng tâm vẫn gần)
+                    track_max_dist = max(220, max(face_w, face_h) * 1.8)
+                    min_iou = 0.05
+
+                if dist < track_max_dist or iou > min_iou:
+                    score = dist - iou * 1000
                     potential_matches.append((score, f_id))
             
             if potential_matches:
@@ -843,6 +873,7 @@ class FaceTracker:
                     'bbox':               face.bbox,
                     'status':             'GATHERING',
                     'user_data':          None,
+                    'identity_locked':    False,
                     'cooldown_remaining': 0,
                     'unknown_attempts':   0,
                     'last_attempt_time':  0,
@@ -919,6 +950,7 @@ class FaceTracker:
                             logger.info(f"[Recognition] ⏩ {vote.get('name')} (ID: {vote.get('user_id')}) is INACTIVE. Processing silently (UI only).")
                             f_data['status'] = 'RECOGNIZED_SILENT'
                             f_data['user_data'] = vote
+                            f_data['identity_locked'] = True
                             # We don't 'continue' here, we let it proceed to fill face info for UI, 
                             # but we will skip actions later.
                         else:
@@ -963,6 +995,7 @@ class FaceTracker:
                             if f_data['status'] != 'RECOGNIZED_SILENT':
                                 f_data['status'] = 'RECOGNIZED'
                             f_data['user_data'] = user_data
+                            f_data['identity_locked'] = True
                         else:
                             target_cid = user_data.get('company_id') or active_company
                             
@@ -971,6 +1004,7 @@ class FaceTracker:
                             if in_cooldown:
                                 f_data['status'] = 'COOLDOWN'
                                 f_data['user_data'] = user_data
+                                f_data['identity_locked'] = True
                                 cooldown_seconds = self._get_cooldown_seconds(user_id)
                                 f_data['cooldown_remaining'] = int(
                                     cooldown_seconds - (current_time - self.user_cooldowns[user_id])
@@ -980,10 +1014,12 @@ class FaceTracker:
                             elif f_data['status'] == 'RECOGNIZED_SILENT':
                                 # SILENT MODE: Just update user_data for UI, NO logging, NO webhook
                                 f_data['user_data'] = user_data
+                                f_data['identity_locked'] = True
                                 logger.debug(f"[Recognition] SILENT: {user_name} recognized but all actions skipped.")
                             else:
                                 f_data['status'] = 'RECOGNIZED'
                                 f_data['user_data'] = user_data
+                                f_data['identity_locked'] = True
                                 self.user_cooldowns[user_id] = current_time
                                 _, status = self._save_log_with_bbox(frame, face, user_id, user_name, user_data.get('score', 0.0),
                                                                        company_id=target_cid, birthday=user_data.get('birthday', 'N/A'), vector_count=user_data.get('vector_count', 0), f_data=f_data)
@@ -995,10 +1031,17 @@ class FaceTracker:
                     else:
                         f_data['last_attempt_time'] = current_time
                         f_data['user_data'] = vote
+
+                        # Chỉ báo unknown khi frame vừa dùng đủ chất lượng (tránh spam khi cúi đầu/xoay ngang)
+                        is_good_fail, _ = self._is_good_recognition_frame(face, frame)
+                        if not is_good_fail:
+                            f_data['status'] = 'RETRY_WAIT'
+                            updated_faces_map[matched_id] = f_data
+                            continue
                         
-                        # --- CƠ CHẾ THÔNG BÁO THẤT BẠI (CÁCH NHAU 3 GIÂY) ---
+                        # --- CƠ CHẾ THÔNG BÁO THẤT BẠI (CÁCH NHAU 5 GIÂY) ---
                         last_unknown = f_data.get('last_unknown_alert', 0)
-                        if current_time - last_unknown > 3.0:
+                        if current_time - last_unknown > 5.0:
                             f_data['last_unknown_alert'] = current_time
                             f_data['unknown_attempts'] += 1
                             

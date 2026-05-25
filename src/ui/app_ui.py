@@ -2908,7 +2908,7 @@ class AttendanceUI:
             _apply_icon(root)
             
         root.title("Bittech AI - Cài đặt hệ thống")
-        root.geometry("650x720")
+        root.geometry("700x760")
         root.attributes('-topmost', False)
         root.resizable(False, False)
 
@@ -2936,52 +2936,57 @@ class AttendanceUI:
         e_port = ctk.CTkEntry(cam_group, width=80, placeholder_text="554")
         e_port.grid(row=1, column=3, padx=5, sticky="w")
         
-        # User & Pass row
+        # Tài khoản
         ctk.CTkLabel(cam_group, text="Tài khoản:").grid(row=2, column=0, sticky="w", pady=5)
-        e_user = ctk.CTkEntry(cam_group, width=180, placeholder_text="admin")
-        e_user.grid(row=2, column=1, padx=5, sticky="w")
-        
-        ctk.CTkLabel(cam_group, text="Mật khẩu:").grid(row=2, column=2, sticky="w", pady=5, padx=(10, 0))
-        pass_frame = ctk.CTkFrame(cam_group, fg_color="transparent")
-        pass_frame.grid(row=2, column=3, padx=5, sticky="w")
-        e_pass = ctk.CTkEntry(pass_frame, width=140, placeholder_text="password", show="*")
-        e_pass.pack(side=tk.LEFT)
+        e_user = ctk.CTkEntry(cam_group, width=220, placeholder_text="admin")
+        e_user.grid(row=2, column=1, columnspan=3, padx=5, sticky="w")
+
+        # Mật khẩu — hàng riêng, nút hiện/ẩn không bị che
+        ctk.CTkLabel(cam_group, text="Mật khẩu:").grid(row=3, column=0, sticky="w", pady=5)
+        e_pass = ctk.CTkEntry(cam_group, width=320, placeholder_text="password", show="*")
+        e_pass.grid(row=3, column=1, columnspan=2, padx=5, sticky="w")
+
+        _pwd_visible = {"on": False}
 
         def toggle_cam_pwd_visibility():
-            if e_pass.cget("show") == "*":
+            _pwd_visible["on"] = not _pwd_visible["on"]
+            if _pwd_visible["on"]:
                 e_pass.configure(show="")
+                btn_show_pwd.configure(text="Ẩn mật khẩu", fg_color="#c0392b", hover_color="#a93226")
             else:
                 e_pass.configure(show="*")
+                btn_show_pwd.configure(text="Hiện mật khẩu", fg_color="#3498db", hover_color="#2980b9")
 
-        chk_show_cam_pwd = ctk.CTkCheckBox(
-            pass_frame, text="Hiện", width=50, command=toggle_cam_pwd_visibility,
-            font=("Arial", 10), checkbox_width=16, checkbox_height=16,
+        btn_show_pwd = ctk.CTkButton(
+            cam_group, text="Hiện mật khẩu", command=toggle_cam_pwd_visibility,
+            width=120, height=28, font=("Arial", 11, "bold"),
+            fg_color="#3498db", hover_color="#2980b9",
         )
-        chk_show_cam_pwd.pack(side=tk.LEFT, padx=(6, 0))
+        btn_show_pwd.grid(row=3, column=3, padx=5, sticky="w")
 
-        ctk.CTkLabel(cam_group, text="Đường dẫn RTSP:").grid(row=3, column=0, sticky="w", pady=5)
+        ctk.CTkLabel(cam_group, text="Đường dẫn RTSP:").grid(row=4, column=0, sticky="w", pady=5)
         e_rtsp_path = ctk.CTkEntry(
-            cam_group, width=300,
+            cam_group, width=360,
             placeholder_text="/cam/realmonitor?channel=1&subtype=0 hoặc /ch1/main",
         )
-        e_rtsp_path.grid(row=3, column=1, columnspan=2, padx=5, sticky="w")
+        e_rtsp_path.grid(row=4, column=1, columnspan=2, padx=5, sticky="w")
 
         # Recognition & Cooldown Settings
-        ctk.CTkLabel(cam_group, text="NHẬN DIỆN & KHÓA", font=("Arial", 13, "bold")).grid(row=4, column=0, columnspan=2, sticky="w", pady=(15, 10))
+        ctk.CTkLabel(cam_group, text="NHẬN DIỆN & KHÓA", font=("Arial", 13, "bold")).grid(row=5, column=0, columnspan=2, sticky="w", pady=(15, 10))
         
-        ctk.CTkLabel(cam_group, text="Thời gian khóa (phút):").grid(row=5, column=0, sticky="w", pady=5)
+        ctk.CTkLabel(cam_group, text="Thời gian khóa (phút):").grid(row=6, column=0, sticky="w", pady=5)
         e_cooldown = ctk.CTkEntry(cam_group, width=180, placeholder_text="60")
-        e_cooldown.grid(row=5, column=1, padx=5, sticky="w")
+        e_cooldown.grid(row=6, column=1, padx=5, sticky="w")
 
         # Anti-spoofing toggle
         anti_spoof_var = ctk.StringVar()
         chk_anti_spoof = ctk.CTkCheckBox(cam_group, text="Bật chống giả mạo (Anti-Spoofing)", variable=anti_spoof_var, onvalue="True", offvalue="False", font=("Arial", 12))
-        chk_anti_spoof.grid(row=5, column=2, columnspan=2, padx=(10, 0), pady=5, sticky="w")
+        chk_anti_spoof.grid(row=6, column=2, columnspan=2, padx=(10, 0), pady=5, sticky="w")
         
         # ROI config
-        ctk.CTkLabel(cam_group, text="Vùng quét thẻ (ROI):").grid(row=6, column=0, sticky="w", pady=5)
+        ctk.CTkLabel(cam_group, text="Vùng quét thẻ (ROI):").grid(row=7, column=0, sticky="w", pady=5)
         e_roi = ctk.CTkEntry(cam_group, width=180, placeholder_text="Mặc định (Toàn màn hình)")
-        e_roi.grid(row=6, column=1, padx=5, sticky="w")
+        e_roi.grid(row=7, column=1, padx=5, sticky="w")
 
         # --- B. GROUP KEYS ---
         keys_group = ctk.CTkFrame(main_frame, fg_color="transparent")
@@ -3203,17 +3208,17 @@ class AttendanceUI:
             messagebox.showinfo(
                 "Đã điền",
                 f"Đã lấy cấu hình từ .env:\nIP {creds['ip']} | user {creds['user']}\n"
-                "Kiểm tra mật khẩu (bật Hiện) rồi bấm LƯU CÀI ĐẶT."
+                "Kiểm tra mật khẩu (bấm Hiện mật khẩu) rồi bấm LƯU CÀI ĐẶT."
             )
 
         btn_env = ctk.CTkButton(
             cam_group, text="Lấy từ .env", command=fill_camera_from_env,
             width=100, height=28, font=("Arial", 10), fg_color="#6c757d",
         )
-        btn_env.grid(row=3, column=3, padx=5, sticky="w")
+        btn_env.grid(row=4, column=3, padx=5, sticky="w")
 
         roi_btn = ctk.CTkButton(cam_group, text="Vẽ khung Camera", command=pick_roi, width=120, fg_color="#2196F3")
-        roi_btn.grid(row=6, column=2, columnspan=2, padx=(10, 0), pady=5, sticky="w")
+        roi_btn.grid(row=7, column=2, columnspan=2, padx=(10, 0), pady=5, sticky="w")
 
         def save_settings():
             new_keys = text_keys.get("1.0", "end-1c").strip()

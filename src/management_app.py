@@ -469,7 +469,6 @@ def main():
             # ══ STATE: TEST_CAM ══════════════════════════════════════════════
             elif ui.current_state == STATE_TEST_CAM:
                 cam      = _get_camera()
-                from src.config import MongoDbConfig
                 company_scope = ui.session_company_id or MongoDbConfig.COMPANY_ID
                 new_url = CameraConfig.resolve_rtsp_url_for_company(mongo_db, company_scope)
                 CameraConfig.RTSP_URL = new_url
