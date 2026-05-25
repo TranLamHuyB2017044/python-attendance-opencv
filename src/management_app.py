@@ -469,16 +469,12 @@ def main():
             # ══ STATE: TEST_CAM ══════════════════════════════════════════════
             elif ui.current_state == STATE_TEST_CAM:
                 cam      = _get_camera()
-                cam_ip   = mongo_db.get_setting("camera_ip",   CameraConfig.IP,   username=ui.session_username)
-                cam_port = mongo_db.get_setting("camera_port", CameraConfig.PORT, username=ui.session_username)
-                cam_user = mongo_db.get_setting("camera_user", CameraConfig.USER, username=ui.session_username)
-                cam_pass = mongo_db.get_setting("camera_pass", CameraConfig.PASS, username=ui.session_username)
-
-                new_url = f"rtsp://{cam_user}:{cam_pass}@{cam_ip}:{cam_port}/ch1/main"
-                env_url = os.getenv("RTSP_URL")
-                if env_url and str(cam_ip) in env_url:
-                    new_url = env_url
-                if cam_ip.isdigit():
+                from src.config import MongoDbConfig
+                company_scope = ui.session_company_id or MongoDbConfig.COMPANY_ID
+                new_url = CameraConfig.resolve_rtsp_url_for_company(mongo_db, company_scope)
+                CameraConfig.RTSP_URL = new_url
+                cam_ip = mongo_db.get_setting("camera_ip", CameraConfig.IP, username=company_scope)
+                if str(cam_ip).isdigit():
                     new_url = cam_ip
 
                 if str(cam.camera_source) != str(new_url):

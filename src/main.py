@@ -817,16 +817,13 @@ def main():
                     if getattr(ui, 'use_local_webcam', False):
                         new_url = "0"
                     else:
-                        cam_ip = mongo_db.get_setting("camera_ip", CameraConfig.IP, username=ui.session_username)
-                        cam_port = mongo_db.get_setting("camera_port", CameraConfig.PORT, username=ui.session_username)
-                        cam_user = mongo_db.get_setting("camera_user", CameraConfig.USER, username=ui.session_username)
-                        cam_pass = mongo_db.get_setting("camera_pass", CameraConfig.PASS, username=ui.session_username)
-                        
-                        # Use URL directly from centralized CameraConfig
-                        # CameraConfig already handles priority between .env and MongoDB
-                        new_url = CameraConfig.RTSP_URL
-                        
-                        if str(cam_ip).isdigit(): new_url = str(cam_ip)
+                        from src.config import MongoDbConfig
+                        company_scope = ui.session_company_id or MongoDbConfig.COMPANY_ID
+                        new_url = CameraConfig.resolve_rtsp_url_for_company(mongo_db, company_scope)
+                        CameraConfig.RTSP_URL = new_url
+                        cam_ip = mongo_db.get_setting("camera_ip", CameraConfig.IP, username=company_scope)
+                        if str(cam_ip).isdigit():
+                            new_url = str(cam_ip)
                     
                     if str(camera.camera_source) != str(new_url):
                         camera.disconnect()
@@ -937,15 +934,12 @@ def main():
 
             elif ui.current_state == STATE_TEST_CAM:
                 # 1. Refresh camera config from DB before connecting (User-specific)
-                cam_ip = mongo_db.get_setting("camera_ip", CameraConfig.IP, username=ui.session_username)
-                cam_port = mongo_db.get_setting("camera_port", CameraConfig.PORT, username=ui.session_username)
-                cam_user = mongo_db.get_setting("camera_user", CameraConfig.USER, username=ui.session_username)
-                cam_pass = mongo_db.get_setting("camera_pass", CameraConfig.PASS, username=ui.session_username)
-                
-                # Use centralized config as single source of truth
-                new_url = CameraConfig.RTSP_URL
-                
-                if str(cam_ip).isdigit(): new_url = cam_ip # Keep as string for comparison
+                from src.config import MongoDbConfig
+                company_scope = ui.session_company_id or MongoDbConfig.COMPANY_ID
+                new_url = CameraConfig.resolve_rtsp_url_for_company(mongo_db, company_scope)
+                CameraConfig.RTSP_URL = new_url
+                cam_ip = mongo_db.get_setting("camera_ip", CameraConfig.IP, username=company_scope)
+                if str(cam_ip).isdigit(): new_url = cam_ip
                 
                 if str(camera.camera_source) != str(new_url):
                     camera.disconnect()

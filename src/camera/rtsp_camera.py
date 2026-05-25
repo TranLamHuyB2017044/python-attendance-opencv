@@ -1,6 +1,8 @@
+import os
 import time
 import threading
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
+from urllib.parse import urlparse, unquote
 
 import cv2
 import numpy as np
@@ -28,7 +30,6 @@ class RTSPCamera:
     ):
         self.rtsp_url = rtsp_url or CameraConfig.RTSP_URL
         self.enable_notifications = enable_notifications
-        logger.info(f"RTSPCamera initialized with URL: {self.rtsp_url}")
         
         # Convert to int if it's a numeric string (webcam index)
         try:
@@ -66,6 +67,83 @@ class RTSPCamera:
             return f"rtsp://***:***@{parts[-1]}"
         return url
 
+    def _parse_rtsp_url(self, url: str) -> dict:
+        """Phân tích URL RTSP để log chẩn đoán (không log password)."""
+        try:
+            parsed = urlparse(url)
+            return {
+                "scheme": parsed.scheme or "N/A",
+                "host": parsed.hostname or "N/A",
+                "port": parsed.port or 554,
+                "path": unquote(parsed.path or "/"),
+                "query": parsed.query or "",
+                "user": parsed.username or "",
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    def _ffmpeg_options(self, minimal: bool = False) -> List[str]:
+        """
+        OpenCV đọc OPENCV_FFMPEG_CAPTURE_OPTIONS (format: key;value|key;value).
+        minimal=True: chỉ TCP + timeout — dùng khi profile low-latency không mở được stream.
+        """
+        transport = os.getenv("RTSP_TRANSPORT", "tcp").strip().lower()
+        if transport not in ("tcp", "udp"):
+            transport = "tcp"
+        if minimal:
+            return [
+                f"rtsp_transport;{transport}",
+                "stimeout;5000000",
+            ]
+        return [
+            f"rtsp_transport;{transport}",
+            "fflags;nobuffer",
+            "flags;low_delay",
+            "stimeout;5000000",
+            "max_delay;500000",
+        ]
+
+    def _log_connection_attempt(
+        self,
+        *,
+        profile: str,
+        ffmpeg_opts: List[str],
+        timeout_seconds: float,
+    ) -> None:
+        """Log đầy đủ thông tin kết nối (URL gốc + URL đã mask)."""
+        source = str(self.camera_source)
+        parsed = self._parse_rtsp_url(source) if not self.is_webcam else {}
+        logger.info(
+            "[RTSP] === Bắt đầu kết nối camera ===\n"
+            f"  mode          : {'webcam' if self.is_webcam else 'rtsp'}\n"
+            f"  profile       : {profile}\n"
+            f"  timeout_sec   : {timeout_seconds}\n"
+            f"  url_source    : CameraConfig.RTSP_URL / ctor rtsp_url\n"
+            f"  url_full      : {source}\n"
+            f"  url_masked    : {self._mask_url(source)}\n"
+            + (
+                ""
+                if self.is_webcam
+                else (
+                    f"  host          : {parsed.get('host')}\n"
+                    f"  port          : {parsed.get('port')}\n"
+                    f"  path          : {parsed.get('path')}\n"
+                    f"  query         : {parsed.get('query') or '(none)'}\n"
+                    f"  user          : {parsed.get('user') or '(none)'}\n"
+                )
+            )
+            + f"  ffmpeg_opts   : {' | '.join(ffmpeg_opts)}\n"
+            f"  opencv_backend: CAP_FFMPEG"
+        )
+
+    def _open_capture(self, ffmpeg_opts: List[str]) -> Optional[cv2.VideoCapture]:
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "|".join(ffmpeg_opts)
+        cap = cv2.VideoCapture(self.camera_source, cv2.CAP_FFMPEG)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 10000)
+        cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 10000)
+        return cap
+
     def _connect_with_timeout(self, timeout_seconds=10):
         """Try to connect with timeout to prevent blocking."""
         result = {"success": False, "cap": None}
@@ -73,45 +151,48 @@ class RTSPCamera:
         def _try_connect():
             try:
                 if self.is_webcam:
-                    import os
                     if os.name == 'nt':
                         cap = cv2.VideoCapture(self.camera_source, cv2.CAP_DSHOW)
                     else:
                         cap = cv2.VideoCapture(self.camera_source)
-                    # Webcam settings
                     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                    opened = cap.isOpened()
+                    logger.info(f"[RTSP] Webcam open index={self.camera_source} isOpened={opened}")
                 else:
-                    import os
-                    # =============================================================
-                    # MINIMUM LATENCY FFMPEG FLAGS (Tối ưu tối đa latency RTSP)
-                    # =============================================================
-                    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "|".join([
-                        "rtsp_transport;tcp",        # Force TCP (tránh mất gói UDP)
-                        "fflags;nobuffer",           # Tắt FFmpeg demuxer buffer
-                        "flags;low_delay",           # Low-latency decode mode
-                        "avioflags;direct",          # I/O trực tiếp, không qua buffer OS
-                        "probesize;32",              # Tối thiểu probe size (default=5MB!)
-                        "analyzeduration;0",         # Không phân tích stream trước khi play
-                        "reorder_queue_size;0",      # Không reorder gói (+50-100ms nếu bật)
-                        "max_delay;50000",           # Jitter buffer 50ms — ổn định hơn 0 với camera IP
-                        "stimeout;3000000",          # Socket timeout 3s (tránh treo khi mạng lag)
-                        "framedrop",                 # Bỏ frame cũ nếu decode không kịp
-                    ])
-
-                    cap = cv2.VideoCapture(self.camera_source, cv2.CAP_FFMPEG)
-                    # Chỉ giữ 1 frame trong bộ đệm OpenCV (FFmpeg vẫn có buffer riêng)
-                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                    cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000)
-                    cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000)
+                    profiles = [
+                        ("low_latency", self._ffmpeg_options(minimal=False)),
+                        ("minimal", self._ffmpeg_options(minimal=True)),
+                    ]
+                    cap = None
+                    opened = False
+                    for profile_name, opts in profiles:
+                        self._log_connection_attempt(
+                            profile=profile_name,
+                            ffmpeg_opts=opts,
+                            timeout_seconds=timeout_seconds,
+                        )
+                        try:
+                            trial = self._open_capture(opts)
+                            opened = trial.isOpened()
+                            logger.info(
+                                f"[RTSP] VideoCapture.isOpened()={opened} (profile={profile_name})"
+                            )
+                            if opened:
+                                cap = trial
+                                break
+                            trial.release()
+                        except Exception as e:
+                            logger.warning(
+                                f"[RTSP] Lỗi khi mở stream (profile={profile_name}): {e}"
+                            )
                 
-                if cap.isOpened():
+                if opened and cap is not None:
                     result["cap"] = cap
                     result["success"] = True
-                else:
-                    if cap:
-                        cap.release()
+                elif cap:
+                    cap.release()
             except Exception as e:
-                logger.warning(f"Exception during connection attempt: {e}")
+                logger.warning(f"[RTSP] Exception during connection attempt: {e}")
         
         # Run connection in separate thread with timeout
         connect_thread = threading.Thread(target=_try_connect, daemon=True)
@@ -119,9 +200,17 @@ class RTSPCamera:
         connect_thread.join(timeout=timeout_seconds)
         
         if connect_thread.is_alive():
-            logger.warning(f"Connection timeout after {timeout_seconds} seconds")
+            logger.error(
+                f"[RTSP] Connection timeout sau {timeout_seconds}s — "
+                f"URL: {self._mask_url(str(self.camera_source))}"
+            )
             return None
         
+        if not result["success"]:
+            logger.error(
+                f"[RTSP] Không mở được stream sau mọi profile FFmpeg — "
+                f"url_full={self.camera_source}"
+            )
         return result["cap"] if result["success"] else None
 
     def connect(self, new_url: Optional[str] = None) -> bool:
@@ -141,10 +230,15 @@ class RTSPCamera:
             return False
 
         try:
-            logger.info(f"Attempting to connect to {'webcam' if self.is_webcam else 'RTSP camera'}...")
+            if self.is_webcam:
+                logger.info(f"[RTSP] Connecting webcam index={self.camera_source}")
+            else:
+                logger.info(
+                    f"[RTSP] Connecting — url_full={self.camera_source} | "
+                    f"masked={self._mask_url(str(self.camera_source))}"
+                )
             
-            # Use timeout connection (reduced from 10s to 5s to prevent long hangs)
-            self.cap = self._connect_with_timeout(timeout_seconds=5)
+            self.cap = self._connect_with_timeout(timeout_seconds=15)
             
             if self.cap is None or not self.cap.isOpened():
                 if not self._notified_error and self.enable_notifications:

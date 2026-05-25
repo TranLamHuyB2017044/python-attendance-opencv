@@ -58,8 +58,9 @@ class SettingsWatcher:
                             current_company = MongoDbConfig.COMPANY_ID
                             
                             watched_keys = {
-                                "camera_ip", "camera_port", "camera_user", "camera_pass", 
-                                "camera_roi", "detection_cooldown", "anti_spoofing_enabled", 
+                                "camera_ip", "camera_port", "camera_user", "camera_pass",
+                                "camera_rtsp_path",
+                                "camera_roi", "detection_cooldown", "anti_spoofing_enabled",
                                 "enable_telegram_notif", "recognition_threshold", "gather_frames"
                             }
                             
