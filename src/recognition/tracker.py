@@ -482,40 +482,9 @@ class FaceTracker:
 
     def _is_good_recognition_frame(self, face, frame) -> tuple:
         """
-        Chỉ thu thập frame frontal, đủ lớn và đủ nét cho recognize.
-        Returns (is_good, hint_message_for_ui).
+        Luôn chấp nhận frame để nhận diện (bỏ qua tất cả ngưỡng chất lượng).
+        Returns (True, "").
         """
-        if frame is None:
-            return False, "Khong co frame..."
-
-        int_bbox = face.bbox.astype(int)
-        x1, y1 = max(0, int_bbox[0]), max(0, int_bbox[1])
-        x2, y2 = min(frame.shape[1], int_bbox[2]), min(frame.shape[0], int_bbox[3])
-        crop_h, crop_w = y2 - y1, x2 - x1
-        if crop_h <= 40 or crop_w <= 40:
-            return False, "Mat qua nho hoac sat bien..."
-
-        crop = frame[y1:y2, x1:x2]
-        if crop.size == 0:
-            return False, "Khong cat duoc vung mat..."
-
-        blur_val = cv2.Laplacian(
-            cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), cv2.CV_64F
-        ).var()
-        if blur_val < RecognitionConfig.MIN_BLUR_VARIANCE:
-            return False, "Anh mo, vui long dung yen..."
-
-        pitch, yaw = self._get_face_pose_deg(face)
-        if pitch is None or yaw is None:
-            return False, "Khong do duoc goc mat, nhin thang vao camera..."
-
-        max_yaw = RecognitionConfig.MAX_YAW_DEG
-        max_pitch = min(RecognitionConfig.MAX_PITCH_DEG, 20.0)
-        if abs(yaw) > max_yaw:
-            return False, "Vui long nhin thang vao camera (dung xoay ngang)..."
-        if abs(pitch) > max_pitch:
-            return False, "Vui long ngua dau nhin thang vao camera..."
-
         return True, ""
 
     def _render_frame_for_video(self, frame, detected_faces):
