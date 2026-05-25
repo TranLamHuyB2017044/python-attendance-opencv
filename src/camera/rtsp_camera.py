@@ -119,7 +119,6 @@ class RTSPCamera:
             f"  profile       : {profile}\n"
             f"  timeout_sec   : {timeout_seconds}\n"
             f"  url_source    : CameraConfig.RTSP_URL / ctor rtsp_url\n"
-            f"  url_full      : {source}\n"
             f"  url_masked    : {self._mask_url(source)}\n"
             + (
                 ""
@@ -209,7 +208,7 @@ class RTSPCamera:
         if not result["success"]:
             logger.error(
                 f"[RTSP] Không mở được stream sau mọi profile FFmpeg — "
-                f"url_full={self.camera_source}"
+                f"url={self._mask_url(str(self.camera_source))}"
             )
         return result["cap"] if result["success"] else None
 
@@ -234,8 +233,7 @@ class RTSPCamera:
                 logger.info(f"[RTSP] Connecting webcam index={self.camera_source}")
             else:
                 logger.info(
-                    f"[RTSP] Connecting — url_full={self.camera_source} | "
-                    f"masked={self._mask_url(str(self.camera_source))}"
+                    f"[RTSP] Connecting — {self._mask_url(str(self.camera_source))}"
                 )
             
             self.cap = self._connect_with_timeout(timeout_seconds=15)

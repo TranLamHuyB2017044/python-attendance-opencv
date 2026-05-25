@@ -59,7 +59,7 @@ class SettingsWatcher:
                             
                             watched_keys = {
                                 "camera_ip", "camera_port", "camera_user", "camera_pass",
-                                "camera_rtsp_path",
+                                "camera_rtsp_path", "camera_rtsp_url",
                                 "camera_roi", "detection_cooldown", "anti_spoofing_enabled",
                                 "enable_telegram_notif", "recognition_threshold", "gather_frames"
                             }

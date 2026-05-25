@@ -2942,15 +2942,29 @@ class AttendanceUI:
         e_user.grid(row=2, column=1, padx=5, sticky="w")
         
         ctk.CTkLabel(cam_group, text="Mật khẩu:").grid(row=2, column=2, sticky="w", pady=5, padx=(10, 0))
-        e_pass = ctk.CTkEntry(cam_group, width=180, placeholder_text="password", show="*")
-        e_pass.grid(row=2, column=3, padx=5, sticky="w")
+        pass_frame = ctk.CTkFrame(cam_group, fg_color="transparent")
+        pass_frame.grid(row=2, column=3, padx=5, sticky="w")
+        e_pass = ctk.CTkEntry(pass_frame, width=140, placeholder_text="password", show="*")
+        e_pass.pack(side=tk.LEFT)
+
+        def toggle_cam_pwd_visibility():
+            if e_pass.cget("show") == "*":
+                e_pass.configure(show="")
+            else:
+                e_pass.configure(show="*")
+
+        chk_show_cam_pwd = ctk.CTkCheckBox(
+            pass_frame, text="Hiện", width=50, command=toggle_cam_pwd_visibility,
+            font=("Arial", 10), checkbox_width=16, checkbox_height=16,
+        )
+        chk_show_cam_pwd.pack(side=tk.LEFT, padx=(6, 0))
 
         ctk.CTkLabel(cam_group, text="Đường dẫn RTSP:").grid(row=3, column=0, sticky="w", pady=5)
         e_rtsp_path = ctk.CTkEntry(
-            cam_group, width=420,
+            cam_group, width=300,
             placeholder_text="/cam/realmonitor?channel=1&subtype=0 hoặc /ch1/main",
         )
-        e_rtsp_path.grid(row=3, column=1, columnspan=3, padx=5, sticky="w")
+        e_rtsp_path.grid(row=3, column=1, columnspan=2, padx=5, sticky="w")
 
         # Recognition & Cooldown Settings
         ctk.CTkLabel(cam_group, text="NHẬN DIỆN & KHÓA", font=("Arial", 13, "bold")).grid(row=4, column=0, columnspan=2, sticky="w", pady=(15, 10))
@@ -2983,19 +2997,29 @@ class AttendanceUI:
             config_scope = company_id
             
             # Load Camera Config
-            ip = mongo_db.get_setting("camera_ip", "192.168.1.1", username=company_id)
-            port = mongo_db.get_setting("camera_port", "554", username=company_id)
-            user = mongo_db.get_setting("camera_user", "admin", username=company_id)
-            pwd = mongo_db.get_setting("camera_pass", "password", username=company_id)
-            rtsp_path = mongo_db.get_setting("camera_rtsp_path", "", username=company_id)
-            if not rtsp_path:
-                import os
-                from src.config import CameraConfig
-                env_url = os.getenv("RTSP_URL", "")
-                if env_url and str(ip) in env_url:
-                    rtsp_path = CameraConfig.rtsp_path_from_url(env_url)
-                else:
-                    rtsp_path = "/ch1/main"
+            from src.config import CameraConfig
+            import os
+
+            full_url = (mongo_db.get_setting("camera_rtsp_url", "", username=company_id) or "").strip()
+            if full_url.lower().startswith("rtsp://"):
+                creds = CameraConfig.parse_rtsp_url(full_url)
+                ip = creds["ip"] or "192.168.1.1"
+                port = str(creds["port"] or 554)
+                user = creds["user"] or "admin"
+                pwd = creds["pass"] or ""
+                rtsp_path = creds["path"] or "/ch1/main"
+            else:
+                ip = mongo_db.get_setting("camera_ip", "192.168.1.1", username=company_id)
+                port = mongo_db.get_setting("camera_port", "554", username=company_id)
+                user = mongo_db.get_setting("camera_user", "admin", username=company_id)
+                pwd = mongo_db.get_setting("camera_pass", "password", username=company_id)
+                rtsp_path = mongo_db.get_setting("camera_rtsp_path", "", username=company_id)
+                if not rtsp_path:
+                    env_url = os.getenv("RTSP_URL", "")
+                    if env_url and str(ip) in env_url:
+                        rtsp_path = CameraConfig.rtsp_path_from_url(env_url)
+                    else:
+                        rtsp_path = "/ch1/main"
             
             e_ip.delete(0, 'end')
             e_ip.insert(0, ip)
@@ -3155,6 +3179,39 @@ class AttendanceUI:
             except Exception as e:
                 messagebox.showerror("Lỗi OpenCV", f"Không thể vẽ ROI: {e}")
                 
+        def fill_camera_from_env():
+            import os
+            from src.config import CameraConfig
+            env_url = os.getenv("RTSP_URL", "").strip()
+            if not env_url:
+                messagebox.showwarning("Thiếu .env", "Không có RTSP_URL trong file .env của máy này.")
+                return
+            creds = CameraConfig.parse_rtsp_url(env_url)
+            if not creds["ip"]:
+                messagebox.showerror("Lỗi", "RTSP_URL trong .env không hợp lệ.")
+                return
+            e_ip.delete(0, "end")
+            e_ip.insert(0, creds["ip"])
+            e_port.delete(0, "end")
+            e_port.insert(0, str(creds["port"]))
+            e_user.delete(0, "end")
+            e_user.insert(0, creds["user"])
+            e_pass.delete(0, "end")
+            e_pass.insert(0, creds["pass"])
+            e_rtsp_path.delete(0, "end")
+            e_rtsp_path.insert(0, creds["path"])
+            messagebox.showinfo(
+                "Đã điền",
+                f"Đã lấy cấu hình từ .env:\nIP {creds['ip']} | user {creds['user']}\n"
+                "Kiểm tra mật khẩu (bật Hiện) rồi bấm LƯU CÀI ĐẶT."
+            )
+
+        btn_env = ctk.CTkButton(
+            cam_group, text="Lấy từ .env", command=fill_camera_from_env,
+            width=100, height=28, font=("Arial", 10), fg_color="#6c757d",
+        )
+        btn_env.grid(row=3, column=3, padx=5, sticky="w")
+
         roi_btn = ctk.CTkButton(cam_group, text="Vẽ khung Camera", command=pick_roi, width=120, fg_color="#2196F3")
         roi_btn.grid(row=6, column=2, columnspan=2, padx=(10, 0), pady=5, sticky="w")
 
@@ -3169,7 +3226,7 @@ class AttendanceUI:
             roi_val = e_roi.get().strip()
             
             from loguru import logger
-            from src.config import MongoDbConfig
+            from src.config import CameraConfig, MongoDbConfig
             env_company = MongoDbConfig.COMPANY_ID
             if config_scope != env_company:
                 logger.warning(
@@ -3184,6 +3241,8 @@ class AttendanceUI:
             success &= mongo_db.set_setting("camera_user", user, username=config_scope)
             success &= mongo_db.set_setting("camera_pass", pwd, username=config_scope)
             success &= mongo_db.set_setting("camera_rtsp_path", rtsp_path, username=config_scope)
+            full_rtsp_url = CameraConfig.build_rtsp_url(ip, port, user, pwd, rtsp_path)
+            success &= mongo_db.set_setting("camera_rtsp_url", full_rtsp_url, username=config_scope)
             
             # Save cooldown (convert MINUTES to SECONDS for backend)
             try:
@@ -3212,7 +3271,11 @@ class AttendanceUI:
                 CameraConfig.USER = user
                 CameraConfig.PASS = pwd
                 CameraConfig.RTSP_PATH = rtsp_path
-                CameraConfig.RTSP_URL = CameraConfig.build_rtsp_url(ip, port, user, pwd, rtsp_path)
+                CameraConfig.RTSP_URL = full_rtsp_url
+                CameraConfig.IP = ip
+                CameraConfig.PORT = int(port)
+                CameraConfig.USER = user
+                CameraConfig.PASS = pwd
                 
                 try:
                     if roi_val and len(roi_val.split(',')) == 4:
