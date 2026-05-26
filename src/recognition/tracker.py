@@ -72,20 +72,6 @@ class FaceTracker:
                 
                 is_unknown = task_data.get('is_unknown', False)
                 status = task_data.get('status')
-                is_low_priority = is_unknown or status == "COOLDOWN"
-                task_enqueue_time = time.time()
-                
-                # Đối với Unknown hoặc COOLDOWN: Đợi 2s để chờ xem có người hợp lệ (IN/OUT) xuất hiện không
-                if is_low_priority:
-                    delay_seconds = 2.0
-                    logger.debug(f"[Webhook Worker] Low-priority task ({status}): waiting {delay_seconds}s before processing...")
-                    time.sleep(delay_seconds)
-                    
-                    # Kiểm tra xem có người hợp lệ (IN/OUT) nào được enqueue trong thời gian chờ không
-                    if self.last_known_user_time > task_enqueue_time:
-                        logger.info(f"[Webhook Worker] Skipping low-priority task ({status}) - known user enqueued during delay")
-                        self.webhook_queue.task_done()
-                        continue
                 
                 self._execute_webhook_task(**task_data)
                 
@@ -96,12 +82,12 @@ class FaceTracker:
                 logger.error(f"Webhook Worker error: {e}")
 
     def _execute_webhook_task(self, user_id, user_name, status, is_unknown=False, custom_voice_text=None, image=None):
-        """Thực thi gửi Webhook thực tế (được gọi từ Worker) với cơ chế Retry theo loại event."""
+        """Thực thi gửi Webhook thực tế (chỉ xử lý IN/OUT) với cơ chế Retry."""
         try:
             from src.utils.string_utils import remove_accents
             from src.utils.time_manager import time_mgr
             
-            # === PREPARE PAYLOAD (Chỉ tạo 1 lần) ===
+            # === PREPARE PAYLOAD ===
             vn_now = time_mgr.get_accurate_time()
             time_str = vn_now.strftime("%H:%M:%S")
             name_no_accents = remove_accents(user_name)
@@ -123,32 +109,22 @@ class FaceTracker:
 
                 if custom_voice_text:
                     voice_text = custom_voice_text
-                elif status in ["IN", "OUT"]:
-                    voice_text = f"{short_name} đã chấm công"
-                elif status == "SPOOF":
-                    voice_text = "Cảnh báo: Phát hiện hành vi giả mạo khuôn mặt"
-                elif status == "COOLDOWN":
-                    voice_text = f"{short_name} đã truy cập gần đây"
                 else:
-                    voice_text = "Xin vui lòng thử lại"
+                    voice_text = f"{short_name} đã chấm công"
 
             payload = {
                 "user_id": user_id,
                 "user_name": name_no_accents,
-                "status": status or "DETECTED",
+                "status": status,
                 "voice_text": voice_text,
                 "time": time_str
             }
 
-            # === RETRY LOGIC THEO LOẠI EVENT ===
-            if status in ("IN", "OUT"):
-                max_retries = 3
-            elif status == "SPOOF":
-                max_retries = 1
-            else:
-                max_retries = 1
+            webhook_sent_successfully = False
+            max_retries = 3
             last_error = "Unknown"
             
+            # === GỬI WEBHOOK CHO IN/OUT VỚI RETRY ===
             for attempt in range(1, max_retries + 1):
                 try:
                     response = requests.post(
@@ -159,19 +135,8 @@ class FaceTracker:
                     if response.status_code == 200:
                         self.successful_webhook_counts[user_id] = self.successful_webhook_counts.get(user_id, 0) + 1
                         logger.success(f"🚀 WEBHOOK THÀNH CÔNG (Lần {attempt}) -> [ {user_name} ]")
-                        
-                        # Gửi Telegram khi thành công (Bao gồm cả IN, OUT, DETECTED và COOLDOWN theo yêu cầu)
-                        if status in ["IN", "OUT", "DETECTED", "COOLDOWN"]:
-                            logger.info(f"🚀 Đang gửi thông báo Telegram cho: {user_name} (Trạng thái: {status})...")
-                            self._send_telegram_alert(
-                                title="Thông báo chấm công",
-                                details=f"Nhân viên: {user_name} ({user_id})\nTrạng thái: {status}",
-                                image=image
-                            )
-
-
-
-                        return True
+                        webhook_sent_successfully = True
+                        break
                     else:
                         last_error = f"HTTP {response.status_code}"
                         logger.warning(f"⚠️ Webhook thử lại lần {attempt} thất bại: {last_error}")
@@ -180,25 +145,35 @@ class FaceTracker:
                     logger.warning(f"⚠️ Webhook thử lại lần {attempt} lỗi kết nối: {last_error}")
                 
                 if attempt < max_retries:
-                    time.sleep(1) # Đợi 1 giây trước khi thử lại
+                    time.sleep(1)
 
-            # Nếu chạy đến đây là đã thất bại cả 3 lần
-            error_msg = f"❌ WEBHOOK FAILED SAU {max_retries} LẦN THỬ -> [ {user_name} ]. Lỗi cuối: {last_error}"
-            logger.error(error_msg)
-            
-            # Gửi báo cáo lỗi cuối cùng (Telegram & Report Service)
-            from src.utils.telegram_bot import send_telegram_report
-            from src.services.report_service import report_service
-            
-            # 1. Telegram
-            send_telegram_report("Webhook Final Fail", f"Nhân viên: {user_name} ({user_id})\nĐã thử {max_retries} lần nhưng thất bại.\nLỗi cuối: {last_error}")
-            
-            # 2. Report Service (Dashboard)
-            report_service.report_error(
-                message=f"Webhook vĩnh viễn thất bại cho {user_name}. Details: {last_error}",
-                status_code=500
+            # === GỬI TELEGRAM CHO IN/OUT ===
+            logger.info(f"🚀 Đang gửi thông báo Telegram cho: {user_name} (Trạng thái: {status})...")
+            self._send_telegram_alert(
+                title="Thông báo chấm công",
+                details=f"Nhân viên: {user_name} ({user_id})\nTrạng thái: {status}",
+                image=image
             )
-            return False
+
+            if not webhook_sent_successfully:
+                # Nếu chạy đến đây là đã thất bại cả 3 lần
+                error_msg = f"❌ WEBHOOK FAILED SAU {max_retries} LẦN THỬ -> [ {user_name} ]. Lỗi cuối: {last_error}"
+                logger.error(error_msg)
+                
+                # Gửi báo cáo lỗi cuối cùng (Telegram & Report Service)
+                from src.utils.telegram_bot import send_telegram_report
+                from src.services.report_service import report_service
+                
+                # 1. Telegram
+                send_telegram_report("Webhook Final Fail", f"Nhân viên: {user_name} ({user_id})\nĐã thử {max_retries} lần nhưng thất bại.\nLỗi cuối: {last_error}")
+                
+                # 2. Report Service (Dashboard)
+                report_service.report_error(
+                    message=f"Webhook vĩnh viễn thất bại cho {user_name}. Details: {last_error}",
+                    status_code=500
+                )
+
+            return webhook_sent_successfully
 
         except Exception as e:
             logger.error(f"Lỗi nghiêm trọng trong _execute_webhook_task: {e}")
@@ -393,21 +368,44 @@ class FaceTracker:
             # Cập nhật thời gian enqueue người hợp lệ cuối cùng
             self.last_known_user_time = time.time()
         
-        # Đẩy vào Queue với priority
-        priority = self._webhook_priority(status, is_unknown)
-        with self.webhook_lock:
-            self.webhook_sequence += 1
-            sequence = self.webhook_sequence
-        
-        task_data = {
-            'user_id': user_id,
-            'user_name': user_name,
-            'status': status,
-            'is_unknown': is_unknown,
-            'custom_voice_text': custom_voice_text,
-            'image': image
-        }
-        self.webhook_queue.put((priority, sequence, task_data))
+        # === CHỈ PUSH IN/OUT VÀO QUEUE, CÁC TRẠNG THÁI KHÁC GỬI TELEGRAM TRỰC TIẾP ===
+        if status in ("IN", "OUT"):
+            # Đẩy vào Queue với priority
+            priority = self._webhook_priority(status, is_unknown)
+            with self.webhook_lock:
+                self.webhook_sequence += 1
+                sequence = self.webhook_sequence
+            
+            task_data = {
+                'user_id': user_id,
+                'user_name': user_name,
+                'status': status,
+                'is_unknown': is_unknown,
+                'custom_voice_text': custom_voice_text,
+                'image': image
+            }
+            self.webhook_queue.put((priority, sequence, task_data))
+        else:
+            # Gửi Telegram trực tiếp cho Unknown/COOLDOWN/SPOOF (không qua queue)
+            logger.info(f"🚀 Đang gửi thông báo Telegram trực tiếp cho: {user_name} (Trạng thái: {status})...")
+            if is_unknown:
+                self._send_telegram_alert(
+                    title="PHẠT HIỆN NGƯỜI LẠ",
+                    details=f"Phát hiện người lạ trước camera\nTrạng thái: {status}",
+                    image=image
+                )
+            elif status == "SPOOF":
+                self._send_telegram_alert(
+                    title="CẢNH BÁO GIẢ MẠO",
+                    details=f"Phát hiện hành vi giả mạo khuôn mặt",
+                    image=image
+                )
+            else:
+                self._send_telegram_alert(
+                    title="Thông báo chấm công",
+                    details=f"Nhân viên: {user_name} ({user_id})\nTrạng thái: {status}",
+                    image=image
+                )
 
     def _get_center(self, bbox):
         return (int((bbox[0] + bbox[2]) / 2), int((bbox[1] + bbox[3]) / 2))
@@ -968,12 +966,7 @@ class FaceTracker:
                                     last_spoof = f_data.get('last_spoof_alert', 0)
                                     if current_time - last_spoof > 5.0:
                                         f_data['last_spoof_alert'] = current_time
-                                        self._send_user_webhook("Spoof", "Ke gia mao", "SPOOF", is_unknown=True)
-                                        self._send_telegram_alert(
-                                            "CANH BAO GIA MAO", 
-                                            f"Phat hien hanh vi gia mao khuon mat!\nID: {matched_id}\nScore: {spoof_score:.2f}",
-                                            image=frame
-                                        )
+                                        self._send_user_webhook("Spoof", "Ke gia mao", "SPOOF", is_unknown=True, image=frame)
                                         # Báo cáo lên Dashboard trung tâm
                                         report_service.report_error(
                                             message=f"CẢNH BÁO GIẢ MẠO: Phát hiện hành vi giả mạo khuôn mặt (ID: {matched_id}, Score: {spoof_score:.2f})",
@@ -1058,8 +1051,7 @@ class FaceTracker:
                                     v_path = v_dir / f"{int(time.time())}_Nguoi_La.mp4"
                                     f_data['video_path'] = str(v_path)
                                 
-                                self._send_telegram_alert("PHAT HIEN NGUOI LA", f"Phát hiện người lạ trước camera (Đã quét {f_data['unknown_attempts']} lần)", image=frame)
-                                self._send_user_webhook("Unknown", "Nguoi la", "unknown", is_unknown=True, unknown_attempt=f_data['unknown_attempts'])
+                                self._send_user_webhook("Unknown", "Nguoi la", "unknown", is_unknown=True, unknown_attempt=f_data['unknown_attempts'], image=frame)
                                 # Báo cáo lên Dashboard trung tâm
                                 report_service.report_error(
                                     message=f"CẢNH BÁO NGƯỜI LẠ: Phát hiện đối tượng lạ trước camera (Đã quét {f_data['unknown_attempts']} lần)",
