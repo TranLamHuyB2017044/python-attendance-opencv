@@ -38,6 +38,7 @@ DATA_DIR = PROJECT_ROOT / "data"
 EMBEDDINGS_DIR = PROJECT_ROOT / "embeddings"
 MODELS_DIR = PROJECT_ROOT / "models"
 CAPTURES_DIR = PROJECT_ROOT / "data" / "captures"
+DAILY_VIDEOS_DIR = PROJECT_ROOT / "data" / "daily_videos"
 
 # Create directories if they don't exist
 LOGS_DIR.mkdir(exist_ok=True)
@@ -45,6 +46,7 @@ DATA_DIR.mkdir(exist_ok=True)
 EMBEDDINGS_DIR.mkdir(exist_ok=True)
 MODELS_DIR.mkdir(exist_ok=True)
 CAPTURES_DIR.mkdir(parents=True, exist_ok=True)
+DAILY_VIDEOS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 class CameraConfig:
@@ -378,6 +380,24 @@ class TelegramConfig:
     ENABLED: bool = os.getenv("ENABLE_TELEGRAM_NOTIF", "false").lower() == "true"
 
 
+class DailyVideoConfig:
+    """Cấu hình ghi video hàng ngày"""
+    ENABLED: bool = os.getenv("DAILY_RECORDING_ENABLED", "true").lower() == "true"
+    IDLE_TIMEOUT_SECONDS: int = int(os.getenv("DAILY_RECORDING_IDLE_TIMEOUT", "60"))
+    MAX_LOG_LINES: int = int(os.getenv("DAILY_RECORDING_MAX_LOG_LINES", "10"))
+    RETENTION_DAYS: int = int(os.getenv("DAILY_RECORDING_RETENTION_DAYS", "7"))
+
+
+class GoogleDriveConfig:
+    """Cấu hình upload lên Google Drive"""
+    ENABLED: bool = os.getenv("GOOGLE_DRIVE_ENABLED", "true").lower() == "true"
+    USE_SERVICE_ACCOUNT: bool = os.getenv("GOOGLE_DRIVE_USE_SERVICE_ACCOUNT", "false").lower() == "true"
+    SERVICE_ACCOUNT_FILE: str = os.getenv("GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE", "service_account.json")
+    CREDENTIALS_FILE: str = os.getenv("GOOGLE_DRIVE_CREDENTIALS_FILE", "credentials.json")
+    TOKEN_FILE: str = os.getenv("GOOGLE_DRIVE_TOKEN_FILE", "token.json")
+    FOLDER_ID: str = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "")
+
+
 class SpecialUserConfig:
     """Cấu hình đặc biệt cho nhân viên cụ thể"""
     # Định nghĩa các user đặc biệt: {user_id: {"voice_text": "...", "cooldown_hours": ...}}
@@ -443,6 +463,7 @@ __all__ = [
     "LOGS_DIR",
     "DATA_DIR",
     "CAPTURES_DIR",
+    "DAILY_VIDEOS_DIR",
     "EMBEDDINGS_DIR",
     "MODELS_DIR",
     "CameraConfig",
@@ -457,4 +478,6 @@ __all__ = [
     "TelegramConfig",
     "ReportSystemConfig",
     "SpecialUserConfig",
+    "DailyVideoConfig",
+    "GoogleDriveConfig",
 ]

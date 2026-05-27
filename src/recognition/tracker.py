@@ -12,6 +12,7 @@ from src.attendance.mongodb_mgr import mongo_db
 from src.utils.string_utils import remove_accents
 from src.utils.time_manager import time_mgr
 from src.recognition.async_spoof import AsyncSpoofChecker
+from src.recognition.daily_video_recorder import DailyVideoRecorder
 from src.services.report_service import report_service
 
 class FaceTracker:
@@ -63,6 +64,9 @@ class FaceTracker:
         self.webhook_worker_thread = threading.Thread(target=self._webhook_worker, daemon=True)
         self.webhook_worker_thread.start()
 
+        # ─── Daily Video Recorder ─────────────────────────────────────────
+        self.daily_video_recorder = DailyVideoRecorder()
+
     def _webhook_worker(self):
         """Worker thread xử lý Webhook tuần tự."""
         while True:
@@ -86,6 +90,8 @@ class FaceTracker:
         try:
             from src.utils.string_utils import remove_accents
             from src.utils.time_manager import time_mgr
+
+            self.daily_video_recorder.log_webhook(user_id, user_name, status, is_unknown)
             
             # === PREPARE PAYLOAD ===
             vn_now = time_mgr.get_accurate_time()
@@ -879,6 +885,7 @@ class FaceTracker:
                     'video_path':         None
                 }
                 self.active_faces[matched_id] = f_data
+                self.daily_video_recorder.log_activity(f"Phát hiện người mới - Track ID: {matched_id}")
             else:
                 f_data = self.active_faces[matched_id]
                 f_data['last_seen'] = current_time
@@ -981,6 +988,7 @@ class FaceTracker:
                         user_id   = user_data.get('user_id', 'Unknown')
                         user_name = user_data.get('name', 'Unknown')
                         logger.info(f"[Recognition] ✅ {user_name} (score={vote.get('score',0):.3f})")
+                        self.daily_video_recorder.log_activity(f"Nhận diện thành công - Tên: {user_name}, ID: {user_id}, Score: {vote.get('score',0):.3f}")
 
                         if only_recognize:
                             if f_data['status'] != 'RECOGNIZED_SILENT':
@@ -1001,7 +1009,7 @@ class FaceTracker:
                                     cooldown_seconds - (current_time - self.user_cooldowns[user_id])
                                 )
                                 if self._should_send_cooldown_webhook(user_id, current_time):
-                                    self._send_user_webhook(user_id, user_name, "COOLDOWN", is_unknown=False)
+                                    self._send_user_webhook(user_id, user_name, "COOLDOWN", is_unknown=False, image=frame)
                             elif f_data['status'] == 'RECOGNIZED_SILENT':
                                 # SILENT MODE: Just update user_data for UI, NO logging, NO webhook
                                 f_data['user_data'] = user_data
@@ -1060,7 +1068,7 @@ class FaceTracker:
                                 )
                             else:
                                 # Gửi voice cách nhau 1 giây
-                                self._send_user_webhook("Unknown", "Nguoi la", "unknown", is_unknown=True, unknown_attempt=f_data['unknown_attempts'])
+                                self._send_user_webhook("Unknown", "Nguoi la", "unknown", is_unknown=True, unknown_attempt=f_data['unknown_attempts'], image=frame)
 
                         f_data['status'] = 'RETRY_WAIT'
                 else:
@@ -1136,6 +1144,12 @@ class FaceTracker:
                     if len(fdata['video_frames']) < 600:
                         fdata['video_frames'].append(common_render)
 
+            # 3. Ghi frame vào Daily Video Recorder
+            self.daily_video_recorder.write_frame(frame, detected_faces)
+
+        # 4. Kiểm tra idle để dừng Daily Video
+        self.daily_video_recorder.check_idle()
+
         # 3. Cập nhật self.active_faces với các thay đổi trong frame này
         for fid, fdata in updated_faces_map.items():
             self.active_faces[fid] = fdata
@@ -1146,7 +1160,12 @@ class FaceTracker:
             if current_time - fdata['last_seen'] < 1.0:
                 new_active_faces[fid] = fdata
             else:
-                # Ngươi này đã rời đi: tiến hành ghi Video đối soát nếu có
+                # Người này đã rời đi: tiến hành ghi Video đối soát nếu có
+                user_data = fdata.get('user_data', {})
+                user_name = user_data.get('name', f'Nguoi chua xac dinh') if user_data else 'Nguoi chua xac dinh'
+                user_id = user_data.get('user_id', 'N/A') if user_data else 'N/A'
+                self.daily_video_recorder.log_activity(f"Người rời khỏi khung - Track ID: {fid}, Tên: {user_name}, ID: {user_id}")
+                
                 v_path = fdata.get('video_path')
                 v_frames = fdata.get('video_frames', [])
                 if v_path and len(v_frames) > 5:
