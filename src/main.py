@@ -736,32 +736,33 @@ def main():
             elif ui.current_state == STATE_DETECT:
                 # Xóa mouse callback MỘT LẦN khi mới vào STATE_DETECT
                 # → Ngăn click vào camera view vô tình trigger menu buttons
-                if not getattr(main, '_detect_callback_cleared', False):
-                    def on_panel_click(event, x, y, flags, param):
-                        if event == cv2.EVENT_LBUTTONDOWN:
-                            # Tọa độ x0, pw, ph được truyền vào param hoặc tính toán dựa trên current state
-                            # CLEAR button trong log_panel_renderer: [x0+pw-50, x0+pw-4], [ph-17, ph-3]
-                            cur_w, cur_h = param
-                            p_w = max(220, int(cur_w * 0.25))
-                            x0 = cur_w - p_w
-                            if x >= x0 + p_w - 55 and y >= cur_h - 22:
-                                from src.utils.webhook_log_bus import clear_logs
-                                clear_logs()
+                def on_panel_click(event, x, y, flags, param):
+                    if event == cv2.EVENT_LBUTTONDOWN:
+                        try:
+                            _, _, cur_w, cur_h = cv2.getWindowImageRect(win_name)
+                            if cur_w <= 0 or cur_h <= 0:
+                                cur_w, cur_h = 1280, 720
+                        except Exception:
+                            cur_w, cur_h = 1280, 720
+                        p_w = max(220, int(cur_w * 0.25))
+                        x0 = cur_w - p_w
+                        # Check if click is within CLEAR button area
+                        btn_x1 = x0 + p_w - 55
+                        btn_x2 = x0 + p_w - 4
+                        btn_y1 = cur_h - 20
+                        btn_y2 = cur_h
+                        if btn_x1 <= x <= btn_x2 and btn_y1 <= y <= btn_y2:
+                            from src.utils.webhook_log_bus import clear_logs
+                            clear_logs()
 
-                    try:
-                        cv2.setMouseCallback(win_name, on_panel_click, param=(cur_w, cur_h))
-                    except Exception:
-                        pass
-                    main._detect_callback_cleared = True
+                try:
+                    cv2.setMouseCallback(win_name, on_panel_click)
+                except Exception:
+                    pass
 
                 # Layout:  75% camera | 25% log panel
                 panel_w    = max(220, int(cur_w * 0.25))
                 cam_area_w = cur_w - panel_w
-
-                # Update click area dynamically (important if window resized)
-                if not getattr(main, '_detect_callback_cleared', False):
-                    # callback set up elsewhere, but we ensure it uses these values
-                    pass
 
                 # --- AUTO SWITCH MODE: DIRECT (DEV) vs PREVIEW (PROD/EXE) ---
                 if getattr(sys, 'frozen', False):

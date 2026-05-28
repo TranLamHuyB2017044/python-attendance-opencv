@@ -273,13 +273,9 @@ class FaceTracker:
         - Known users: Max 1 webhook per 15 minutes per user_id
         - Unknown faces: Max 10 webhooks total, reset when any known user checks in
         """
-        # Xử lý unknown voice text theo attempt
-        if is_unknown and not custom_voice_text:
-            voice_text = self._unknown_voice_text(unknown_attempt)
-            if not voice_text:
-                logger.info(f"[Tracker] Unknown attempt #{unknown_attempt}: Không gửi voice webhook (im lặng)")
-                return
-            custom_voice_text = voice_text
+        # Không gửi webhook unknown và cooldown
+        if is_unknown or status == "COOLDOWN":
+            return
         
         # Ghi vào Log Bus local (cho UI)
         try:
@@ -299,33 +295,28 @@ class FaceTracker:
         import os
         current_time = time.time()
         
-        if is_unknown:
-            if self.unknown_webhook_count >= self.unknown_webhook_limit:
-                return
-            self.unknown_webhook_count += 1
-        else:
-            from src.config import DATA_DIR
-            safe_id = "".join(x for x in str(user_id) if x.isalnum())
-            lock_file = DATA_DIR / f"webhook_lock_{safe_id}.txt"
+        from src.config import DATA_DIR
+        safe_id = "".join(x for x in str(user_id) if x.isalnum())
+        lock_file = DATA_DIR / f"webhook_lock_{safe_id}.txt"
 
-            try:
-                if lock_file.exists():
-                    last_mtime = os.path.getmtime(lock_file)
-                    elapsed = current_time - last_mtime
-                    # Block duplicate trong 5 giây (trừ khi là trạng thái đặc biệt)
-                    if status != 'COOLDOWN' and elapsed < 5:
-                        return 
+        try:
+            if lock_file.exists():
+                last_mtime = os.path.getmtime(lock_file)
+                elapsed = current_time - last_mtime
+                # Block duplicate trong 5 giây
+                if elapsed < 5:
+                    return 
 
-                with open(lock_file, "w") as f:
-                    f.write(str(current_time))
-            except Exception:
-                pass
+            with open(lock_file, "w") as f:
+                f.write(str(current_time))
+        except Exception:
+            pass
 
-            if self.unknown_webhook_count > 0:
-                self.unknown_webhook_count = 0
+        if self.unknown_webhook_count > 0:
+            self.unknown_webhook_count = 0
         
-        # Drop pending unknowns nếu đây là known user (IN/OUT hoặc COOLDOWN)
-        if not is_unknown and status in ("IN", "OUT", "COOLDOWN"):
+        # Drop pending unknowns nếu đây là known user (IN/OUT)
+        if not is_unknown and status in ("IN", "OUT"):
             self._drop_pending_unknowns()
         
         # Đẩy vào Queue với priority
@@ -864,6 +855,12 @@ class FaceTracker:
                                 f_data['status'] = 'COOLDOWN'
                                 f_data['user_data'] = user_data
                                 f_data['cooldown_remaining'] = int(cooldown_seconds - (current_time - self.user_cooldowns[user_id]))
+                                # Gửi Telegram cho cooldown (kèm ảnh)
+                                self._send_telegram_alert(
+                                    "TRANG THAI COOLDOWN", 
+                                    f"{user_name} (ID: {user_id}) đang trong thời gian chờ (còn {f_data['cooldown_remaining']}s)", 
+                                    image=frame
+                                )
                                 # Nếu là user đặc biệt, không gửi webhook COOLDOWN
                                 if not SpecialUserConfig.is_special_user(user_id):
                                     self._send_user_webhook(user_id, user_name, "COOLDOWN", is_unknown=False)

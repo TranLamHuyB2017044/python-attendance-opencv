@@ -30,6 +30,7 @@ class DailyVideoRecorder:
         self.webhook_logs = deque(maxlen=50)
 
         self._is_recording = False
+        self._save_threads = []  # Theo dõi các thread lưu video
         self.drive_uploader = GoogleDriveUploader()
 
         if self.enabled:
@@ -146,6 +147,10 @@ class DailyVideoRecorder:
                 logger.error(f"[DailyVideoRecorder] Không thể lưu video!")
         except Exception as e:
             logger.error(f"[DailyVideoRecorder] Lỗi lưu video: {e}")
+        finally:
+            # Loại bỏ thread khỏi danh sách sau khi hoàn thành
+            if hasattr(threading.current_thread(), '_thread_id'):
+                self._save_threads = [t for t in self._save_threads if t.is_alive()]
 
     def start_session(self, frame_width: int, frame_height: int):
         if not self.enabled:
@@ -162,6 +167,7 @@ class DailyVideoRecorder:
             self.session_frames = []
             self.session_start_time = time.time()
             self.last_activity_time = time.time()
+            self.last_save_time = time.time()
             self.current_date = self._get_current_date_str()
             self._is_recording = True
 
@@ -172,7 +178,7 @@ class DailyVideoRecorder:
             logger.error(f"[DailyVideoRecorder] Lỗi khi bắt đầu phiên: {e}")
             self._cleanup()
 
-    def stop_session(self):
+    def stop_session(self, save_immediately: bool = False):
         if not self._is_recording:
             return
 
@@ -185,11 +191,16 @@ class DailyVideoRecorder:
                 actual_fps = max(5.0, min(30.0, actual_fps))
                 
                 logger.info(f"[DailyVideoRecorder] Đang lưu {len(self.session_frames)} frames...")
-                threading.Thread(
+                t = threading.Thread(
                     target=self._save_video_async, 
                     args=(str(self.current_video_path), self.session_frames, actual_fps), 
-                    daemon=True
-                ).start()
+                    daemon=False  # Không dùng daemon để đảm bảo lưu xong
+                )
+                self._save_threads.append(t)
+                t.start()
+                
+                if save_immediately:
+                    t.join()  # Đợi lưu xong nếu cần
             else:
                 logger.warning(f"[DailyVideoRecorder] Không đủ frame để lưu (chỉ có {len(self.session_frames)} frame)")
 
@@ -239,6 +250,7 @@ class DailyVideoRecorder:
         if not self._is_recording:
             return False
 
+        # Kiểm tra idle timeout
         if time.time() - self.last_activity_time > self.idle_timeout:
             logger.info(f"[DailyVideoRecorder] Phát hiện idle (không hoạt động {self.idle_timeout}s), dừng phiên và lưu video")
             self.stop_session()
@@ -250,7 +262,14 @@ class DailyVideoRecorder:
         """Buộc lưu video và dừng phiên (gọi khi app tắt)"""
         if self._is_recording:
             logger.info("[DailyVideoRecorder] Buộc lưu video (app đang tắt)...")
-            self.stop_session()
+            self.stop_session(save_immediately=True)
+        
+        # Đợi tất cả các thread lưu video hoàn thành
+        logger.info("[DailyVideoRecorder] Đợi các thread lưu video hoàn thành...")
+        for t in self._save_threads:
+            if t.is_alive():
+                t.join(timeout=30)
+        logger.success("[DailyVideoRecorder] Đã hoàn thành tất cả lưu trữ")
 
     def write_frame(self, frame: cv2.Mat, detected_faces: List[Any]):
         if not self.enabled:

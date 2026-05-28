@@ -19,6 +19,7 @@ from src.camera.rtsp_camera import RTSPCamera
 from src.recognition.face_recognition import FaceRecognition
 from src.attendance.qdrant_db import QdrantAttendanceManager
 from src.recognition.tracker import FaceTracker
+from src.recognition.daily_video_recorder import DailyVideoRecorder
 from src.config import RecognitionConfig, CameraConfig
 from src.services.ping_service import ping_service
 
@@ -50,6 +51,7 @@ def main():
         attendance = QdrantAttendanceManager()
         camera     = RTSPCamera()
         tracker    = FaceTracker(threshold_seconds=2.0)
+        daily_recorder = DailyVideoRecorder()
     except Exception as e:
         logger.critical(f"Khoi tao that bai: {e}")
         return
@@ -61,6 +63,7 @@ def main():
     cv2.resizeWindow(win_name, TOTAL_W, TOTAL_H)
 
     faces = []
+    current_faces = []
     ai_queue = queue.Queue(maxsize=1)
     frame_skip_count = 0
     PROCESS_EVERY_N  = 3
@@ -129,6 +132,20 @@ def main():
             if not success or frame is None:
                 continue
 
+            # ── Fast detection for immediate visualization ────────────────────
+            fast_detect_frame = frame.copy()
+            if CameraConfig.ROI:
+                x1, y1, x2, y2 = CameraConfig.ROI
+                mask = np.zeros_like(fast_detect_frame)
+                h, w = fast_detect_frame.shape[:2]
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(w, x2), min(h, y2)
+                mask[y1:y2, x1:x2] = 255
+                fast_detect_frame = cv2.bitwise_and(fast_detect_frame, mask)
+            
+            fast_detected = face_rec.detect_and_extract(fast_detect_frame, max_faces=RecognitionConfig.MAX_FACES, fast=True)
+            current_faces[:] = fast_detected
+
             # ── Feed AI thread ───────────────────────────────────────────────
             if not ai_queue.empty():
                 try:
@@ -166,7 +183,43 @@ def main():
             canvas = np.zeros((cur_h, cur_w, 3), dtype=np.uint8)
 
             # --- LEFT: Camera view (75%) ---
-            cam_display = face_rec.draw_faces(frame.copy(), faces)
+            def calc_iou(b1, b2):
+                x1, y1, x2, y2 = max(b1[0], b2[0]), max(b1[1], b2[1]), min(b1[2], b2[2]), min(b1[3], b2[3])
+                inter = max(0, x2 - x1) * max(0, y2 - y1)
+                b1_area = (b1[2] - b1[0]) * (b1[3] - b1[1])
+                b2_area = (b2[2] - b2[0]) * (b2[3] - b2[1])
+                return inter / float(b1_area + b2_area - inter + 1e-6)
+            
+            display_faces = []
+            used_indices = set()
+            
+            for curr_face in current_faces:
+                curr_bbox = curr_face.bbox
+                best_iou = 0
+                best_face = None
+                best_idx = -1
+                
+                for idx, ai_face in enumerate(faces):
+                    if idx in used_indices:
+                        continue
+                    iou = calc_iou(curr_bbox, ai_face.bbox)
+                    if iou > best_iou and iou > 0.3:
+                        best_iou = iou
+                        best_face = ai_face
+                        best_idx = idx
+                
+                if best_face is not None:
+                    display_faces.append(best_face)
+                    used_indices.add(best_idx)
+                else:
+                    display_faces.append(curr_face)
+            
+            cam_display = face_rec.draw_faces(frame.copy(), display_faces)
+            
+            # --- Write to daily video ---
+            daily_recorder.write_frame(frame.copy(), display_faces)
+            # Check idle and stop/save recording if needed
+            daily_recorder.check_idle()
 
             if CameraConfig.ROI:
                 x1, y1, x2, y2 = CameraConfig.ROI
@@ -235,6 +288,7 @@ def main():
         camera.disconnect()
         cv2.destroyAllWindows()
         ping_service.stop()
+        daily_recorder.force_save_and_stop()
         logger.info("Camera app shut down.")
 
 if __name__ == "__main__":
