@@ -23,7 +23,7 @@ class DailyVideoRecorder:
         self.session_frames: List[Any] = []
         self.current_video_path: Optional[Path] = None
         self.session_start_time: Optional[float] = None
-        self.last_activity_time: Optional[float] = None
+        self.last_activity_time: Optional[float] = None  # Thời gian có hoạt động thực tế (face detect/webhook)
         self.current_date: Optional[str] = None
 
         self.session_logs = deque(maxlen=100)
@@ -45,6 +45,7 @@ class DailyVideoRecorder:
         log_entry = f"[{time_str}] Webhook: {user_name} ({user_id}) - {status}"
         self.webhook_logs.append(log_entry)
         self.session_logs.append(log_entry)
+        self.last_activity_time = time.time()  # Cập nhật thời gian hoạt động
         logger.debug(f"[DailyVideoRecorder] {log_entry}")
 
     def log_activity(self, message: str):
@@ -52,6 +53,7 @@ class DailyVideoRecorder:
         time_str = vn_now.strftime("%H:%M:%S")
         log_entry = f"[{time_str}] {message}"
         self.session_logs.append(log_entry)
+        self.last_activity_time = time.time()  # Cập nhật thời gian hoạt động
 
     def _get_current_date_str(self) -> str:
         vn_now = time_mgr.get_accurate_time()
@@ -250,6 +252,13 @@ class DailyVideoRecorder:
         if not self._is_recording:
             return False
 
+        # Kiểm tra thay đổi ngày trước (độc lập với idle)
+        current_date = self._get_current_date_str()
+        if current_date != self.current_date:
+            logger.info(f"[DailyVideoRecorder] Đổi ngày (từ {self.current_date} sang {current_date}), dừng phiên cũ và lưu video")
+            self.stop_session()
+            return True
+
         # Kiểm tra idle timeout
         if time.time() - self.last_activity_time > self.idle_timeout:
             logger.info(f"[DailyVideoRecorder] Phát hiện idle (không hoạt động {self.idle_timeout}s), dừng phiên và lưu video")
@@ -287,6 +296,7 @@ class DailyVideoRecorder:
             self.start_session(w, h)
 
         if self._is_recording:
+            # Kiểm tra thay đổi ngày (đã có trong check_idle(), nhưng kiểm tra thêm ở đây để đảm bảo)
             current_date = self._get_current_date_str()
             if current_date != self.current_date:
                 logger.info(f"[DailyVideoRecorder] Đổi ngày, dừng phiên cũ, bắt đầu phiên mới")
@@ -294,7 +304,9 @@ class DailyVideoRecorder:
                 self.start_session(w, h)
                 return
 
-            self.last_activity_time = time.time()
+            # Chỉ cập nhật last_activity_time nếu có phát hiện khuôn mặt (hoạt động thực tế)
+            if detected_faces and len(detected_faces) > 0:
+                self.last_activity_time = time.time()
 
             frame_with_overlay = self._draw_overlay(frame, detected_faces)
 
