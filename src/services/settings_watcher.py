@@ -11,12 +11,13 @@ class SettingsWatcher:
     Background worker that listens to changes in the settings collection 
     using MongoDB Change Streams. If Change Streams are not supported 
     (e.g., in a standalone local MongoDB deployment), it automatically 
-    falls back to a non-blocking 30-second background polling mechanism.
+    falls back to a non-blocking 10-second background polling mechanism.
     """
     def __init__(self, camera_instance):
         self.camera = camera_instance
         self.running = False
         self.thread = None
+        self.last_settings_hash = None
 
     def start(self):
         """Start the background settings watcher daemon thread."""
@@ -29,6 +30,19 @@ class SettingsWatcher:
         """Stop the background settings watcher thread."""
         self.running = False
         logger.info("SettingsWatcher background thread stopped.")
+
+    def _get_settings_hash(self):
+        """Tạo hash đơn giản từ các setting camera để phát hiện thay đổi"""
+        from src.config import MongoDbConfig
+        keys = [
+            "camera_ip", "camera_port", "camera_user", "camera_pass",
+            "camera_rtsp_path", "camera_rtsp_url", "camera_roi"
+        ]
+        hash_parts = []
+        for key in keys:
+            val = mongo_db.get_setting(key, "", username=MongoDbConfig.COMPANY_ID)
+            hash_parts.append(f"{key}={val}")
+        return "|".join(hash_parts)
 
     def _run(self):
         # Try to use MongoDB Change Streams first
@@ -77,27 +91,31 @@ class SettingsWatcher:
         except PyMongoError as e:
             logger.warning(
                 f"MongoDB Change Streams not supported or failed to start: {e}. "
-                "Switching to robust background polling (every 30 seconds)..."
+                "Switching to robust background polling (every 10 seconds)..."
             )
             self._run_polling()
         except Exception as e:
             logger.warning(
                 f"Unexpected error in Change Stream listener: {e}. "
-                "Switching to robust background polling (every 30 seconds)..."
+                "Switching to robust background polling (every 10 seconds)..."
             )
             self._run_polling()
 
     def _run_polling(self):
-        """Fallback polling mechanism (runs every 30s) when Change Stream is not supported."""
-        logger.info("Robust settings polling started (Interval: 30s).")
+        """Fallback polling mechanism (runs every 10s) when Change Stream is not supported."""
+        logger.info("Robust settings polling started (Interval: 10s).")
         while self.running:
             try:
-                self._reload_and_update()
+                current_hash = self._get_settings_hash()
+                if current_hash != self.last_settings_hash:
+                    logger.info(f"[SettingsWatcher] Phát hiện thay đổi setting, reload config...")
+                    self.last_settings_hash = current_hash
+                    self._reload_and_update()
             except Exception as e:
                 logger.error(f"[SettingsWatcher] Polling reload error: {e}")
             
             # Non-blocking sleep: check the self.running flag periodically
-            for _ in range(60):
+            for _ in range(20):
                 if not self.running:
                     break
                 time.sleep(0.5)
@@ -109,18 +127,13 @@ class SettingsWatcher:
         success = CameraConfig.load_from_mongodb(mongo_db)
         if success:
             new_url = CameraConfig.RTSP_URL
-            # If RTSP URL has changed, perform dynamic hot-reconnection
-            if old_url != new_url:
-                logger.info(
-                    f"RTSP URL change detected!\n"
-                    f" - Old: {self.camera._mask_url(str(old_url))}\n"
-                    f" - New: {self.camera._mask_url(str(new_url))}"
-                )
-                # Disconnect the old camera stream
-                self.camera.disconnect()
-                # Connect to the new stream
-                connected = self.camera.connect(new_url=new_url)
-                if connected:
-                    logger.success("Successfully hot-reconnected to the new RTSP URL!")
-                else:
-                    logger.error("Failed to hot-reconnect to the new RTSP URL.")
+            logger.info(f"[SettingsWatcher] Config loaded - Old URL: {self.camera._mask_url(str(old_url))} | New URL: {self.camera._mask_url(str(new_url))}")
+            # Luôn luôn reconnect camera sau khi reload config (để đảm bảo cập nhật)
+            logger.info("[SettingsWatcher] Đang ngắt kết nối camera cũ...")
+            self.camera.disconnect()
+            logger.info("[SettingsWatcher] Đang kết nối lại camera với config mới...")
+            connected = self.camera.connect(new_url=new_url)
+            if connected:
+                logger.success("Successfully hot-reconnected to the RTSP URL!")
+            else:
+                logger.error("Failed to hot-reconnect to the RTSP URL.")

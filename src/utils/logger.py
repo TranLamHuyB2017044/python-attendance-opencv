@@ -23,27 +23,39 @@ def setup_logger() -> None:
     # Remove default logger
     logger.remove()
     
-    # Add console logger if enabled and available (sys.stdout is None in Windowed mode)
-    if LogConfig.ENABLE_CONSOLE and sys.stdout is not None:
-        logger.add(
-            sys.stdout,
-            format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
-            level=LogConfig.LEVEL,
-            colorize=True,
-            catch=True, # Prevent app crash if console logging fails
-        )
+    # Add console logger if enabled
+    if LogConfig.ENABLE_CONSOLE:
+        try:
+            # Try to use sys.stdout, if not available (frozen app), use sys.__stdout__
+            stream = sys.stdout if sys.stdout is not None else sys.__stdout__
+            logger.add(
+                stream,
+                format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
+                level=LogConfig.LEVEL,
+                colorize=True,
+                catch=True, # Prevent app crash if console logging fails
+            )
+        except Exception as e:
+            print(f"Warning: Could not setup console logger: {e}")
     
     # Add file logger with rotation
-    logger.add(
-        LogConfig.FILE,
-        format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}",
-        level=LogConfig.LEVEL,
-        rotation="10 MB",
-        retention="30 days",
-        compression="zip",
-        encoding="utf-8",
-        catch=True, # Prevent app crash if file logging fails
-    )
+    try:
+        # Ensure logs directory exists
+        LogConfig.FILE.parent.mkdir(parents=True, exist_ok=True)
+        logger.add(
+            LogConfig.FILE,
+            format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}",
+            level=LogConfig.LEVEL,
+            rotation="10 MB",
+            retention="30 days",
+            compression="zip",
+            encoding="utf-8",
+            catch=True, # Prevent app crash if file logging fails
+            enqueue=True, # Use queue for thread-safe logging
+        )
+        logger.info(f"File logger initialized, writing to: {LogConfig.FILE}")
+    except Exception as e:
+        print(f"Warning: Could not setup file logger: {e}")
 
     # Add MongoDB sink for WARNING and ERROR levels
     def mongodb_sink(message):
@@ -72,22 +84,35 @@ def setup_logger() -> None:
 
     # Add Telegram sink for ERROR and CRITICAL levels with Anti-Spam
     last_telegram_time = 0
+    sent_errors = set()  # Track các lỗi đã gửi để không lặp lại
+    
     def telegram_sink(message):
-        nonlocal last_telegram_time
+        nonlocal last_telegram_time, sent_errors
         import time
         current_time = time.time()
-        # Chỉ cho phép gửi Telegram mỗi 10 giây một lần để tránh Loop/Spam
-        if current_time - last_telegram_time < 10:
+        
+        record = message.record
+        error_key = f"{record['name']}:{record['function']}:{record['line']}:{record['message'][:100]}"
+        
+        # Nếu lỗi này đã gửi rồi, bỏ qua
+        if error_key in sent_errors:
             return
             
-        from src.utils.time_manager import time_mgr
-        # from src.services.report_service import report_service  <-- REMOVE THIS TO AVOID CIRCULAR IMPORT / LOOP
+        # Chỉ cho phép gửi Telegram mỗi 30 giây một lần để tránh Loop/Spam
+        if current_time - last_telegram_time < 30:
+            return
+            
         from src.utils.telegram_bot import send_telegram_report
-        record = message.record
         title = f"System {record['level'].name}"
         error_msg = f"{record['name']}:{record['function']}:{record['line']} - {record['message']}"
         
         last_telegram_time = current_time
+        sent_errors.add(error_key)
+        
+        # Giới hạn số lỗi lưu trong bộ nhớ (tối đa 100 lỗi) để tránh leak memory
+        if len(sent_errors) > 100:
+            sent_errors.clear()
+            
         send_telegram_report(title, error_msg)
 
     logger.add(
