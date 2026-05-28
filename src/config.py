@@ -12,6 +12,8 @@ from urllib.parse import urlparse, unquote
 from dotenv import load_dotenv
 from loguru import logger
 
+
+
 # Project paths
 if getattr(sys, 'frozen', False):
     # If running as a built .exe, PROJECT_ROOT is the folder where .exe is located
@@ -297,7 +299,7 @@ class RecognitionConfig:
     
     THRESHOLD: float = float(os.getenv("RECOGNITION_THRESHOLD", "0.6"))
     EMBEDDING_DIM: int = int(os.getenv("EMBEDDING_DIM", "512"))
-    TEST_MODE: bool = os.getenv("TEST_MODE", "false").lower() == "true"
+    TEST_MODE: bool = os.getenv("TEST_MODE", "true").lower() == "true"
     ANTI_SPOOFING_ENABLED: bool = os.getenv("ANTI_SPOOFING_ENABLED", "true").lower() == "true"
     COOLDOWN_SECONDS: int = int(os.getenv("DETECTION_COOLDOWN", "3600")) # Default 1 hour
     MAX_FACES: int = int(os.getenv("MAX_FACES", "100"))
@@ -305,7 +307,7 @@ class RecognitionConfig:
     MIN_FACE_SIZE: int = int(os.getenv("MIN_FACE_SIZE", "60"))  # Giảm từ 80 xuống 60 để detect mặt nhỏ hơn
     # Số frame thu thập trước khi kết luận nhận diện (Best-of-N voting)
     # Tăng lên nhưng chậm hơn (khuyên dùng 3-7), giảm xuống nhưng nhanh hơn
-    GATHER_FRAMES: int = int(os.getenv("GATHER_FRAMES", "3"))
+    GATHER_FRAMES: int = int(os.getenv("GATHER_FRAMES", "5"))
 
     # Ngưỡng chất lượng frame trước gather/recognize
     MIN_BLUR_VARIANCE: float = float(os.getenv("MIN_BLUR_VARIANCE", "50"))

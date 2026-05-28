@@ -187,3 +187,4 @@ cython_debug/
 
 # Local scripts
 scripts/seed_recognition_config.py
+service_account.json

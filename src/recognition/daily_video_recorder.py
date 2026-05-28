@@ -1,6 +1,7 @@
 import time
 import cv2
 import shutil
+import threading
 from pathlib import Path
 from datetime import datetime, timedelta
 from loguru import logger
@@ -19,7 +20,7 @@ class DailyVideoRecorder:
         self.max_log_lines = DailyVideoConfig.MAX_LOG_LINES
         self.retention_days = DailyVideoConfig.RETENTION_DAYS
 
-        self.video_writer: Optional[cv2.VideoWriter] = None
+        self.session_frames: List[Any] = []
         self.current_video_path: Optional[Path] = None
         self.session_start_time: Optional[float] = None
         self.last_activity_time: Optional[float] = None
@@ -66,6 +67,86 @@ class DailyVideoRecorder:
         date_folder.mkdir(parents=True, exist_ok=True)
         return date_folder
 
+    def _draw_overlay(self, frame: cv2.Mat, detected_faces: List[Any]) -> cv2.Mat:
+        render = frame.copy()
+        h, w = render.shape[:2]
+
+        vn_now = time_mgr.get_accurate_time()
+        time_str = vn_now.strftime("%Y-%m-%d %H:%M:%S")
+
+        cv2.rectangle(render, (10, 10), (380, 50), (0, 0, 0), -1)
+        cv2.putText(render, time_str, (20, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+
+        if self._is_recording and self.session_start_time:
+            elapsed = int(time.time() - self.session_start_time)
+            status_text = f"REC {elapsed//3600:02d}:{(elapsed%3600)//60:02d}:{elapsed%60:02d}"
+            cv2.rectangle(render, (w - 200, 10), (w - 10, 50), (0, 0, 255), -1)
+            cv2.putText(render, status_text, (w - 190, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            cv2.circle(render, (w - 220, 30), 10, (0, 0, 255), -1)
+
+        if detected_faces:
+            y_offset = 70
+            box_height = 30 + 25 * len(detected_faces)
+            cv2.rectangle(render, (10, y_offset - 30), (350, y_offset + box_height), (0, 0, 0, 200), -1)
+            cv2.putText(render, "=== Nguoi trong khung ===", (20, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
+            y_offset += 25
+
+            for face in detected_faces:
+                face_name = getattr(face, 'name', 'Unknown')
+                track_id = getattr(face, 'track_id', 'N/A')
+                text = f"  ID:{track_id} - {face_name}"
+                cv2.putText(render, text, (20, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 2)
+                y_offset += 22
+
+        log_panel_width = 600
+        log_panel_x = w - log_panel_width - 10
+        recent_logs = list(self.session_logs)[-self.max_log_lines:]
+        
+        if recent_logs:
+            panel_height = 30 + 22 * len(recent_logs)
+            log_y = h - 20
+            
+            cv2.rectangle(render, (log_panel_x, log_y - panel_height + 10), (w - 10, log_y + 10), (0, 0, 0, 220), -1)
+            cv2.putText(render, "=== LOG PHIEN ===", (log_panel_x + 20, log_y - panel_height + 35), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2)
+            
+            current_y = log_y - panel_height + 55
+            for log in recent_logs:
+                cv2.putText(render, log, (log_panel_x + 20, current_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 255), 2)
+                current_y += 22
+
+        return render
+
+    def _save_video_async(self, path, frames, fps):
+        try:
+            if not frames or len(frames) == 0:
+                logger.warning("[DailyVideoRecorder] Không có frame để lưu")
+                return
+
+            h, w = frames[0].shape[:2]
+            
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            out = cv2.VideoWriter(path, fourcc, fps, (int(w), int(h)))
+            
+            if not out.isOpened():
+                logger.warning(f"[DailyVideoRecorder] Không thể mở mp4v, thử dùng XVID...")
+                fourcc = cv2.VideoWriter_fourcc(*'XVID')
+                path_avi = path.replace('.mp4', '.avi')
+                path = path_avi
+                out = cv2.VideoWriter(path_avi, fourcc, fps, (int(w), int(h)))
+            
+            if out.isOpened():
+                for vf in frames:
+                    out.write(vf)
+                out.release()
+                file_size = Path(path).stat().st_size
+                logger.success(f"[DailyVideoRecorder] Đã lưu video: {path} ({file_size / 1024:.1f} KB)")
+                
+                self.drive_uploader.queue_upload(Path(path))
+            else:
+                logger.error(f"[DailyVideoRecorder] Không thể lưu video!")
+        except Exception as e:
+            logger.error(f"[DailyVideoRecorder] Lỗi lưu video: {e}")
+
     def start_session(self, frame_width: int, frame_height: int):
         if not self.enabled:
             return
@@ -78,15 +159,7 @@ class DailyVideoRecorder:
             video_filename = self._get_video_filename()
             self.current_video_path = date_folder / video_filename
 
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            fps = CameraConfig.FPS
-            self.video_writer = cv2.VideoWriter(
-                str(self.current_video_path),
-                fourcc,
-                fps,
-                (frame_width, frame_height)
-            )
-
+            self.session_frames = []
             self.session_start_time = time.time()
             self.last_activity_time = time.time()
             self.current_date = self._get_current_date_str()
@@ -106,15 +179,19 @@ class DailyVideoRecorder:
         try:
             self.log_activity("Kết thúc phiên ghi video")
 
-            if self.video_writer:
-                self.video_writer.release()
-                self.video_writer = None
-
-            if self.current_video_path:
+            if self.current_video_path and len(self.session_frames) >= 1:
                 duration = time.time() - self.session_start_time
-                logger.success(f"[DailyVideoRecorder] Đã lưu video: {self.current_video_path} (Thời lượng: {duration:.1f}s)")
+                actual_fps = len(self.session_frames) / duration if duration > 0 else 15.0
+                actual_fps = max(5.0, min(30.0, actual_fps))
                 
-                self.drive_uploader.queue_upload(self.current_video_path)
+                logger.info(f"[DailyVideoRecorder] Đang lưu {len(self.session_frames)} frames...")
+                threading.Thread(
+                    target=self._save_video_async, 
+                    args=(str(self.current_video_path), self.session_frames, actual_fps), 
+                    daemon=True
+                ).start()
+            else:
+                logger.warning(f"[DailyVideoRecorder] Không đủ frame để lưu (chỉ có {len(self.session_frames)} frame)")
 
         except Exception as e:
             logger.error(f"[DailyVideoRecorder] Lỗi khi dừng phiên: {e}")
@@ -152,13 +229,7 @@ class DailyVideoRecorder:
             logger.error(f"[DailyVideoRecorder] Lỗi cleanup video cũ: {e}")
 
     def _cleanup(self):
-        if self.video_writer:
-            try:
-                self.video_writer.release()
-            except:
-                pass
-            self.video_writer = None
-
+        self.session_frames = []
         self.current_video_path = None
         self.session_start_time = None
         self.last_activity_time = None
@@ -169,72 +240,46 @@ class DailyVideoRecorder:
             return False
 
         if time.time() - self.last_activity_time > self.idle_timeout:
+            logger.info(f"[DailyVideoRecorder] Phát hiện idle (không hoạt động {self.idle_timeout}s), dừng phiên và lưu video")
             self.stop_session()
             return True
 
         return False
 
-    def _draw_overlay(self, frame: cv2.Mat, detected_faces: List[Any]) -> cv2.Mat:
-        overlay = frame.copy()
-        h, w = overlay.shape[:2]
-
-        vn_now = time_mgr.get_accurate_time()
-        time_str = vn_now.strftime("%Y-%m-%d %H:%M:%S")
-
-        cv2.rectangle(overlay, (10, 10), (350, 45), (0, 0, 0), -1)
-        cv2.putText(overlay, time_str, (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-
+    def force_save_and_stop(self):
+        """Buộc lưu video và dừng phiên (gọi khi app tắt)"""
         if self._is_recording:
-            elapsed = int(time.time() - self.session_start_time)
-            status_text = f"REC {elapsed//3600:02d}:{(elapsed%3600)//60:02d}:{elapsed%60:02d}"
-            cv2.rectangle(overlay, (w - 180, 10), (w - 10, 45), (0, 0, 255), -1)
-            cv2.putText(overlay, status_text, (w - 170, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            cv2.circle(overlay, (w - 200, 28), 8, (0, 0, 255), -1)
-
-        if detected_faces:
-            y_offset = 60
-            cv2.rectangle(overlay, (10, y_offset - 25), (300, y_offset + 25 * len(detected_faces)), (0, 0, 0, 180), -1)
-            cv2.putText(overlay, "Nguoi trong khung:", (20, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-            y_offset += 20
-
-            for face in detected_faces:
-                face_name = getattr(face, 'name', 'Unknown')
-                track_id = getattr(face, 'track_id', 'N/A')
-                text = f"  ID:{track_id} - {face_name}"
-                cv2.putText(overlay, text, (20, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
-                y_offset += 18
-
-        log_y = h - 20
-        recent_logs = list(self.session_logs)[-self.max_log_lines:]
-        for log in reversed(recent_logs):
-            cv2.rectangle(overlay, (10, log_y - 18), (w - 10, log_y + 5), (0, 0, 0, 160), -1)
-            cv2.putText(overlay, log, (20, log_y), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 255), 1)
-            log_y -= 22
-
-        alpha = 0.6
-        return cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0)
+            logger.info("[DailyVideoRecorder] Buộc lưu video (app đang tắt)...")
+            self.stop_session()
 
     def write_frame(self, frame: cv2.Mat, detected_faces: List[Any]):
         if not self.enabled:
+            logger.debug("[DailyVideoRecorder] Chức năng bị tắt, không ghi frame")
             return
 
         if frame is None:
+            logger.debug("[DailyVideoRecorder] Frame là None, bỏ qua")
             return
 
         h, w = frame.shape[:2]
 
         if not self._is_recording:
+            logger.debug("[DailyVideoRecorder] Chưa ghi, gọi start_session()")
             self.start_session(w, h)
 
         if self._is_recording:
             current_date = self._get_current_date_str()
             if current_date != self.current_date:
+                logger.info(f"[DailyVideoRecorder] Đổi ngày, dừng phiên cũ, bắt đầu phiên mới")
                 self.stop_session()
                 self.start_session(w, h)
+                return
 
             self.last_activity_time = time.time()
 
             frame_with_overlay = self._draw_overlay(frame, detected_faces)
 
-            if self.video_writer:
-                self.video_writer.write(frame_with_overlay)
+            if frame_with_overlay is not None:
+                self.session_frames.append(frame_with_overlay)
+                if len(self.session_frames) % 30 == 0:
+                    logger.debug(f"[DailyVideoRecorder] Đã có {len(self.session_frames)} frames trong buffer")

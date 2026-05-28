@@ -90,6 +90,7 @@ class QdrantAttendanceManager:
                 self.delete_user(user_id_str)
 
             points = []
+            total_count = len(embeddings)
             for i, emb in enumerate(embeddings):
                 vector = emb.tolist() if isinstance(emb, np.ndarray) else list(emb)
                 payload = {
@@ -98,6 +99,7 @@ class QdrantAttendanceManager:
                     "birthday": birthday,
                     "company_id": cid,
                     "active": active,
+                    "vector_count": total_count,
                     "created_at": datetime.now().isoformat()
                 }
                 if enrollment_image_ids and i < len(enrollment_image_ids):
@@ -158,14 +160,6 @@ class QdrantAttendanceManager:
             u_id = payload.get("user_id")
             user_id_str = str(u_id) if u_id is not None else "Unknown"
 
-            # Count total vectors for this user
-            count_res = self.client.count(
-                collection_name=self.collection_name,
-                count_filter=models.Filter(
-                    must=[models.FieldCondition(key="user_id", match=models.MatchValue(value=user_id_str))]
-                )
-            )
-
             return {
                 "name": payload.get("user_name", "Unknown"),
                 "user_id": user_id_str,
@@ -173,7 +167,7 @@ class QdrantAttendanceManager:
                 "company_id": payload.get("company_id", "Unknown"),
                 "score": score,
                 "detect_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "vector_count": count_res.count,
+                "vector_count": payload.get("vector_count", 1),
                 "active": payload.get("active", True)
             }
 

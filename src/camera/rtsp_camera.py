@@ -241,6 +241,14 @@ class RTSPCamera:
             if self.cap is None or not self.cap.isOpened():
                 if not self._notified_error and self.enable_notifications:
                     logger.error(f"Failed to open {'webcam' if self.is_webcam else 'RTSP stream'}")
+                    try:
+                        from src.utils.telegram_bot import send_telegram_report
+                        send_telegram_report(
+                            "CAMERA CONNECTION FAIL", 
+                            f"Camera {'webcam' if self.is_webcam else 'RTSP'} connection failed!\nURL: {self._mask_url(str(self.camera_source))}"
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to send Telegram notification: {e}")
                     self._notified_error = True # Mark that we've notified the error
                 else:
                     # Subsequent failures log as warning to avoid Telegram spam
@@ -372,6 +380,16 @@ class RTSPCamera:
                             self.frame = frame
                     else:
                         logger.warning("Stream connection lost in background thread.")
+                        if not self._notified_error and self.enable_notifications:
+                            try:
+                                from src.utils.telegram_bot import send_telegram_report
+                                send_telegram_report(
+                                    "CAMERA CONNECTION LOST", 
+                                    f"Camera {'webcam' if self.is_webcam else 'RTSP'} connection lost!\nURL: {self._mask_url(str(self.camera_source))}"
+                                )
+                            except Exception as e:
+                                logger.warning(f"Failed to send Telegram notification: {e}")
+                            self._notified_error = True
                         self.is_connected = False
                 except Exception as e:
                     logger.error(f"[Camera] _update error: {e}")

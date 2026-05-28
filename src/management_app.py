@@ -282,13 +282,24 @@ def main():
                 panel_w    = max(220, int(cur_w * _LOG_PANEL_RATIO))
                 cam_area_w = cur_w - panel_w
 
-                # Clear mouse callback once
-                if not getattr(main, '_detect_cb_cleared', False):
+                # Thêm mouse callback cho nút CLEAR log panel (giống hệt main.py)
+                if not getattr(main, '_detect_callback_cleared', False):
+                    def on_panel_click(event, x, y, flags, param):
+                        if event == cv2.EVENT_LBUTTONDOWN:
+                            # Tọa độ x0, pw, ph được truyền vào param hoặc tính toán dựa trên current state
+                            # CLEAR button trong log_panel_renderer: [x0+pw-50, x0+pw-4], [ph-17, ph-3]
+                            cur_w, cur_h = param
+                            p_w = max(220, int(cur_w * 0.25))
+                            x0 = cur_w - p_w
+                            if x >= x0 + p_w - 55 and y >= cur_h - 22:
+                                from src.utils.webhook_log_bus import clear_logs
+                                clear_logs()
+
                     try:
-                        cv2.setMouseCallback(win_name, lambda *args: None)
+                        cv2.setMouseCallback(win_name, on_panel_click, param=(cur_w, cur_h))
                     except Exception:
                         pass
-                    main._detect_cb_cleared = True
+                    main._detect_callback_cleared = True
 
                 # Connect to SHM
                 if _shm_obj is None and service_active:
