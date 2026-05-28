@@ -28,11 +28,7 @@ if base_dir not in sys.path:
     sys.path.append(base_dir)
 # ------------------------------------------
 
-# --- DISABLE GOOGLE DRIVE FOR MANAGEMENT APP ---
-from src.config import GoogleDriveConfig
-GoogleDriveConfig.ENABLED = False
-logger.info("[Management App] Google Drive upload đã bị disable cho management app")
-# -------------------------------------------------
+
 
 from src.utils.logger import setup_logger
 from src.attendance.qdrant_db import QdrantAttendanceManager

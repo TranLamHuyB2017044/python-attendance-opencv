@@ -10,7 +10,6 @@ from collections import deque
 
 from src.config import DailyVideoConfig, DAILY_VIDEOS_DIR, CameraConfig
 from src.utils.time_manager import time_mgr
-from src.recognition.google_drive_uploader import GoogleDriveUploader
 
 
 class DailyVideoRecorder:
@@ -31,7 +30,6 @@ class DailyVideoRecorder:
 
         self._is_recording = False
         self._save_threads = []  # Theo dõi các thread lưu video
-        self.drive_uploader = GoogleDriveUploader()
 
         if self.enabled:
             logger.info("[DailyVideoRecorder] Đã khởi tạo, sẵn sàng ghi video hàng ngày")
@@ -143,8 +141,6 @@ class DailyVideoRecorder:
                 out.release()
                 file_size = Path(path).stat().st_size
                 logger.success(f"[DailyVideoRecorder] Đã lưu video: {path} ({file_size / 1024:.1f} KB)")
-                
-                self.drive_uploader.queue_upload(Path(path))
             else:
                 logger.error(f"[DailyVideoRecorder] Không thể lưu video!")
         except Exception as e:

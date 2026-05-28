@@ -22,11 +22,7 @@ if base_dir not in sys.path:
 # 0. Suppress specific warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-# --- DISABLE GOOGLE DRIVE FOR UI APP ---
-from src.config import GoogleDriveConfig
-GoogleDriveConfig.ENABLED = False
-logger.info("[Main App] Google Drive upload đã bị disable cho UI app")
-# ----------------------------------------
+
 
 from src.utils.logger import setup_logger
 from src.camera.rtsp_camera import RTSPCamera

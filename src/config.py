@@ -390,14 +390,7 @@ class DailyVideoConfig:
     RETENTION_DAYS: int = int(os.getenv("DAILY_RECORDING_RETENTION_DAYS", "7"))
 
 
-class GoogleDriveConfig:
-    """Cấu hình upload lên Google Drive"""
-    ENABLED: bool = os.getenv("GOOGLE_DRIVE_ENABLED", "true").lower() == "true"
-    USE_SERVICE_ACCOUNT: bool = os.getenv("GOOGLE_DRIVE_USE_SERVICE_ACCOUNT", "false").lower() == "true"
-    SERVICE_ACCOUNT_FILE: str = os.getenv("GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE", "service_account.json")
-    CREDENTIALS_FILE: str = os.getenv("GOOGLE_DRIVE_CREDENTIALS_FILE", "credentials.json")
-    TOKEN_FILE: str = os.getenv("GOOGLE_DRIVE_TOKEN_FILE", "token.json")
-    FOLDER_ID: str = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "")
+
 
 
 class SpecialUserConfig:
@@ -481,5 +474,4 @@ __all__ = [
     "ReportSystemConfig",
     "SpecialUserConfig",
     "DailyVideoConfig",
-    "GoogleDriveConfig",
 ]
