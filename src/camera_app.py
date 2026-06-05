@@ -41,7 +41,7 @@ def main():
     logger.info("Starting Auto-Start Camera Detection...")
 
     # Start Ping Service
-    ping_service.start()
+    # ping_service.start()
 
     # ── Start log-fetch background thread ────────────────────────────────────
     start_polling()
