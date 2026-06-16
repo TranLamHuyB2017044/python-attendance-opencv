@@ -173,56 +173,18 @@ class CameraConfig:
             cid = MongoDbConfig.COMPANY_ID
             logger.info(f"CameraConfig.load_from_mongodb: COMPANY_ID từ .env = {cid}")
 
-            ip = mongo_db.get_setting("camera_ip", None, username=cid)
-            port = mongo_db.get_setting("camera_port", None, username=cid)
-            user = mongo_db.get_setting("camera_user", None, username=cid)
-            pwd = mongo_db.get_setting("camera_pass", None, username=cid)
-            path = mongo_db.get_setting("camera_rtsp_path", None, username=cid)
-
-            if ip and user and pwd:
-                if not path:
-                    path = "/ch1/main"
-                cls.IP = ip
-                cls.PORT = int(port or "554")
-                cls.USER = user
-                cls.PASS = pwd
-                cls.RTSP_PATH = path
-                cls.RTSP_URL = cls.build_rtsp_url(ip, port, user, pwd, path)
-                logger.info(
-                    f"CameraConfig: MongoDB fields cho company_id={cid} | "
-                    f"ip={ip} | url={cls._mask_rtsp(cls.RTSP_URL)}"
-                )
-            else:
-                full_url = (mongo_db.get_setting("camera_rtsp_url", None, username=cid) or "").strip()
-                if full_url.lower().startswith("rtsp://"):
-                    creds = cls.parse_rtsp_url(full_url)
-                    cls.IP = creds["ip"]
-                    cls.PORT = int(creds["port"] or 554)
-                    cls.USER = creds["user"]
-                    cls.PASS = creds["pass"]
-                    cls.RTSP_PATH = creds["path"]
-                    cls.RTSP_URL = full_url
-                    logger.info(
-                        f"CameraConfig: fallback camera_rtsp_url company_id={cid} | "
-                        f"url={cls._mask_rtsp(cls.RTSP_URL)}"
-                    )
-                else:
-                    cls.RTSP_URL = os.getenv("RTSP_URL", "").strip()
-                    cls.RTSP_PATH = cls.rtsp_path_from_url(cls.RTSP_URL) if cls.RTSP_URL else "/ch1/main"
-                    if cls.RTSP_URL:
-                        creds = cls.parse_rtsp_url(cls.RTSP_URL)
-                        cls.IP = creds["ip"]
-                        cls.PORT = int(creds["port"] or 554)
-                        cls.USER = creds["user"]
-                        cls.PASS = creds["pass"]
-                        logger.info(
-                            f"CameraConfig: MongoDB trống, bootstrap từ .env | "
-                            f"url={cls._mask_rtsp(cls.RTSP_URL)}"
-                        )
-                    else:
-                        logger.warning(
-                            f"CameraConfig: Không có camera config cho company_id={cid}"
-                        )
+            # Sử dụng resolve_rtsp_url_for_company để lấy URL đúng theo đúng logic chính thức
+            resolved_url = cls.resolve_rtsp_url_for_company(mongo_db, cid)
+            cls.RTSP_URL = resolved_url
+            
+            # Cập nhật các trường riêng lẻ từ URL đã resolve
+            if resolved_url:
+                creds = cls.parse_rtsp_url(resolved_url)
+                cls.IP = creds["ip"]
+                cls.PORT = int(creds["port"] or 554)
+                cls.USER = creds["user"]
+                cls.PASS = creds["pass"]
+                cls.RTSP_PATH = creds["path"]
             
             # 4. Update Recognition & Cooldown Settings
             cooldown_sec = mongo_db.get_setting("detection_cooldown", str(RecognitionConfig.COOLDOWN_SECONDS), username=cid)
