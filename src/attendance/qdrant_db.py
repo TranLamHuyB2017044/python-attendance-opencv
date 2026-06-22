@@ -85,12 +85,15 @@ class QdrantAttendanceManager:
             
             active = kwargs.get("active", True)
             
-            # If specified, remove existing vectors for this user first
             if clear_old:
                 self.delete_user(user_id_str)
 
+            existing_points = []
+            if not clear_old:
+                existing_points = self.get_user_points(user_id_str)
+            
+            total_count = len(existing_points) + len(embeddings)
             points = []
-            total_count = len(embeddings)
             for i, emb in enumerate(embeddings):
                 vector = emb.tolist() if isinstance(emb, np.ndarray) else list(emb)
                 payload = {
@@ -115,6 +118,10 @@ class QdrantAttendanceManager:
                 collection_name=self.collection_name,
                 points=points
             )
+            
+            if not clear_old and existing_points:
+                self.update_vector_count(user_id_str, total_count)
+
             logger.success(f"Upserted {len(points)} samples for {user_name} (ID: {user_id}, Company: {cid})")
             return True
         except Exception as e:
@@ -338,7 +345,7 @@ class QdrantAttendanceManager:
         try:
             self.client.delete(
                 collection_name=self.collection_name,
-                points_selector=models.PointIdsSelector(
+                points_selector=models.PointIdsList(
                     points=[point_id]
                 )
             )
@@ -346,6 +353,26 @@ class QdrantAttendanceManager:
             return True
         except Exception as e:
             logger.error(f"Failed to delete point {point_id}: {e}")
+            return False
+
+    def update_vector_count(self, user_id: str, count: int) -> bool:
+        """
+        Update the vector_count in the payload of all points for a user.
+        """
+        try:
+            self.client.set_payload(
+                collection_name=self.collection_name,
+                payload={"vector_count": count},
+                points=models.FilterSelector(
+                    filter=models.Filter(
+                        must=[models.FieldCondition(key="user_id", match=models.MatchValue(value=str(user_id)))]
+                    )
+                )
+            )
+            logger.success(f"Updated vector_count to {count} for user ID: {user_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to update vector_count for user {user_id}: {e}")
             return False
 
     def delete_user_points(self, user_id: str) -> bool:

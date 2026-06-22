@@ -682,12 +682,17 @@ class MongoDBManager:
         """Get list of all companies."""
         return list(self.companies.find().sort("name", 1))
 
-    def get_logs_by_user(self, user_id: str) -> list:
+    def get_logs_by_user(self, user_id: str, limit: Optional[int] = None, skip: int = 0) -> list:
         """
-        Get all attendance logs for a specific user.
+        Get all attendance logs for a specific user, with pagination support.
         """
         try:
-            return list(self.logs.find({"user_id": str(user_id)}).sort("timestamp", -1))
+            query = self.logs.find({"user_id": str(user_id)}).sort("timestamp", -1)
+            if skip > 0:
+                query = query.skip(skip)
+            if limit is not None:
+                query = query.limit(limit)
+            return list(query)
         except Exception as e:
             logger.error(f"MongoDB: Failed to get logs for user {user_id}: {e}")
             return []

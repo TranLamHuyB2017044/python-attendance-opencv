@@ -364,6 +364,15 @@ class FaceTracker:
         # Auto-learn logic implementation
         def task():
             try:
+                # 0. Kiểm tra số lượng ảnh đăng ký hiện tại trong Qdrant
+                existing_points = attendance_mgr.get_user_points(user_id)
+                current_count = len(existing_points)
+                if current_count >= 10:
+                    logger.info(f"Auto-learn: Bỏ qua vì user {user_name} (ID: {user_id}) đã có {current_count} ảnh đăng ký (giới hạn 10).")
+                    # Tự động sửa lại vector_count cho tất cả các điểm của user này trong Qdrant
+                    attendance_mgr.update_vector_count(user_id, current_count)
+                    return
+
                 # 1. Trích xuất và nén ảnh khuôn mặt
                 bbox = face.bbox.astype(int)
                 h, w = frame.shape[:2]

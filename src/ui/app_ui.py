@@ -936,7 +936,10 @@ class AttendanceUI:
         
         ctk.CTkButton(btn_frame, text="Đóng", command=root.destroy, fg_color="gray").pack(side="left", padx=10)
 
-        root.mainloop()
+        if not parent:
+            root.mainloop()
+        else:
+            parent.wait_window(root)
 
     def show_user_images_ui(self, user_id: str, user_name: str, parent=None, attendance_manager=None, mongo_db=None):
         """
@@ -967,6 +970,14 @@ class AttendanceUI:
         attend_selected: dict = {}   # key = log_id -> frame_widget
         COLOR_NORMAL = "#2b2b2b"
         COLOR_SELECTED = "#1f6aa5"
+
+        enroll_limit = [16]
+        attend_limit = [20]
+
+        loaded_enroll_count = [0]
+        loaded_attend_count = [0]
+        enroll_more_btn_widget = [None]
+        attend_more_btn_widget = [None]
 
         # ── helper: preview dialog ──────────────────────────────────────────────
         def _open_preview(img_pil: Image.Image, caption: str = ""):
@@ -1050,14 +1061,13 @@ class AttendanceUI:
                     ok = attendance_manager.delete_point(p_id) if attendance_manager else False
                     if ok:
                         mongo_db.delete_enrollment_image(i_id)
-                        frame = enroll_selected.pop((p_id, i_id), None)
-                        if frame:
-                            frame.destroy()
+                        enroll_selected.pop((p_id, i_id), None)
                     else:
                         errors.append(i_id)
                 except Exception as ex:
                     errors.append(str(ex))
             _refresh_enroll_bar()
+            _reset_and_reload_enrollment(keep_limit=True)
             if errors:
                 messagebox.showerror("Lỗi", f"Không thể xóa {len(errors)} ảnh.")
             else:
@@ -1075,10 +1085,8 @@ class AttendanceUI:
                 mongo_db.update_employee_has_face(user_id, False)
                 messagebox.showinfo("Thành công", f"Đã xóa tất cả ảnh đăng ký của {user_name}.")
                 enroll_selected.clear()
-                for w in enrollment_grid_frame.winfo_children():
-                    w.destroy()
                 _refresh_enroll_bar()
-                _load_enrollment_images()
+                _reset_and_reload_enrollment(keep_limit=False)
             else:
                 messagebox.showerror("Lỗi", "Không thể xóa toàn bộ ảnh. Kiểm tra log.")
 
@@ -1097,46 +1105,120 @@ class AttendanceUI:
         enrollment_grid_frame = ctk.CTkFrame(enrollment_scroll, fg_color="transparent")
         enrollment_grid_frame.pack(fill="both", expand=True)
 
+        def _reset_and_reload_enrollment(keep_limit=True):
+            if not keep_limit:
+                enroll_limit[0] = 16
+            loaded_enroll_count[0] = 0
+            if enroll_more_btn_widget[0]:
+                try:
+                    enroll_more_btn_widget[0].destroy()
+                except Exception:
+                    pass
+                enroll_more_btn_widget[0] = None
+            for child in enrollment_grid_frame.winfo_children():
+                child.destroy()
+            _load_enrollment_images()
+
+        # ── Load enrollment images ──────────────────────────────────────────────
+        def load_more_enroll():
+            enroll_limit[0] += 16
+            if enroll_more_btn_widget[0]:
+                try:
+                    enroll_more_btn_widget[0].destroy()
+                except Exception:
+                    pass
+                enroll_more_btn_widget[0] = None
+            _load_enrollment_images()
+
         # ── Load enrollment images ──────────────────────────────────────────────
         def _load_enrollment_images():
-            loading_label = ctk.CTkLabel(
-                enrollment_grid_frame, text="⏳ Đang tải ảnh đăng ký...",
-                font=("Arial", 14, "bold"), text_color="#1f6aa5"
-            )
-            loading_label.grid(row=0, column=0, pady=40)
-            root.update_idletasks()
+            loading_label = None
+            if loaded_enroll_count[0] == 0:
+                loading_label = ctk.CTkLabel(
+                    enrollment_grid_frame, text="⏳ Đang tải ảnh đăng ký...",
+                    font=("Arial", 14, "bold"), text_color="#1f6aa5"
+                )
+                loading_label.grid(row=0, column=0, pady=40)
+                root.update_idletasks()
 
             def task():
+                try:
+                    if not root.winfo_exists():
+                        return
+                except Exception:
+                    return
+
                 if not attendance_manager:
-                    root.after(0, lambda: [
-                        loading_label.destroy(),
-                        ctk.CTkLabel(enrollment_grid_frame, text="Lỗi: Không có attendance_manager").grid(row=0, column=0)
-                    ])
+                    try:
+                        if root.winfo_exists():
+                            def show_err():
+                                if loading_label and loading_label.winfo_exists():
+                                    loading_label.destroy()
+                                ctk.CTkLabel(enrollment_grid_frame, text="Lỗi: Không có attendance_manager").grid(row=0, column=0)
+                            root.after(0, show_err)
+                    except Exception:
+                        pass
                     return
 
                 points = attendance_manager.get_user_points(user_id)
                 if not points:
-                    root.after(0, lambda: [
-                        loading_label.destroy(),
-                        ctk.CTkLabel(enrollment_grid_frame, text="Không tìm thấy ảnh đăng ký.").grid(row=0, column=0)
-                    ])
+                    try:
+                        if root.winfo_exists():
+                            def show_empty():
+                                if loading_label and loading_label.winfo_exists():
+                                    loading_label.destroy()
+                                ctk.CTkLabel(enrollment_grid_frame, text="Không tìm thấy ảnh đăng ký.").grid(row=0, column=0)
+                            root.after(0, show_empty)
+                    except Exception:
+                        pass
                     return
 
-                root.after(0, loading_label.destroy)
+                try:
+                    if root.winfo_exists() and loading_label:
+                        root.after(0, lambda: loading_label.destroy() if loading_label.winfo_exists() else None)
+                except Exception:
+                    pass
 
+                has_more = False
                 cols_count = 4
-                for i, point in enumerate(points):
+
+                start_idx = loaded_enroll_count[0]
+                points_to_process = points[start_idx:]
+
+                for point in points_to_process:
+                    try:
+                        if not root.winfo_exists():
+                            return
+                    except Exception:
+                        return
+
                     image_id = point.payload.get("enrollment_image_id")
                     if not image_id:
                         continue
+
+                    # If we reached the limit, set has_more and stop fetching images
+                    if loaded_enroll_count[0] >= enroll_limit[0]:
+                        has_more = True
+                        break
+
                     img_data = mongo_db.get_enrollment_image(image_id)
                     if not img_data:
                         continue
+
+                    loaded_enroll_count[0] += 1
+                    current_idx = loaded_enroll_count[0] - 1
+
                     try:
                         img_pil = Image.open(io.BytesIO(img_data)).copy()
                         ctk_img = ctk.CTkImage(light_image=img_pil, dark_image=img_pil, size=(150, 150))
 
-                        def show_img(idx=i, img=ctk_img, raw_pil=img_pil, p_id=point.id, i_id=image_id):
+                        def show_img(idx=current_idx, img=ctk_img, raw_pil=img_pil, p_id=point.id, i_id=image_id):
+                            try:
+                                if not root.winfo_exists():
+                                    return
+                            except Exception:
+                                return
+
                             sel_key = (p_id, i_id)
 
                             border = ctk.CTkFrame(enrollment_grid_frame, fg_color=COLOR_NORMAL,
@@ -1183,7 +1265,7 @@ class AttendanceUI:
                                             mongo_db.delete_enrollment_image(img_id)
                                             enroll_selected.pop(key, None)
                                             _refresh_enroll_bar()
-                                            brd.destroy()
+                                            _reset_and_reload_enrollment(keep_limit=True)
                                             messagebox.showinfo("Thành công", "Đã xóa ảnh.")
                                         else:
                                             messagebox.showerror("Lỗi", "Không thể xóa ảnh khỏi Qdrant.")
@@ -1194,9 +1276,38 @@ class AttendanceUI:
                                     command=delete_one
                                 ).pack(side="left", padx=2)
 
-                        root.after(0, show_img)
+                        try:
+                            if root.winfo_exists():
+                                root.after(0, show_img)
+                        except Exception:
+                            pass
                     except Exception as e:
+                        err_str = str(e)
                         logger.error(f"Error loading enrollment image: {e}")
+                        if "main thread is not in main loop" in err_str or "bad window path name" in err_str or "destroyed" in err_str:
+                            logger.info("Tkinter loop or window is closed/dead. Stopping enrollment loading thread.")
+                            break
+
+                # Draw Load More button at the bottom of the grid if more are available
+                if has_more:
+                    def draw_more_btn():
+                        try:
+                            if not root.winfo_exists():
+                                return
+                        except Exception:
+                            return
+                        more_btn = ctk.CTkButton(
+                            enrollment_grid_frame, text="Xem thêm...", width=150, height=35,
+                            fg_color="#16a085", hover_color="#0e6655",
+                            command=load_more_enroll
+                        )
+                        more_btn.grid(row=(loaded_enroll_count[0] + cols_count - 1) // cols_count + 1, column=0, columnspan=cols_count, pady=15)
+                        enroll_more_btn_widget[0] = more_btn
+                    try:
+                        if root.winfo_exists():
+                            root.after(0, draw_more_btn)
+                    except Exception:
+                        pass
 
             threading.Thread(target=task, daemon=True).start()
 
@@ -1232,14 +1343,13 @@ class AttendanceUI:
             for l_id in keys_to_del:
                 try:
                     if mongo_db.delete_log(l_id):
-                        frame = attend_selected.pop(l_id, None)
-                        if frame:
-                            frame.destroy()
+                        attend_selected.pop(l_id, None)
                     else:
                         errors.append(l_id)
                 except Exception as ex:
                     errors.append(str(ex))
             _refresh_attend_bar()
+            _reset_and_reload_attendance(keep_limit=True)
             if errors:
                 messagebox.showerror("Lỗi", f"Không thể xóa {len(errors)} ảnh.")
             else:
@@ -1257,10 +1367,8 @@ class AttendanceUI:
                 if not mongo_db.delete_log(str(log["_id"])):
                     fail += 1
             attend_selected.clear()
-            for w in attendance_grid_frame.winfo_children():
-                w.destroy()
             _refresh_attend_bar()
-            _load_attendance_images()
+            _reset_and_reload_attendance(keep_limit=False)
             if fail:
                 messagebox.showerror("Lỗi", f"Không thể xóa {fail} ảnh.")
             else:
@@ -1280,39 +1388,100 @@ class AttendanceUI:
         attendance_grid_frame = ctk.CTkFrame(attendance_scroll, fg_color="transparent")
         attendance_grid_frame.pack(fill="both", expand=True)
 
+        def _reset_and_reload_attendance(keep_limit=True):
+            if not keep_limit:
+                attend_limit[0] = 20
+            loaded_attend_count[0] = 0
+            if attend_more_btn_widget[0]:
+                try:
+                    attend_more_btn_widget[0].destroy()
+                except Exception:
+                    pass
+                attend_more_btn_widget[0] = None
+            for child in attendance_grid_frame.winfo_children():
+                child.destroy()
+            _load_attendance_images()
+
+        def load_more_attend():
+            attend_limit[0] += 20
+            if attend_more_btn_widget[0]:
+                try:
+                    attend_more_btn_widget[0].destroy()
+                except Exception:
+                    pass
+                attend_more_btn_widget[0] = None
+            _load_attendance_images()
+
         # ── Load attendance images ──────────────────────────────────────────────
         def _load_attendance_images():
-            loading_label = ctk.CTkLabel(
-                attendance_grid_frame, text="⏳ Đang tải ảnh chấm công...",
-                font=("Arial", 14, "bold"), text_color="#1f6aa5"
-            )
-            loading_label.grid(row=0, column=0, pady=40)
-            root.update_idletasks()
+            loading_label = None
+            if loaded_attend_count[0] == 0:
+                loading_label = ctk.CTkLabel(
+                    attendance_grid_frame, text="⏳ Đang tải ảnh chấm công...",
+                    font=("Arial", 14, "bold"), text_color="#1f6aa5"
+                )
+                loading_label.grid(row=0, column=0, pady=40)
+                root.update_idletasks()
 
             def task():
-                logs = mongo_db.get_logs_by_user(user_id)
-                if not logs:
-                    root.after(0, lambda: [
-                        loading_label.destroy(),
-                        ctk.CTkLabel(attendance_grid_frame, text="Không tìm thấy ảnh chấm công.").grid(row=0, column=0)
-                    ])
+                try:
+                    if not root.winfo_exists():
+                        return
+                except Exception:
                     return
 
-                root.after(0, loading_label.destroy)
+                # Fetch only 20 logs at a time, skipping the already loaded ones
+                logs = mongo_db.get_logs_by_user(user_id, limit=20, skip=loaded_attend_count[0])
+                if not logs:
+                    try:
+                        if root.winfo_exists():
+                            def show_empty():
+                                if loading_label and loading_label.winfo_exists():
+                                    loading_label.destroy()
+                                if loaded_attend_count[0] == 0:
+                                    ctk.CTkLabel(attendance_grid_frame, text="Không tìm thấy ảnh chấm công.").grid(row=0, column=0)
+                            root.after(0, show_empty)
+                    except Exception:
+                        pass
+                    return
 
+                try:
+                    if root.winfo_exists() and loading_label:
+                        root.after(0, lambda: loading_label.destroy() if loading_label.winfo_exists() else None)
+                except Exception:
+                    pass
+
+                has_more = (len(logs) == 20)
                 cols_count = 4
-                for i, log in enumerate(logs):
+
+                for log in logs:
+                    try:
+                        if not root.winfo_exists():
+                            return
+                    except Exception:
+                        return
+
                     log_id = str(log["_id"])
-                    img_data = mongo_db.get_log_image(log_id)
+                    img_data = log.get("image_webp")
                     if not img_data:
                         continue
+
+                    loaded_attend_count[0] += 1
+                    current_idx = loaded_attend_count[0] - 1
+
                     try:
                         img_pil = Image.open(io.BytesIO(img_data)).copy()
                         ts = log.get("timestamp", "")
                         status = log.get("status", "")
                         ctk_img = ctk.CTkImage(light_image=img_pil, dark_image=img_pil, size=(150, 150))
 
-                        def show_img(idx=i, img=ctk_img, raw_pil=img_pil, l_id=log_id, timestamp=ts, st=status):
+                        def show_img(idx=current_idx, img=ctk_img, raw_pil=img_pil, l_id=log_id, timestamp=ts, st=status):
+                            try:
+                                if not root.winfo_exists():
+                                    return
+                            except Exception:
+                                return
+
                             sel_key = l_id
 
                             border = ctk.CTkFrame(attendance_grid_frame, fg_color=COLOR_NORMAL,
@@ -1361,7 +1530,7 @@ class AttendanceUI:
                                         if mongo_db.delete_log(l_id):
                                             attend_selected.pop(key, None)
                                             _refresh_attend_bar()
-                                            brd.destroy()
+                                            _reset_and_reload_attendance(keep_limit=True)
                                             messagebox.showinfo("Thành công", "Đã xóa ảnh.")
                                         else:
                                             messagebox.showerror("Lỗi", "Không thể xóa ảnh khỏi MongoDB.")
@@ -1372,9 +1541,38 @@ class AttendanceUI:
                                     command=delete_one
                                 ).pack(side="left", padx=2)
 
-                        root.after(0, show_img)
+                        try:
+                            if root.winfo_exists():
+                                root.after(0, show_img)
+                        except Exception:
+                            pass
                     except Exception as e:
+                        err_str = str(e)
                         logger.error(f"Error loading attendance image: {e}")
+                        if "main thread is not in main loop" in err_str or "bad window path name" in err_str or "destroyed" in err_str:
+                            logger.info("Tkinter loop or window is closed/dead. Stopping attendance loading thread.")
+                            break
+
+                # Draw Load More button at the bottom of the grid if more are available
+                if has_more:
+                    def draw_more_btn():
+                        try:
+                            if not root.winfo_exists():
+                                return
+                        except Exception:
+                            return
+                        more_btn = ctk.CTkButton(
+                            attendance_grid_frame, text="Xem thêm...", width=150, height=35,
+                            fg_color="#16a085", hover_color="#0e6655",
+                            command=load_more_attend
+                        )
+                        more_btn.grid(row=(loaded_attend_count[0] + cols_count - 1) // cols_count + 1, column=0, columnspan=cols_count, pady=15)
+                        attend_more_btn_widget[0] = more_btn
+                    try:
+                        if root.winfo_exists():
+                            root.after(0, draw_more_btn)
+                    except Exception:
+                        pass
 
             threading.Thread(target=task, daemon=True).start()
 
@@ -1383,7 +1581,10 @@ class AttendanceUI:
 
         ctk.CTkButton(root, text="Đóng", command=root.destroy, width=150).pack(pady=10)
 
-        root.mainloop()
+        if not parent:
+            root.mainloop()
+        else:
+            parent.wait_window(root)
 
     @staticmethod
     def pick_company_ui(companies, parent=None):
