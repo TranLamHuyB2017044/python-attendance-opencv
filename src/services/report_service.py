@@ -29,6 +29,9 @@ class ReportService:
         2. Authenticate via HKB Service to get the Bearer Token.
         3. Send the log to the Report System API.
         """
+        if not ReportSystemConfig.is_enabled():
+            return False
+
         try:
             # 1. Thu thập thông tin thiết bị nếu chưa có
             if devices_info is None:

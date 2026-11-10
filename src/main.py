@@ -28,7 +28,7 @@ from src.utils.logger import setup_logger
 from src.camera.rtsp_camera import RTSPCamera
 from src.recognition.face_recognition import FaceRecognition
 from src.attendance.qdrant_db import QdrantAttendanceManager
-from src.attendance.mongodb_mgr import mongo_db
+from src.attendance.mongodb_mgr import AttendanceBackendError, mongo_db
 from src.recognition.tracker import FaceTracker
 from src.config import MongoDbConfig, CameraConfig, DATA_DIR
 from src.ui.app_ui import AttendanceUI, STATE_MENU, STATE_DETECT, STATE_ENROLL_CAM, STATE_ENROLL_UPLOAD, STATE_EDIT, STATE_LIST, STATE_HISTORY, STATE_HKB_LIST, STATE_COMPANY, STATE_CLOUD_USER, STATE_LOGOUT, STATE_SETTINGS, STATE_TEST_CAM
@@ -167,7 +167,7 @@ def enroll_from_camera(camera, face_rec, attendance, ui):
         if len(samples) >= 1:
             # --- Check for existing user to ask before update ---
             force_upd = False
-            existing = mongo_db.employees.find_one({"user_id": str(user_id), "company_id": target_company})
+            existing = mongo_db.get_employee(user_id, target_company)
             if existing:
                 from tkinter import messagebox
                 import tkinter as tk
@@ -277,7 +277,7 @@ def enroll_by_upload(face_rec, attendance, ui, parent=None):
             
             # --- Check for existing user to ask before update ---
             force_upd = False
-            existing = mongo_db.employees.find_one({"user_id": str(u_id), "company_id": target_company})
+            existing = mongo_db.get_employee(u_id, target_company)
             if existing:
                 from tkinter import messagebox
                 import tkinter as tk
@@ -345,7 +345,7 @@ def handle_edit_logic(attendance, face_rec, ui, camera, parent=None):
     # For company users, we also want to see employees from their connected HKB systems
     filter_company = target_company
     if str(ui.session_role).lower() == "company":
-        conns = list(mongo_db.auth_services.find({"user_id": ui.session_user_id}))
+        conns = mongo_db.get_auth_services_for_user(ui.session_user_id)
         if conns:
             filter_company = [target_company] if target_company else []
             for c in conns:
@@ -604,7 +604,6 @@ def main():
     # ping_service.start()
 
     # Load config from MongoDB so that Cooldown/Anti-Spoofing settings take effect immediately
-    CameraConfig.load_from_mongodb(mongo_db)
 
     # Auto cleanup old videos in background
     import threading
@@ -637,9 +636,13 @@ def main():
 
     display_frame = ui.draw_main_menu()
     cv2.imshow(win_name, display_frame)
-    if not ui.show_login_dialog():
+    if ui.show_login_dialog() is not True:
         logger.warning("Truy cap bi tu choi hoặc ứng dụng bị đóng.")
         return
+
+    if ui.session_role != "staff":
+        CameraConfig.load_from_mongodb(mongo_db)
+        camera = RTSPCamera(enable_notifications=False)
 
     try:
         service_active = False
@@ -707,7 +710,7 @@ def main():
             # Periodically check service heartbeat (every 2 seconds)
             if time.time() - last_heartbeat_check > 2:
                 from src.attendance.mongodb_mgr import mongo_db as m_db
-                status_doc = m_db.db.system_status.find_one({"type": "camera_service", "company_id": MongoDbConfig.COMPANY_ID})
+                status_doc = m_db.get_camera_status(MongoDbConfig.COMPANY_ID)
                 if status_doc:
                     last_seen = status_doc.get("last_seen", 0)
                     service_active = (time.time() - last_seen < 15)
@@ -1044,7 +1047,7 @@ def main():
                 # For company users, we also want to see employees from their connected HKB systems
                 filter_company = target_company
                 if str(ui.session_role).lower() == "company":
-                    conns = list(mongo_db.auth_services.find({"user_id": ui.session_user_id}))
+                    conns = mongo_db.get_auth_services_for_user(ui.session_user_id)
                     if conns:
                         filter_company = [target_company] if target_company else []
                         for c in conns:
@@ -1156,9 +1159,17 @@ def main():
 
             elif ui.current_state == STATE_LOGOUT:
                 logger.info("Logging out...")
-                if not ui.show_login_dialog():
+                try:
+                    mongo_db.logout()
+                except AttendanceBackendError as error:
+                    logger.warning("Could not revoke management session: {}", error)
+                if ui.show_login_dialog() is not True:
                     logger.warning("Logout/Login cancelled. Exiting.")
                     break
+                camera.disconnect()
+                if ui.session_role != "staff":
+                    CameraConfig.load_from_mongodb(mongo_db)
+                camera = RTSPCamera(enable_notifications=False)
                 ui.current_state = STATE_MENU
                 continue
 

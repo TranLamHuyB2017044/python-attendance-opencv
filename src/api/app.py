@@ -5,15 +5,30 @@ from flask_cors import CORS
 from loguru import logger
 import json
 import io
+import hmac
 
 from src.recognition.face_recognition import FaceRecognition
 from src.attendance.qdrant_db import QdrantAttendanceManager
-from src.config import ApiConfig, CAPTURES_DIR
-from flask import send_from_directory, Response
-from src.attendance.mongodb_mgr import mongo_db
+from src.config import ApiConfig, AttendanceBackendConfig
+from flask import Response
+from src.attendance.mongodb_mgr import AttendanceBackendClient, AttendanceBackendError
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
+mongo_db = AttendanceBackendClient()
+mongo_db.integration_token = AttendanceBackendConfig.INTEGRATION_TOKEN
+
+
+@app.before_request
+def require_integration():
+    if request.endpoint in {"health_check", "enroll_user"}:
+        return None
+    expected = AttendanceBackendConfig.EXTERNAL_API_TOKEN
+    if not expected or not AttendanceBackendConfig.INTEGRATION_COMPANY or not mongo_db.integration_token:
+        return jsonify({"error": "Attendance integration is disabled"}), 503
+    supplied = request.headers.get("Authorization", "")
+    if not hmac.compare_digest(supplied.encode(), f"Bearer {expected}".encode()):
+        return jsonify({"error": "Invalid integration token"}), 401
 
 # Initialize modules
 # Note: In a production environment, you might want to use a singleton pattern or app factory
@@ -24,11 +39,6 @@ qdrant_mgr = QdrantAttendanceManager()
 def health_check():
     """Health check endpoint."""
     return jsonify({"status": "ok", "message": "Face Attendance API is running"}), 200
-
-@app.route("/captures/<path:filename>")
-def get_capture(filename):
-    """Serve captured detection images."""
-    return send_from_directory(CAPTURES_DIR, filename)
 
 @app.route("/enroll", methods=["POST"])
 def enroll_user():
@@ -41,6 +51,13 @@ def enroll_user():
     - images: list of image files
     """
     try:
+        authorization = request.headers.get("Authorization", "")
+        try:
+            actor = mongo_db._request("GET", "/auth/me", authorization=authorization)
+        except AttendanceBackendError as error:
+            return jsonify({"error": "Management access required"}), error.status_code or 503
+        if actor["role"] not in {"admin", "company"}:
+            return jsonify({"error": "Enrollment permission required"}), 403
         user_id = request.form.get("user_id")
         user_name = request.form.get("user_name")
         user_info_raw = request.form.get("user_info")
@@ -57,6 +74,12 @@ def enroll_user():
         except Exception:
             user_info = {"raw_info": user_info_raw}
 
+        if not isinstance(user_info, dict):
+            return jsonify({"error": "Invalid user_info"}), 400
+        requested_company = user_info.get("company_id") or actor.get("company_id")
+        if not requested_company or (actor["role"] != "admin" and requested_company != actor["company_id"]):
+            return jsonify({"error": "Company is outside the account scope"}), 403
+        company_id = requested_company
         embeddings = []
         enrollment_image_ids = [] # To store MongoDB ObjectIds of saved images
         for file in files:
@@ -82,7 +105,11 @@ def enroll_user():
             # Save the enrollment image to MongoDB
             success, encoded_img = cv2.imencode('.webp', img, [int(cv2.IMWRITE_WEBP_QUALITY), 70])
             if success:
-                image_id = mongo_db.save_enrollment_image(user_id, user_info.get("company_id", "default"), encoded_img.tobytes(), file.filename)
+                result = mongo_db._request(
+                    "POST", "/internal/attendance/save_enrollment_image", authorization=authorization,
+                    body={"args": [user_id, company_id, encoded_img.tobytes(), file.filename], "kwargs": {}},
+                )
+                image_id = result["result"]
                 if image_id:
                     enrollment_image_ids.append(image_id)
 
@@ -95,7 +122,6 @@ def enroll_user():
 
         # Save to Qdrant
         birthday = user_info.get("birthday", "N/A")
-        company_id = user_info.get("company_id", "default")
         success = qdrant_mgr.upsert_user(user_name, user_id, birthday, embeddings, clear_old=True, enrollment_image_ids=enrollment_image_ids, company_id=company_id)
         
         if success:
@@ -140,11 +166,11 @@ def recognize_face():
 
         results = []
         for face in faces:
-            name, user_id, score = qdrant_mgr.recognize(face.normed_embedding)
+            match = qdrant_mgr.recognize(face.normed_embedding, company_id=AttendanceBackendConfig.INTEGRATION_COMPANY)
             results.append({
-                "user_id": user_id,
-                "name": name,
-                "confidence": float(score),
+                "user_id": match["user_id"],
+                "name": match["name"],
+                "confidence": float(match["score"]),
                 "bbox": face.bbox.tolist()
             })
 
@@ -160,7 +186,9 @@ def recognize_face():
 def get_logs():
     """Get list of attendance logs from MongoDB Cloud."""
     try:
-        company_id = request.args.get("company_id") # Filter by company if provided
+        company_id = AttendanceBackendConfig.INTEGRATION_COMPANY
+        if request.args.get("company_id", company_id) != company_id:
+            return jsonify({"error": "Company is outside the integration scope"}), 403
         limit = request.args.get("limit", default=100, type=int)
         
         # Fetch from MongoDB

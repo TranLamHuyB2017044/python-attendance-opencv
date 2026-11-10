@@ -8,8 +8,6 @@ from pathlib import Path
 
 from loguru import logger
 
-from src.config import LogConfig
-
 
 def setup_logger() -> None:
     """
@@ -20,6 +18,8 @@ def setup_logger() -> None:
     - Adds console logger (if enabled)
     - Adds file logger with rotation
     """
+    from src.config import LogConfig
+
     # Remove default logger
     logger.remove()
     
@@ -57,7 +57,7 @@ def setup_logger() -> None:
     except Exception as e:
         print(f"Warning: Could not setup file logger: {e}")
 
-    # Add MongoDB sink for WARNING and ERROR levels
+    # Add attendance backend sink for WARNING and ERROR levels
     def mongodb_sink(message):
         record = message.record
         try:
@@ -71,7 +71,7 @@ def setup_logger() -> None:
                 "message": record["message"],
                 "source": f"{record['name']}:{record['function']}:{record['line']}"
             }
-            mongo_db.db.system_logs.insert_one(doc)
+            mongo_db.record_system_log(**doc)
         except Exception:
             pass
 

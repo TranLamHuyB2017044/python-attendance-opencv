@@ -132,12 +132,15 @@ def main():
     settings_watcher = None
     try:
         from src.attendance.mongodb_mgr import mongo_db
-        CameraConfig.load_from_mongodb(mongo_db)
+        mongo_db.activate_camera()
+        mongo_db.load_camera_config()
         
         face_rec = FaceRecognition()
         attendance = QdrantAttendanceManager()
         camera = RTSPCamera()
         tracker = FaceTracker(threshold_seconds=2.0)
+        mongo_db.attendance_notification = tracker.notify_saved_attendance
+        mongo_db.outbox.start()
         
         # Start background settings watcher to support hot-reloading (Change Streams or Polling fallback)
         from src.services.settings_watcher import SettingsWatcher
@@ -162,14 +165,8 @@ def main():
         while True:
             try:
                 cam_status = "running" if camera.is_connected else "waiting_camera"
-                mongo_db.db.system_status.update_one(
-                    {"type": "camera_service", "company_id": MongoDbConfig.COMPANY_ID},
-                    {"$set": {
-                        "last_seen": time.time(), 
-                        "status": cam_status,
-                        "camera_connected": camera.is_connected
-                    }},
-                    upsert=True
+                mongo_db.update_camera_status(
+                    MongoDbConfig.COMPANY_ID, time.time(), cam_status, camera.is_connected
                 )
             except Exception as e:
                 logger.warning(f"Heartbeat error: {e}")

@@ -86,11 +86,11 @@ class QdrantAttendanceManager:
             active = kwargs.get("active", True)
             
             if clear_old:
-                self.delete_user(user_id_str)
+                self.delete_user(user_id_str, company_id=cid)
 
             existing_points = []
             if not clear_old:
-                existing_points = self.get_user_points(user_id_str)
+                existing_points = self.get_user_points(user_id_str, company_id=cid)
             
             total_count = len(existing_points) + len(embeddings)
             points = []
@@ -128,7 +128,7 @@ class QdrantAttendanceManager:
             logger.error(f"Failed to upsert user {user_name}: {e}")
             return False
 
-    def recognize(self, query_embedding: np.ndarray) -> Dict[str, Any]:
+    def recognize(self, query_embedding: np.ndarray, *, company_id=None) -> Dict[str, Any]:
         """
         Search for the closest face and return detailed user info.
         """
@@ -144,11 +144,23 @@ class QdrantAttendanceManager:
         
         try:
             vector = query_embedding.tolist() if isinstance(query_embedding, np.ndarray) else list(query_embedding)
+            company_filter = None
+            if isinstance(company_id, (list, tuple)):
+                if not company_id:
+                    return default_res
+                company_match = models.MatchAny(any=[str(company) for company in company_id])
+            elif company_id:
+                company_match = models.MatchValue(value=str(company_id))
+            else:
+                company_match = None
+            if company_match is not None:
+                company_filter = models.Filter(must=[models.FieldCondition(key="company_id", match=company_match)])
 
             # Build query filter - removed 'active: False' filter to recognize disabled users but skip them later
             search_result = self.client.query_points(
                 collection_name=self.collection_name,
                 query=vector,
+                query_filter=company_filter,
                 limit=1,
                 with_payload=True
             )
@@ -300,7 +312,7 @@ class QdrantAttendanceManager:
             logger.error(f"Failed to update user info for {user_id}: {e}")
             return False
 
-    def delete_user(self, user_id: str) -> bool:
+    def delete_user(self, user_id: str, *, company_id=None) -> bool:
         """
         Delete all points associated with a user_id.
         """
@@ -308,9 +320,7 @@ class QdrantAttendanceManager:
             self.client.delete(
                 collection_name=self.collection_name,
                 points_selector=models.FilterSelector(
-                    filter=models.Filter(
-                        must=[models.FieldCondition(key="user_id", match=models.MatchValue(value=str(user_id)))]
-                    )
+                    filter=models.Filter(must=self._user_conditions(user_id, company_id))
                 )
             )
             logger.success(f"Deleted user ID: {user_id}")
@@ -319,7 +329,14 @@ class QdrantAttendanceManager:
             logger.error(f"Failed to delete user {user_id}: {e}")
             return False
 
-    def get_user_points(self, user_id: str) -> List[models.Record]:
+    @staticmethod
+    def _user_conditions(user_id, company_id):
+        conditions = [models.FieldCondition(key="user_id", match=models.MatchValue(value=str(user_id)))]
+        if company_id:
+            conditions.append(models.FieldCondition(key="company_id", match=models.MatchValue(value=str(company_id))))
+        return conditions
+
+    def get_user_points(self, user_id: str, *, company_id=None) -> List[models.Record]:
         """
         Retrieve all points (embeddings) for a specific user_id.
         """
@@ -327,7 +344,7 @@ class QdrantAttendanceManager:
             records, _ = self.client.scroll(
                 collection_name=self.collection_name,
                 scroll_filter=models.Filter(
-                    must=[models.FieldCondition(key="user_id", match=models.MatchValue(value=str(user_id)))]
+                    must=self._user_conditions(user_id, company_id)
                 ),
                 limit=100, # Adjust limit as needed, or implement full pagination
                 with_payload=True,
@@ -355,7 +372,7 @@ class QdrantAttendanceManager:
             logger.error(f"Failed to delete point {point_id}: {e}")
             return False
 
-    def update_vector_count(self, user_id: str, count: int) -> bool:
+    def update_vector_count(self, user_id: str, count: int, *, company_id=None) -> bool:
         """
         Update the vector_count in the payload of all points for a user.
         """
@@ -365,7 +382,7 @@ class QdrantAttendanceManager:
                 payload={"vector_count": count},
                 points=models.FilterSelector(
                     filter=models.Filter(
-                        must=[models.FieldCondition(key="user_id", match=models.MatchValue(value=str(user_id)))]
+                        must=self._user_conditions(user_id, company_id)
                     )
                 )
             )

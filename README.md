@@ -72,7 +72,7 @@ pyinstaller bittech_all.spec --noconfirm
 - `e`: Đăng ký khuôn mặt mới (Enrollment). Nhập tên trong terminal sau khi bấm.
 
 ## 📈 Roadmap phát triển
-1. **Database chuyên nghiệp**: Thay thế file `.pkl` bằng SQL (PostgreSQL) hoặc NoSQL (MongoDB).
+1. **Dữ liệu chấm công**: Ứng dụng đọc và ghi MongoDB qua FastAPI. Xem [hướng dẫn cấu hình backend](backend/README.md).
 2. **Web Dashboard**: Xây dựng UI quản lý nhân viên và xem lịch sử chấm công (FastAPI/React).
 3. **Anti-spoofing**: Tích hợp module chống giả mạo khuôn mặt (Silent-Face-Anti-Spoofing).
 4. **Edge Computing**: Tối ưu hóa chạy trên Jetson Nano hoặc Coral TPU.

@@ -32,7 +32,7 @@ if base_dir not in sys.path:
 
 from src.utils.logger import setup_logger
 from src.attendance.qdrant_db import QdrantAttendanceManager
-from src.attendance.mongodb_mgr import mongo_db
+from src.attendance.mongodb_mgr import AttendanceBackendError, mongo_db
 from src.ui.app_ui import (
     AttendanceUI, STATE_MENU, STATE_DETECT, STATE_ENROLL_CAM,
     STATE_ENROLL_UPLOAD, STATE_EDIT, STATE_LIST, STATE_HISTORY,
@@ -156,23 +156,16 @@ def main():
         cv2.imshow(win_loading, lf); cv2.waitKey(1)
         attendance = QdrantAttendanceManager()
 
-        logger.info("Step 2: Connecting to MongoDB...")
+        logger.info("Step 2: Loading camera settings through the attendance API...")
         cv2.rectangle(lf, (bar_x0, WIN_H // 2 + 50),
                       (bar_x0 + (bar_x1_full - bar_x0) * 2 // 3, WIN_H // 2 + 62), (0, 200, 80), -1)
         cv2.imshow(win_loading, lf); cv2.waitKey(1)
-        CameraConfig.load_from_mongodb(mongo_db)
 
         logger.info("Step 3: Initializing UI...")
         cv2.rectangle(lf, (bar_x0, WIN_H // 2 + 50),
                       (bar_x1_full, WIN_H // 2 + 62), (0, 200, 80), -1)
         cv2.imshow(win_loading, lf); cv2.waitKey(1)
         ui = AttendanceUI(is_manager_app=True)
-
-        status_doc = mongo_db.db.system_status.find_one({
-            "type": "camera_service", "company_id": MongoDbConfig.COMPANY_ID
-        })
-        if status_doc:
-            ui.service_active = (time.time() - status_doc.get("last_seen", 0) < 15)
 
         logger.success("Management App ready.")
 
@@ -198,6 +191,8 @@ def main():
             logger.info("User thoát tại màn hình đăng nhập.")
             return
         if login_res is True:
+            if ui.session_role != "staff":
+                CameraConfig.load_from_mongodb(mongo_db)
             break
         logger.warning("Cửa sổ đăng nhập bị đóng.")
 
@@ -223,9 +218,7 @@ def main():
 
             # ── Heartbeat check ─────────────────────────────────────────────
             if time.time() - last_hb_check > 2:
-                status_doc = mongo_db.db.system_status.find_one({
-                    "type": "camera_service", "company_id": MongoDbConfig.COMPANY_ID
-                })
+                status_doc = mongo_db.get_camera_status(MongoDbConfig.COMPANY_ID)
                 if status_doc:
                     service_active      = (time.time() - status_doc.get("last_seen", 0) < 15)
                     ui.camera_connected = status_doc.get("camera_connected", False)
@@ -459,6 +452,10 @@ def main():
                 continue
 
             elif ui.current_state == STATE_LOGOUT:
+                try:
+                    mongo_db.logout()
+                except AttendanceBackendError as error:
+                    logger.warning("Could not revoke management session: {}", error)
                 ui.session_role       = None
                 ui.session_company_id = None
                 logged_in = False
@@ -469,6 +466,8 @@ def main():
                         logged_in = True; break
                 if not logged_in:
                     break
+                if ui.session_role != "staff":
+                    CameraConfig.load_from_mongodb(mongo_db)
                 ui.current_state = STATE_MENU
                 continue
 

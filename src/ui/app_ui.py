@@ -19,7 +19,7 @@ if base_dir not in sys.path:
 # -------------------------------------
 
 from loguru import logger
-from src.attendance.mongodb_mgr import mongo_db
+from src.attendance.mongodb_mgr import AttendanceBackendError, mongo_db
 from src.config import AuthServiceConfig
 import customtkinter as ctk
 import tkinter as tk
@@ -301,10 +301,7 @@ class AttendanceUI:
             import time
             nonlocal service_active
             try:
-                status_doc = mongo_db.db.system_status.find_one({
-                    "type": "camera_service", 
-                    "company_id": MongoDbConfig.COMPANY_ID
-                })
+                status_doc = mongo_db.get_camera_status(MongoDbConfig.COMPANY_ID)
                 if status_doc:
                     last_seen = status_doc.get("last_seen", 0)
                     service_active = (time.time() - last_seen < 15)
@@ -2082,7 +2079,7 @@ class AttendanceUI:
                     })
 
             if not mongo_db: return
-            auth_data = mongo_db.auth_services.find_one({"uuid": selected_system["system_id"]})
+            auth_data = mongo_db.get_auth_service(selected_system["system_id"])
             if not auth_data: return messagebox.showerror("Lỗi", "Không tìm thấy Auth Key cho hệ thống này")
 
             root.config(cursor="watch"); root.update()
@@ -2211,20 +2208,8 @@ class AttendanceUI:
                     try:
                         selected_date = selected_date_var.get()
                         
-                        if selected_date:
-                            # Filter by date (now all times are stored in Vietnam time)
-                            query = {
-                                "$or": [
-                                    {"time_str": {"$regex": f"^{selected_date}"}},
-                                    {"created_at": {"$gte": datetime.datetime.strptime(selected_date, "%Y-%m-%d"), "$lt": datetime.datetime.strptime(selected_date, "%Y-%m-%d") + datetime.timedelta(days=1)}},
-                                    {"timestamp": {"$gte": datetime.datetime.strptime(selected_date, "%Y-%m-%d"), "$lt": datetime.datetime.strptime(selected_date, "%Y-%m-%d") + datetime.timedelta(days=1)}}
-                                ]
-                            }
-                            logs = list(mongo_db.db.system_logs.find(query).sort("_id", -1).limit(200))
-                        else:
-                            # No date filter, get all
-                            logs = list(mongo_db.db.system_logs.find().sort("_id", -1).limit(200))
-                        
+                        logs = mongo_db.get_system_logs(selected_date)
+
                         for lg in logs:
                             # Handle both log structures
                             # Type 1: From mongodb_sink (logger.py) - has time_str, level, source
@@ -2403,14 +2388,46 @@ class AttendanceUI:
             root = ctk.CTk()
             _apply_icon(root)
             
-        root.title("Bittech AI - Kết nối AuthService")
-        root.geometry("1100x650")
+        root.title("Bittech AI - Kết nối AuthService & Quản lý License")
+        root.geometry("1150x720")
         root.attributes('-topmost', False)
 
-        ctk.CTkLabel(root, text="DANH SÁCH KẾT NỐI HỆ THỐNG", font=("Arial", 22, "bold"), text_color="#1f6aa5").pack(pady=20)
+        ctk.CTkLabel(root, text="DANH SÁCH KẾT NỐI HỆ THỐNG & LICENSE", font=("Arial", 22, "bold"), text_color="#1f6aa5").pack(pady=(15, 5))
+
+        # --- License Info Header Card ---
+        lic_frame = ctk.CTkFrame(root, fg_color="#1a1a2e", corner_radius=8)
+        lic_frame.pack(fill="x", padx=20, pady=(5, 10))
+
+        lic_label_var = tk.StringVar(value="Đang tải thông tin License...")
+        lic_msg_var = tk.StringVar(value="")
+
+        lic_lbl = ctk.CTkLabel(lic_frame, textvariable=lic_label_var, font=("Arial", 13, "bold"), text_color="#00d2d3")
+        lic_lbl.pack(side="left", padx=15, pady=8)
+
+        lic_sub_lbl = ctk.CTkLabel(lic_frame, textvariable=lic_msg_var, font=("Arial", 12), text_color="#ced6e0")
+        lic_sub_lbl.pack(side="left", padx=10, pady=8)
+
+        def update_license_display():
+            try:
+                info = hkb_service.get_license_info()
+                if info.get("is_active"):
+                    lic_label_var.set(f"🔑 License: ACTIVE | Key: {str(info.get('license_key'))[:16]}... | Hạn: {info.get('expired_at')}")
+                    lic_msg_var.set(f"(Còn {info.get('days_left')} ngày)")
+                    lic_lbl.configure(text_color="#2ecc71")
+                elif info.get("has_license"):
+                    lic_label_var.set(f"🔑 License: {info.get('status_label')} | Key: {str(info.get('license_key'))[:16]}...")
+                    lic_msg_var.set(f"({info.get('message')})")
+                    lic_lbl.configure(text_color="#f39c12" if info.get("status") == 0 else "#e74c3c")
+                else:
+                    lic_label_var.set("⚠️ Chưa đăng ký License")
+                    lic_msg_var.set("(Vui lòng đăng ký License để kích hoạt đồng bộ)")
+                    lic_lbl.configure(text_color="#e74c3c")
+            except Exception as e:
+                lic_label_var.set(f"⚠️ Lỗi đọc License: {e}")
+                lic_msg_var.set("")
 
         tree_frame = ctk.CTkFrame(root)
-        tree_frame.pack(fill="both", expand=True, padx=20, pady=10)
+        tree_frame.pack(fill="both", expand=True, padx=20, pady=5)
 
         columns = ("id", "name", "system_id", "endpoint", "actived", "status")
         tree = ttk.Treeview(tree_frame, columns=columns, show="headings")
@@ -2431,6 +2448,7 @@ class AttendanceUI:
 
         def refresh_list():
             for item in tree.get_children(): tree.delete(item)
+            update_license_display()
             connections = hkb_service.get_connections(user_id=current_user_id, username=getattr(self, "session_username", "GLOBAL"))
             if connections and isinstance(connections, list):
                 for conn in connections:
@@ -2477,7 +2495,7 @@ class AttendanceUI:
             item = tree.item(sel[0])['values']
             if item[5] != "Đã kết nối": return messagebox.showwarning("!", "Chưa được kết nối")
             
-            auth_data = mongo_db.auth_services.find_one({"uuid": item[2]})
+            auth_data = mongo_db.get_auth_service(item[2])
             if not auth_data: return messagebox.showerror("Lỗi", "Thiếu API Key")
             
             loading_win = ctk.CTkToplevel(root)
@@ -2505,12 +2523,83 @@ class AttendanceUI:
 
             threading.Thread(target=worker, daemon=True).start()
 
+        def on_sync_pending():
+            sel = tree.selection()
+            if not sel: return messagebox.showwarning("!", "Vui lòng chọn hệ thống cần sync log")
+            item = tree.item(sel[0])['values']
+            if item[5] != "Đã kết nối": return messagebox.showwarning("!", "Hệ thống này chưa được kết nối")
+
+            auth_data = mongo_db.get_auth_service(item[2])
+            if not auth_data: return messagebox.showerror("Lỗi", "Không tìm thấy thông tin xác thực cho hệ thống này.")
+
+            loading_win = ctk.CTkToplevel(root)
+            loading_win.title("Đang đồng bộ...")
+            loading_win.geometry("320x120")
+            loading_win.transient(root)
+            loading_win.grab_set()
+            _apply_icon(loading_win)
+            ctk.CTkLabel(loading_win, text="Đang kiểm tra và đẩy log tồn đọng...", font=("Arial", 13)).pack(pady=30)
+
+            def sync_worker():
+                try:
+                    res = hkb_service.sync_pending_logs(
+                        system_id=item[2],
+                        endpoint=item[3],
+                        api_key=auth_data["key"],
+                        user_id=auth_data.get("user_id", current_user_id)
+                    )
+                    loading_win.after(0, lambda: [
+                        loading_win.destroy(),
+                        messagebox.showinfo("Đồng bộ", res.get("message", "Hoàn tất")) if res.get("success") else messagebox.showerror("Lỗi đồng bộ", res.get("message", "Thất bại"))
+                    ])
+                except Exception as e:
+                    loading_win.after(0, lambda: [loading_win.destroy(), messagebox.showerror("Lỗi", str(e))])
+
+            threading.Thread(target=sync_worker, daemon=True).start()
+
+        def on_register_or_verify_license():
+            lic_win = ctk.CTkToplevel(root)
+            lic_win.title("Quản lý License")
+            lic_win.geometry("450x250")
+            lic_win.transient(root)
+            lic_win.grab_set()
+            _apply_icon(lic_win)
+
+            ctk.CTkLabel(lic_win, text="QUẢN LÝ / ĐĂNG KÝ LICENSE", font=("Arial", 16, "bold"), text_color="#1f6aa5").pack(pady=(15, 10))
+
+            cfg_path = AuthServiceConfig.LICENSE_CONFIG_PATH
+            ctk.CTkLabel(lic_win, text=f"File config: {cfg_path}", font=("Arial", 11), text_color="gray").pack(pady=2)
+
+            def do_register():
+                lic_win.destroy()
+                threading.Thread(target=lambda: [
+                    hkb_service.register_license(),
+                    root.after(0, refresh_list)
+                ], daemon=True).start()
+                messagebox.showinfo("Thông báo", "Đang tiến hành đăng ký & xác thực License...")
+
+            def do_verify():
+                lic_win.destroy()
+                threading.Thread(target=lambda: [
+                    hkb_service.verify_license(),
+                    root.after(0, refresh_list)
+                ], daemon=True).start()
+                messagebox.showinfo("Thông báo", "Đang tiến hành xác thực License...")
+
+            btn_f = ctk.CTkFrame(lic_win, fg_color="transparent")
+            btn_f.pack(pady=20)
+            ctk.CTkButton(btn_f, text="ĐĂNG KÝ LICENSE MỚI", command=do_register, width=170, fg_color="#28a745").pack(side="left", padx=8)
+            ctk.CTkButton(btn_f, text="XÁC THỰC LẠI", command=do_verify, width=130, fg_color="#17a2b8").pack(side="left", padx=8)
+            ctk.CTkButton(btn_f, text="ĐÓNG", command=lic_win.destroy, width=80, fg_color="gray").pack(side="left", padx=8)
+
         btn_frame = ctk.CTkFrame(root, fg_color="transparent")
-        btn_frame.pack(pady=20)
-        ctk.CTkButton(btn_frame, text="LÀM MỚI", command=refresh_list, width=120).pack(side=tk.LEFT, padx=10)
-        ctk.CTkButton(btn_frame, text="ĐĂNG KÝ KẾT NỐI", command=on_register, width=150, fg_color="#28a745").pack(side=tk.LEFT, padx=10)
-        ctk.CTkButton(btn_frame, text="ĐỒNG BỘ NHÂN VIÊN", command=on_get_employees, width=150, fg_color="#17a2b8").pack(side=tk.LEFT, padx=10)
-        ctk.CTkButton(btn_frame, text="ĐÓNG", command=root.destroy, width=100, fg_color="gray").pack(side=tk.LEFT, padx=10)
+        btn_frame.pack(pady=15)
+        ctk.CTkButton(btn_frame, text="LÀM MỚI", command=refresh_list, width=110).pack(side=tk.LEFT, padx=5)
+        ctk.CTkButton(btn_frame, text="LICENSE", command=on_register_or_verify_license, width=110, fg_color="#e67e22", hover_color="#d35400").pack(side=tk.LEFT, padx=5)
+        ctk.CTkButton(btn_frame, text="ĐĂNG KÝ KẾT NỐI", command=on_register, width=140, fg_color="#28a745").pack(side=tk.LEFT, padx=5)
+        ctk.CTkButton(btn_frame, text="ĐỒNG BỘ NHÂN VIÊN", command=on_get_employees, width=140, fg_color="#17a2b8").pack(side=tk.LEFT, padx=5)
+        ctk.CTkButton(btn_frame, text="SYNC LOG TỒN ĐỌNG", command=on_sync_pending, width=140, fg_color="#6c5ce7", hover_color="#5f27cd").pack(side=tk.LEFT, padx=5)
+        ctk.CTkButton(btn_frame, text="ĐÓNG", command=root.destroy, width=90, fg_color="gray").pack(side=tk.LEFT, padx=5)
         
         refresh_list()
         if not parent:
@@ -2772,7 +2861,7 @@ class AttendanceUI:
 
         def refresh():
             for item in tree.get_children(): tree.delete(item)
-            users = mongo_db.db.users.find()
+            users = mongo_db.get_all_cloud_users()
             for u in users:
                 tree.insert("", tk.END, values=(u.get("username"), u.get("role"), u.get("company_id")))
 
@@ -2798,7 +2887,7 @@ class AttendanceUI:
             
             ctk.CTkLabel(add_win, text="Gán cho công ty:").pack(anchor="w", padx=40)
             # Fetch company list
-            all_companies = mongo_db.db.companies.find()
+            all_companies = mongo_db.get_all_companies()
             company_map = {"Admin (Cổng Tổng)": "admin"}
             company_display_list = ["Admin (Cổng Tổng)"]
             for c in all_companies:
@@ -2833,18 +2922,11 @@ class AttendanceUI:
             if not sel: return messagebox.showwarning("!", "Vui lòng chọn tài khoản cần reset")
             user = tree.item(sel[0])['values'][0]
             
-            if messagebox.askyesno("Xác nhận", f"Bạn có chắc muốn reset mật khẩu của tài khoản '{user}' về '123456'?"):
-                from src.utils.email_utils import send_reset_password_email
-                new_pwd = "123456"
-                if mongo_db.update_user_password(user, new_pwd):
-                    admin_email = "tranlamhuy5tn@gmail.com"
-                    ok, msg = send_reset_password_email(admin_email, user, new_pwd)
-                    if ok:
-                        messagebox.showinfo("Thành công", f"Đã reset mật khẩu tài khoản '{user}' về '123456'.\nThông báo đã được gửi đến admin.")
-                    else:
-                        messagebox.showwarning("Thành công", f"Đã reset mật khẩu về '123456' nhưng không thể gửi email: {msg}")
-                else:
-                    messagebox.showerror("Lỗi", "Không thể cập nhật mật khẩu.")
+            try:
+                result = mongo_db.authenticated_request("POST", "/management/password-reset", {"username": str(user)})
+                self.show_secret_dialog(root, "Mã đặt lại mật khẩu", result["reset_code"])
+            except AttendanceBackendError as error:
+                messagebox.showerror("Lỗi", str(error), parent=root)
 
         def on_delete():
             sel = tree.selection()
@@ -2897,8 +2979,12 @@ class AttendanceUI:
             user = entry_user.get()
             pwd = entry_pwd.get()
             
-            # Authenticate using Cloud MongoDB
-            auth_info = mongo_db.verify_login(user, pwd)
+            try:
+                auth_info = mongo_db.login(user, pwd)
+            except AttendanceBackendError as error:
+                message = "Sai tên đăng nhập hoặc mật khẩu." if error.status_code == 401 else str(error)
+                messagebox.showerror("Lỗi đăng nhập", message, parent=login_root)
+                return
             
             if auth_info:
                 login_status["authenticated"] = True
@@ -2906,7 +2992,7 @@ class AttendanceUI:
                 self.session_role = auth_info["role"]
                 self.session_company_id = auth_info["company_id"]
                 self.session_username = auth_info["username"]
-                self.session_user_id = auth_info.get("user_id", 1)
+                self.session_user_id = auth_info.get("user_id") or 1
                 AuthServiceConfig.CURRENT_USER_ID = self.session_user_id
                 login_root.destroy()
             else:
@@ -2968,55 +3054,198 @@ class AttendanceUI:
         login_root.mainloop()
         return login_status["authenticated"]
 
-    def show_forgot_password_ui(self, parent):
-        """
-        Dialog to request password reset via username.
-        """
-        from src.utils.email_utils import send_reset_password_email
-        from src.attendance.mongodb_mgr import mongo_db
+    @staticmethod
+    def show_secret_dialog(parent, title, secret):
+        dialog = ctk.CTkToplevel(parent)
+        dialog.title(title)
+        dialog.transient(parent)
+        ctk.CTkLabel(dialog, text="Giá trị này chỉ hiển thị một lần.").pack(padx=16, pady=8)
+        field = ctk.CTkEntry(dialog, width=510)
+        field.insert(0, secret)
+        field.configure(state="readonly")
+        field.pack(padx=16, pady=8)
 
-        forgot_win = ctk.CTkToplevel(parent)
-        forgot_win.title("Quên mật khẩu")
-        forgot_win.geometry("400x300")
-        forgot_win.attributes('-topmost', True)
-        forgot_win.grab_set()
+        def copy_secret():
+            dialog.clipboard_clear()
+            dialog.clipboard_append(secret)
 
-        ctk.CTkLabel(forgot_win, text="KHÔI PHỤC MẬT KHẨU", font=("Arial", 16, "bold")).pack(pady=20)
-        
-        ctk.CTkLabel(forgot_win, text="Nhập tên đăng nhập (Username) cần reset:").pack(anchor="w", padx=40)
-        entry_username = ctk.CTkEntry(forgot_win, width=320)
-        entry_username.pack(pady=10)
+        ctk.CTkButton(dialog, text="Sao chép", command=copy_secret).pack(pady=8)
 
-        def do_reset():
-            username = entry_username.get().strip()
-            if not username:
-                messagebox.showwarning("Cảnh báo", "Vui lòng nhập tên đăng nhập!")
+    def show_camera_device_setup(self, parent):
+        from tkinter import simpledialog
+
+        key = simpledialog.askstring("Camera service", "Dán API key của thiết bị", show="*", parent=parent)
+        if not key:
+            return
+        try:
+            identity = mongo_db.provision_camera(key.strip())
+        except (AttendanceBackendError, OSError, ValueError) as error:
+            messagebox.showerror("Camera service", str(error), parent=parent)
+            return
+        messagebox.showinfo(
+            "Camera service",
+            f"Đã kiểm tra và lưu key cho {identity['name']} ({identity['company_id']}). "
+            "Khởi động lại AttendanceService nếu đổi sang mã thiết bị khác.",
+            parent=parent,
+        )
+
+    def show_camera_devices(self, parent):
+        dialog = ctk.CTkToplevel(parent)
+        dialog.title("Quản lý thiết bị")
+        dialog.geometry("850x360")
+        dialog.transient(parent)
+        table = ttk.Treeview(dialog, columns=("name", "company", "last_seen", "state"), show="headings")
+        for column, title in (("name", "Tên thiết bị"), ("company", "Công ty cấu hình"),
+                              ("last_seen", "Heartbeat cuối (UTC)"), ("state", "Key")):
+            table.heading(column, text=title)
+        table.pack(fill="both", expand=True, padx=12, pady=12)
+        devices = {}
+
+        def refresh():
+            records = mongo_db.authenticated_request("GET", "/management/devices")
+            devices.clear()
+            table.delete(*table.get_children())
+            for record in records:
+                devices[record["device_id"]] = record
+                table.insert("", "end", iid=record["device_id"], values=(
+                    record["name"], record["company_id"], record.get("last_seen_at") or "",
+                    "Đã thu hồi" if record.get("revoked_at") else "Đang cấp",
+                ))
+
+        def open_device_form(device=None):
+            companies = {
+                f"{company['name']} ({company['company_id']})": company["company_id"]
+                for company in mongo_db.get_all_companies()
+            }
+            if not companies:
+                messagebox.showinfo("Thiết bị mới", "Hãy tạo công ty trong mục Quản lý công ty trước.", parent=dialog)
                 return
-            
-            # Find user by username
-            user = mongo_db.get_user_by_username(username)
-            if not user:
-                messagebox.showerror("Lỗi", "Tên đăng nhập này không tồn tại trong hệ thống!")
-                return
-            
-            # Fixed password as requested
-            new_pwd = "123456"
-            
-            # Update in DB (this will hash it)
-            if mongo_db.update_user_password(username, new_pwd):
-                # Send Email to the requested admin email
-                admin_email = "tranlamhuy5tn@gmail.com"
-                ok, msg = send_reset_password_email(admin_email, username, new_pwd)
-                if ok:
-                    messagebox.showinfo("Thành công", f"Mật khẩu của tài khoản '{username}' đã được reset về '123456'.\nThông tin đã được gửi đến quản trị viên ({admin_email}).")
-                    forgot_win.destroy()
-                else:
-                    messagebox.showerror("Lỗi gửi email", f"Mật khẩu đã reset nhưng không thể gửi email: {msg}")
+
+            form = ctk.CTkToplevel(dialog)
+            form.title("Công ty chấm công" if device else "Tạo key thiết bị")
+            form.transient(dialog)
+            form.resizable(False, False)
+            fields = ctk.CTkFrame(form, fg_color="transparent")
+            fields.pack(padx=20, pady=16)
+
+            primary_company = device["company_id"] if device else None
+            ctk.CTkLabel(fields, text="Công ty dùng cấu hình RTSP").pack(anchor="w")
+            if device:
+                label = next((name for name, company_id in companies.items() if company_id == primary_company), primary_company)
+                ctk.CTkLabel(fields, text=label).pack(anchor="w", pady=(0, 10))
             else:
-                messagebox.showerror("Lỗi", "Không thể cập nhật mật khẩu mới. Vui lòng thử lại.")
+                company_select = ctk.CTkComboBox(fields, values=list(companies), width=520, state="readonly")
+                company_select.set("Chọn công ty cấu hình")
+                company_select.pack(fill="x", pady=(0, 10))
 
-        ctk.CTkButton(forgot_win, text="GỬI YÊU CẦU RESET", command=do_reset, width=200, height=40).pack(pady=20)
-        ctk.CTkButton(forgot_win, text="HỦY", command=forgot_win.destroy, fg_color="gray").pack()
+            ctk.CTkLabel(fields, text="Công ty chấm công (công ty cấu hình luôn được phép)").pack(anchor="w")
+            scope_frame = ctk.CTkScrollableFrame(fields, width=490, height=120)
+            scope_frame.pack(fill="x", pady=(0, 10))
+            selected = set(device.get("attendance_company_ids", [])) if device else set()
+            scope_checks = {}
+            for label, company_id in companies.items():
+                if company_id == primary_company:
+                    continue
+                checkbox = ctk.CTkCheckBox(scope_frame, text=label)
+                checkbox.pack(anchor="w", padx=4, pady=3)
+                if company_id in selected:
+                    checkbox.select()
+                scope_checks[company_id] = checkbox
+
+            def add_field(label, placeholder=None):
+                ctk.CTkLabel(fields, text=label).pack(anchor="w")
+                entry = ctk.CTkEntry(fields, placeholder_text=placeholder)
+                entry.pack(fill="x", pady=(0, 10))
+                return entry
+
+            if not device:
+                name_field = add_field("Tên thiết bị")
+                system_field = add_field("SYSTEM_ID HKB (tùy chọn)", "Để trống nếu dùng mặc định")
+                links_field = add_field("Kết nối HKB được phép (tùy chọn)", "Các mã kết nối, cách nhau bằng dấu phẩy")
+
+            def submit():
+                payload = {"attendance_company_ids": [company_id for company_id, box in scope_checks.items() if box.get()]}
+                try:
+                    if device:
+                        mongo_db.authenticated_request("PATCH", f"/management/devices/{device['device_id']}/companies", payload)
+                    else:
+                        company_id = companies.get(company_select.get())
+                        name = name_field.get().strip()
+                        if not company_id or not name:
+                            messagebox.showwarning("Thiết bị mới", "Hãy chọn công ty cấu hình và nhập tên thiết bị.", parent=form)
+                            return
+                        payload.update(
+                            company_id=company_id, name=name, system_id=system_field.get().strip() or None,
+                            hkb_company_ids=[item.strip() for item in links_field.get().split(",") if item.strip()],
+                        )
+                        result = mongo_db.authenticated_request("POST", "/management/devices", payload)
+                except AttendanceBackendError as error:
+                    messagebox.showerror("Thiết bị mới", str(error), parent=form)
+                    return
+
+                form.destroy()
+                if not device:
+                    self.show_secret_dialog(dialog, "API key camera", result["api_key"])
+                run(refresh)
+
+            buttons = ctk.CTkFrame(fields, fg_color="transparent")
+            buttons.pack(anchor="e", pady=(6, 0))
+            ctk.CTkButton(buttons, text="Hủy", command=form.destroy, width=90).pack(side="left", padx=(0, 8))
+            ctk.CTkButton(buttons, text="Lưu" if device else "Tạo key", command=submit, width=100).pack(side="left")
+            form.bind("<Return>", lambda _: submit())
+            form.grab_set()
+
+        def edit_companies():
+            selection = table.selection()
+            device = devices.get(selection[0]) if selection else None
+            if not device or device.get("revoked_at"):
+                messagebox.showinfo("Thiết bị", "Hãy chọn thiết bị đang hoạt động.", parent=dialog)
+                return
+            open_device_form(device)
+
+        def change(action):
+            selection = table.selection()
+            if not selection or not messagebox.askyesno(
+                "Thiết bị", "Xác nhận đổi hoặc thu hồi key của thiết bị đang chọn?", parent=dialog,
+            ):
+                return
+            result = mongo_db.authenticated_request("POST", f"/management/devices/{selection[0]}/{action}")
+            if action == "rotate":
+                self.show_secret_dialog(dialog, "API key mới", result["api_key"])
+            refresh()
+
+        def run(callback):
+            try:
+                callback()
+            except AttendanceBackendError as error:
+                messagebox.showerror("Thiết bị", str(error), parent=dialog)
+
+        actions = ctk.CTkFrame(dialog)
+        actions.pack(pady=8)
+        for label, callback in (("Làm mới", refresh), ("Tạo key", open_device_form), ("Công ty chấm công", edit_companies),
+                                ("Đổi key", lambda: change("rotate")), ("Thu hồi", lambda: change("revoke"))):
+            ctk.CTkButton(actions, text=label, command=lambda callback=callback: run(callback)).pack(side="left", padx=5)
+        run(refresh)
+
+    def show_forgot_password_ui(self, parent):
+        from tkinter import simpledialog
+
+        username = simpledialog.askstring("Đặt lại mật khẩu", "Tên đăng nhập", parent=parent)
+        if not username:
+            return
+        code = simpledialog.askstring("Đặt lại mật khẩu", "Mã dùng một lần do quản trị viên cấp", show="*", parent=parent)
+        if not code:
+            return
+        password = simpledialog.askstring("Đặt lại mật khẩu", "Mật khẩu mới (ít nhất 8 ký tự)", show="*", parent=parent)
+        if not password:
+            return
+        try:
+            mongo_db._request("POST", "/auth/reset-password", body={
+                "username": username.strip(), "code": code.strip(), "new_password": password,
+            })
+            messagebox.showinfo("Đặt lại mật khẩu", "Đã đổi mật khẩu. Bạn có thể đăng nhập.", parent=parent)
+        except AttendanceBackendError as error:
+            messagebox.showerror("Lỗi", str(error), parent=parent)
 
     def show_change_password_ui(self, parent):
         """
@@ -3070,18 +3299,14 @@ class AttendanceUI:
                 messagebox.showwarning("Cảnh báo", "Mật khẩu mới không khớp!")
                 return
             
-            # Verify old password
-            user = mongo_db.verify_login(username, old_pwd)
-            if not user:
-                messagebox.showerror("Lỗi", "Tên đăng nhập hoặc mật khẩu cũ không đúng!")
-                return
-            
-            # Update password
-            if mongo_db.update_user_password(username, new_pwd):
-                messagebox.showinfo("Thành công", "Đã đổi mật khẩu thành công.")
+            try:
+                mongo_db._request("POST", "/auth/change-password", body={
+                    "username": username, "password": old_pwd, "new_password": new_pwd,
+                })
+                messagebox.showinfo("Thành công", "Đã đổi mật khẩu thành công.", parent=change_win)
                 change_win.destroy()
-            else:
-                messagebox.showerror("Lỗi", "Không thể cập nhật mật khẩu. Vui lòng thử lại.")
+            except AttendanceBackendError as error:
+                messagebox.showerror("Lỗi", str(error), parent=change_win)
 
         ctk.CTkButton(change_win, text="XÁC NHẬN ĐỔI", command=do_change, width=200, height=40).pack(pady=20)
         ctk.CTkButton(change_win, text="HỦY", command=change_win.destroy, fg_color="gray").pack()
@@ -3109,18 +3334,33 @@ class AttendanceUI:
             _apply_icon(root)
             
         root.title("Bittech AI - Cài đặt hệ thống")
-        root.geometry("700x760")
+        root.geometry("740x700")
         root.attributes('-topmost', False)
-        root.resizable(False, False)
+        root.resizable(False, True)
 
         ctk.CTkLabel(root, text="CẤU HÌNH HỆ THỐNG", font=("Arial", 20, "bold"), text_color="#1f6aa5").pack(pady=15)
 
-        main_frame = ctk.CTkFrame(root)
+        main_frame = ctk.CTkScrollableFrame(root)
         main_frame.pack(fill="both", expand=True, padx=20, pady=10)
 
         # --- Scope Selector Frame (Admin: Dropdown, Company: Readonly label) ---
         scope_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
         scope_frame.pack(fill="x", padx=20, pady=(10, 5))
+
+        service_group = ctk.CTkFrame(main_frame, fg_color="transparent")
+        service_group.pack(fill="x", padx=20, pady=10)
+        ctk.CTkLabel(service_group, text="CAMERA SERVICE", font=("Arial", 13, "bold")).pack(anchor="w", pady=(0, 5))
+        ctk.CTkButton(service_group, text="Cấu hình Camera Service",
+                      command=lambda: self.show_camera_device_setup(root)).pack(side="left")
+        if is_admin:
+            ctk.CTkButton(service_group, text="Thiết bị",
+                          command=lambda: self.show_camera_devices(root)).pack(side="left", padx=(10, 0))
+
+        if str(self.session_role).lower() == "staff":
+            ctk.CTkButton(root, text="ĐÓNG", command=root.destroy).pack(pady=20)
+            if not parent:
+                root.mainloop()
+            return
 
         # --- A. CAMERA CONFIG ---
         cam_group = ctk.CTkFrame(main_frame, fg_color="transparent")
@@ -3513,26 +3753,6 @@ class AttendanceUI:
         btn_frame = ctk.CTkFrame(root, fg_color="transparent")
         btn_frame.pack(pady=20, side=tk.BOTTOM)
         
-        def restart_service():
-            import subprocess
-            import os
-            try:
-                # Tìm và kill tiến trình service_main.exe
-                if os.name == 'nt':
-                    subprocess.run(["taskkill", "/F", "/IM", "service_main.exe"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    # Thử mở lại service (nếu ở cùng thư mục)
-                    service_path = os.path.join(os.getcwd(), "service_main.exe")
-                    if os.path.exists(service_path):
-                        subprocess.Popen([service_path])
-                        messagebox.showinfo("Thành công", "Đã gửi lệnh khởi động lại Camera Service!")
-                    else:
-                        messagebox.showinfo("Thông báo", "Đã đóng Camera Service cũ. Vui lòng mở lại file 'service_main.exe' thủ công nếu cần tính năng ngầm.")
-                else:
-                    messagebox.showinfo("Thông báo", "Chức năng này hiện chỉ hỗ trợ trên Windows.")
-            except Exception as e:
-                messagebox.showerror("Lỗi", f"Không thể khởi động lại service: {e}")
-
-        ctk.CTkButton(btn_frame, text="KHỞI ĐỘNG LẠI SERVICE", command=restart_service, width=180, height=40, font=("Arial", 11, "bold"), fg_color="#e67e22", hover_color="#d35400").pack(side=tk.LEFT, padx=10)
         ctk.CTkButton(btn_frame, text="LƯU CÀI ĐẶT", command=save_settings, width=150, height=40, font=("Arial", 13, "bold"), fg_color="#28a745", hover_color="#218838").pack(side=tk.LEFT, padx=10)
         ctk.CTkButton(btn_frame, text="ĐÓNG", command=root.destroy, width=100, height=40, fg_color="gray", hover_color="#555555").pack(side=tk.LEFT, padx=10)
 

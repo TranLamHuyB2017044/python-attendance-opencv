@@ -1,62 +1,55 @@
-from fastapi import FastAPI, HTTPException, Header, Response, Body
-from fastapi.staticfiles import StaticFiles
+from fastapi import FastAPI, HTTPException, Header, Response
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
-from src.attendance.mongodb_mgr import mongo_db
-from src.config import ApiConfig, CAPTURES_DIR
+from src.attendance.mongodb_mgr import AttendanceBackendClient
+from src.config import ApiConfig, AttendanceBackendConfig
 import uvicorn
 import json
+import hmac
+import re
 from loguru import logger
-from bson.objectid import ObjectId
 
 app = FastAPI(title="Face Attendance External API")
 
-# Serve local captures as static files
-app.mount("/captures", StaticFiles(directory=str(CAPTURES_DIR)), name="captures")
+mongo_db = AttendanceBackendClient()
+mongo_db.integration_token = AttendanceBackendConfig.INTEGRATION_TOKEN
 
-# Hardcoded tokens for demonstration
-# In production, these should be generated and stored in MongoDB
-VALID_TOKENS = {
-    "749b2b7e-40d2-4946-b346-8d76b4242688": {"company_id": "default_company", "role": "admin"},
-    "company-a-token": {"company_id": "company_a", "role": "user"}
-}
+def integration_company(authorization):
+    expected = AttendanceBackendConfig.EXTERNAL_API_TOKEN
+    company = AttendanceBackendConfig.INTEGRATION_COMPANY
+    if not expected or not company or not mongo_db.integration_token:
+        raise HTTPException(503, "Attendance integration is disabled")
+    if not hmac.compare_digest(authorization.encode(), f"Bearer {expected}".encode()):
+        raise HTTPException(401, "Invalid integration token")
+    return company
+
 
 class LogQueryRequest(BaseModel):
     company_id: str
     date: Optional[str] = None # Format: YYYY-MM-DD
 
 @app.post("/api/attendance/logs")
-async def get_attendance_logs(
+def get_attendance_logs(
     request: LogQueryRequest,
     authorization: str = Header(..., description="Bearer <token>")
 ):
     """
     Fetch attendance logs via POST body with Token Authentication.
     """
-    # 1. Simple Token Validation
-    token = authorization.replace("Bearer ", "")
-    user_context = VALID_TOKENS.get(token)
-    
-    if not user_context:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-        
-    # 2. Authorization: Check if user has access to this company
-    # Admin can see all, but here we restriction to the token's company for security
-    if user_context["role"] != "admin" and user_context["company_id"] != request.company_id:
-        raise HTTPException(status_code=403, detail="You do not have access to this company's logs")
+    if integration_company(authorization) != request.company_id:
+        raise HTTPException(403, "Company is outside the integration scope")
 
     target_date = request.date
     if not target_date:
         target_date = datetime.now().strftime("%Y-%m-%d")
     
     try:
-        # Query logs from MongoDB
-        query = {"company_id": request.company_id, "date": target_date}
-        logs_cursor = mongo_db.logs.find(query).sort("_id", -1)
+        # Query logs through the attendance backend
+        logs = mongo_db.get_logs(company_id=request.company_id, date=target_date)
         
         results = []
-        for log in logs_cursor:
+        for log in logs:
             results.append({
                 "id": str(log["_id"]),
                 "user_id": log["user_id"],
@@ -76,12 +69,13 @@ async def get_attendance_logs(
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/attendance/image/{log_id}")
-async def get_log_image(log_id: str):
+def get_log_image(log_id: str, authorization: str = Header(default="")):
     """
     Serve the attendance image (WebP) from MongoDB.
     """
+    integration_company(authorization)
     try:
-        if not ObjectId.is_valid(log_id):
+        if not re.fullmatch(r"[0-9a-fA-F]{24}", log_id):
             raise HTTPException(status_code=400, detail="Invalid Log ID format")
             
         img_bytes = mongo_db.get_log_image(log_id)
@@ -95,25 +89,19 @@ async def get_log_image(log_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/share/employees")
-async def get_shared_employees(
+def get_shared_employees(
     authorization: str = Header(..., description="Bearer <token>")
 ):
     """
     Fetch all employees for sharing with other systems via HKB Auth flow.
     """
-    # 1. Token check
-    token = authorization.replace("Bearer ", "")
-    user_context = VALID_TOKENS.get(token)
-    if not user_context:
-        raise HTTPException(status_code=401, detail="Invalid token")
+    cid = integration_company(authorization)
 
-    cid = user_context["company_id"]
-    
     try:
-        # Fetch employees from MongoDB for this company
-        employees_cursor = mongo_db.employees.find({"company_id": cid})
+        # Fetch employees through the attendance backend
+        employees = mongo_db.get_all_employees(company_id=[cid])
         results = []
-        for emp in employees_cursor:
+        for emp in employees:
             results.append({
                 "user_id": emp["user_id"],
                 "name": emp["name"],
@@ -134,25 +122,19 @@ async def get_shared_employees(
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.api_route("/api/hr/users", methods=["GET", "POST"])
-async def get_hr_users_api(
+def get_hr_users_api(
     authorization: str = Header(..., description="Bearer <token>")
 ):
     """
     Fetch all users for HR purposes, specifically for 'tester' environment.
     """
-    # 1. Token check
-    token = authorization.replace("Bearer ", "")
-    user_context = VALID_TOKENS.get(token)
-    if not user_context:
-        raise HTTPException(status_code=401, detail="Invalid token")
+    cid = integration_company(authorization)
 
-    cid = user_context["company_id"]
-    
     try:
-        # Fetch employees from MongoDB for this company
-        employees_cursor = mongo_db.employees.find({"company_id": cid})
+        # Fetch employees through the attendance backend
+        employees = mongo_db.get_all_employees(company_id=[cid])
         results = []
-        for emp in employees_cursor:
+        for emp in employees:
             results.append({
                 "user_id": emp["user_id"],
                 "name": emp["name"],

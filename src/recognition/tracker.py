@@ -1,4 +1,5 @@
 import time
+from datetime import datetime, timezone
 import numpy as np
 from loguru import logger
 from typing import List, Dict, Any
@@ -29,7 +30,7 @@ class FaceTracker:
         self.prev_small_gray = None
         
         # Global cooldowns: {user_id: last_detection_time}
-        self.user_cooldowns: Dict[str, float] = {}
+        self.user_cooldowns: Dict[tuple, float] = {}
         
         # Webhook cooldown for known users: {user_id: last_webhook_time}
         # Prevents sending duplicate webhooks within 15 minutes
@@ -75,7 +76,7 @@ class FaceTracker:
             except Exception as e:
                 logger.error(f"Webhook Worker error: {e}")
 
-    def _execute_webhook_task(self, user_id, user_name, status, is_unknown=False, custom_voice_text=None, image=None):
+    def _execute_webhook_task(self, user_id, user_name, status, is_unknown=False, custom_voice_text=None, image=None, company_id=None):
         """Thực thi gửi Webhook thực tế (được gọi từ Worker) với cơ chế Retry theo loại event."""
         try:
             from src.utils.string_utils import remove_accents
@@ -90,7 +91,7 @@ class FaceTracker:
             if SpecialUserConfig.is_special_user(user_id):
                 voice_text = SpecialUserConfig.get_voice_text(user_id)
             else:
-                employee = mongo_db.employees.find_one({"user_id": str(user_id)}) or {}
+                employee = mongo_db.get_employee(user_id, company_id=company_id) or {}
                 gender = employee.get("sex", "Nam")
                 
                 prefix = "anh"
@@ -265,7 +266,7 @@ class FaceTracker:
         except Exception as e:
             logger.error(f"Error sending enhanced Telegram alert: {e}")
 
-    def _send_user_webhook(self, user_id, user_name, status, is_unknown=False, custom_voice_text=None, image=None, unknown_attempt=0):
+    def _send_user_webhook(self, user_id, user_name, status, is_unknown=False, custom_voice_text=None, image=None, unknown_attempt=0, *, company_id=None):
         """
         Sends user detection info to the configured webhook URL in a background thread.
         
@@ -296,7 +297,8 @@ class FaceTracker:
         current_time = time.time()
         
         from src.config import DATA_DIR
-        safe_id = "".join(x for x in str(user_id) if x.isalnum())
+        employee_key = f"{company_id}_{user_id}" if company_id else str(user_id)
+        safe_id = "".join(x for x in employee_key if x.isalnum() or x == "_")
         lock_file = DATA_DIR / f"webhook_lock_{safe_id}.txt"
 
         try:
@@ -331,7 +333,8 @@ class FaceTracker:
             'status': status,
             'is_unknown': is_unknown,
             'custom_voice_text': custom_voice_text,
-            'image': image
+            'image': image,
+            'company_id': company_id,
         }
         self.webhook_queue.put((priority, sequence, task_data))
 
@@ -365,12 +368,12 @@ class FaceTracker:
         def task():
             try:
                 # 0. Kiểm tra số lượng ảnh đăng ký hiện tại trong Qdrant
-                existing_points = attendance_mgr.get_user_points(user_id)
+                existing_points = attendance_mgr.get_user_points(user_id, company_id=company_id)
                 current_count = len(existing_points)
                 if current_count >= 10:
                     logger.info(f"Auto-learn: Bỏ qua vì user {user_name} (ID: {user_id}) đã có {current_count} ảnh đăng ký (giới hạn 10).")
                     # Tự động sửa lại vector_count cho tất cả các điểm của user này trong Qdrant
-                    attendance_mgr.update_vector_count(user_id, current_count)
+                    attendance_mgr.update_vector_count(user_id, current_count, company_id=company_id)
                     return
 
                 # 1. Trích xuất và nén ảnh khuôn mặt
@@ -423,6 +426,12 @@ class FaceTracker:
 
         threading.Thread(target=task, daemon=True).start()
 
+    def notify_saved_attendance(self, entry, image_blob):
+        if entry["user_id"] in {"Unknown", "Spoof"}:
+            return
+        image = cv2.imdecode(np.frombuffer(image_blob, dtype=np.uint8), cv2.IMREAD_COLOR) if image_blob else None
+        self._send_user_webhook(entry["user_id"], entry["user_name"], entry["status"], image=image, company_id=entry["company_id"])
+
     def _save_log_with_bbox(self, frame, face, user_id, user_name, score, is_known=True, status=None, company_id=None, unknown_attempt=0, birthday="N/A", vector_count=0, f_data=None):
         """Sync state check + Async heavy saving."""
         if frame is None: return None, None
@@ -430,7 +439,7 @@ class FaceTracker:
         from src.attendance.mongodb_mgr import mongo_db
         # 1. IMMEDIATE SYNC CHECK (Fast)
         final_status = status
-        if is_known and status is None:
+        if is_known and status is None and not mongo_db.device:
             final_status = mongo_db.get_attendance_status(user_id, company_id=company_id) 
             
         # --- BLOCK NEW SAVES IF IN COOLDOWN ---
@@ -444,7 +453,6 @@ class FaceTracker:
         if is_known and final_status in ['IN', 'OUT']:
             from src.config import DATA_DIR
             import os
-            import time
             
             safe_id = "".join(x for x in str(user_id) if x.isalnum())
             lock_file = DATA_DIR / f"attendance_lock_{safe_id}.txt"
@@ -465,6 +473,8 @@ class FaceTracker:
             except Exception:
                 pass
         
+        captured_at = datetime.now(timezone.utc)
+
         # 2. Visual Prep: SMART CROP (Maintain 16:9 Aspect Ratio centered on face)
         log_frame = frame.copy()
         bbox = face.bbox.astype(int)
@@ -517,7 +527,10 @@ class FaceTracker:
         save_frame = log_frame[y1:y2, x1:x2]
         
         # --- PRE-CALCULATE DIRECTORIES AND VIDEO PATH (SYNC) ---
-        raw_company_name = mongo_db.get_company_name(company_id) if company_id else "unknown_company"
+        if mongo_db.device:
+            raw_company_name = company_id or mongo_db.device["company_id"]
+        else:
+            raw_company_name = mongo_db.get_company_name(company_id) if company_id else "unknown_company"
         company_folder = remove_accents(raw_company_name).replace(" ", "_")
         
         if is_known:
@@ -545,8 +558,7 @@ class FaceTracker:
                 from src.utils.string_utils import remove_accents
                 
                 # Draw Labels exactly as detection frame
-                ts, _ = time_mgr.get_formatted_time()
-                current_time_str = ts.split(' ')[-1] # Only HH:MM:SS
+                current_time_str = captured_at.astimezone(time_mgr.tz).strftime("%H:%M:%S")
                 
                 # Main Name Label
                 main_label = f"{remove_accents(user_name)} ({score:.2f})"
@@ -601,7 +613,7 @@ class FaceTracker:
                         self.recent_snapshots.pop(0)
 
                 # Actual DB Commit
-                mongo_db.log_attendance(user_id, user_name, status=final_status, frame=final_img, company_id=company_id, unknown_attempt=unknown_attempt, video_path=video_path)
+                mongo_db.log_attendance(user_id, user_name, status=final_status, frame=final_img, company_id=company_id, unknown_attempt=unknown_attempt, video_path=video_path, captured_at=captured_at)
             except Exception as e:
                 logger.error(f"Async log error: {e}")
 
@@ -783,7 +795,10 @@ class FaceTracker:
                     if norm > 0: avg_emb = avg_emb / norm
 
                     logger.debug(f"[Recognition] ID={matched_id}: Processing with {GATHER_FRAMES} frames")
-                    vote = attendance_mgr.recognize(avg_emb)
+                    if mongo_db.device:
+                        vote = attendance_mgr.recognize(avg_emb, company_id=mongo_db.camera_company_ids)
+                    else:
+                        vote = attendance_mgr.recognize(avg_emb)
                     
                     # Reset accumulator
                     f_data['gathering_embeddings'] = []
@@ -846,6 +861,7 @@ class FaceTracker:
                             f_data['user_data'] = user_data
                         else:
                             target_cid = user_data.get('company_id') or active_company
+                            employee_key = (target_cid, user_id)
                             
                             # Check session-based cooldown for UI (support special user cooldown)
                             in_cooldown = False
@@ -855,15 +871,15 @@ class FaceTracker:
                             else:
                                 cooldown_seconds = RecognitionConfig.COOLDOWN_SECONDS
                             
-                            if not RecognitionConfig.TEST_MODE and user_id in self.user_cooldowns:
-                                elapsed = current_time - self.user_cooldowns[user_id]
+                            if not RecognitionConfig.TEST_MODE and employee_key in self.user_cooldowns:
+                                elapsed = current_time - self.user_cooldowns[employee_key]
                                 if elapsed < cooldown_seconds and cooldown_seconds > 0:
                                     in_cooldown = True
 
                             if in_cooldown:
                                 f_data['status'] = 'COOLDOWN'
                                 f_data['user_data'] = user_data
-                                f_data['cooldown_remaining'] = int(cooldown_seconds - (current_time - self.user_cooldowns[user_id]))
+                                f_data['cooldown_remaining'] = int(cooldown_seconds - (current_time - self.user_cooldowns[employee_key]))
                                 # Gửi Telegram cho cooldown (kèm ảnh)
                                 self._send_telegram_alert(
                                     "TRANG THAI COOLDOWN", 
@@ -880,10 +896,11 @@ class FaceTracker:
                             else:
                                 f_data['status'] = 'RECOGNIZED'
                                 f_data['user_data'] = user_data
-                                self.user_cooldowns[user_id] = current_time
+                                self.user_cooldowns[employee_key] = current_time
                                 _, status = self._save_log_with_bbox(frame, face, user_id, user_name, user_data.get('score', 0.0),
                                                                        company_id=target_cid, birthday=user_data.get('birthday', 'N/A'), vector_count=user_data.get('vector_count', 0), f_data=f_data)
-                                self._send_user_webhook(user_id, user_name, status, is_unknown=False, image=frame)
+                                if not mongo_db.device:
+                                    self._send_user_webhook(user_id, user_name, status, is_unknown=False, image=frame)
 
                             if user_data.get('vector_count', 0) < 10:
                                 self._auto_learn_face(frame, face, user_id, user_name, user_data.get('birthday', 'N/A'), target_cid, attendance_mgr)
@@ -950,12 +967,12 @@ class FaceTracker:
                     
                     if data['status'] in ['COOLDOWN', 'RECOGNIZED', 'RECOGNIZED_SILENT']:
                         name = remove_accents(u_d.get('name'))
-                        uid = u_d.get('user_id')
+                        employee_key = (u_d.get('company_id') or active_company, u_d.get('user_id'))
                         
                         if data['status'] == 'RECOGNIZED_SILENT':
                             face.name = name # JUST THE NAME, silent mode
-                        elif uid in self.user_cooldowns:
-                            elapsed = current_time - self.user_cooldowns[uid]
+                        elif employee_key in self.user_cooldowns:
+                            elapsed = current_time - self.user_cooldowns[employee_key]
                             remain_sec = int(max(0, RecognitionConfig.COOLDOWN_SECONDS - elapsed))
                             if remain_sec > 0:
                                 if remain_sec >= 60:

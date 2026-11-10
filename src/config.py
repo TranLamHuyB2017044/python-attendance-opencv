@@ -111,20 +111,32 @@ class CameraConfig:
         except Exception:
             return empty
 
+    RTSP_SETTING_KEYS = (
+        "camera_ip", "camera_port", "camera_user", "camera_pass",
+        "camera_rtsp_path", "camera_rtsp_url",
+    )
+    WATCHED_SETTING_KEYS = RTSP_SETTING_KEYS + (
+        "camera_roi", "detection_cooldown", "anti_spoofing_enabled",
+        "enable_telegram_notif", "recognition_threshold", "gather_frames",
+    )
+
     @classmethod
-    def resolve_rtsp_url_for_company(cls, mongo_db, company_id: str) -> str:
+    def resolve_rtsp_url_for_company(cls, mongo_db, company_id: str, settings=None) -> str:
         """
         Đọc cấu hình camera theo company_id (trùng key username trong MongoDB settings).
         Dùng chung cho service, GUI và hot-reload.
         """
         cid = (company_id or "").strip()
 
+        if settings is None:
+            settings = mongo_db.get_settings(cls.RTSP_SETTING_KEYS, cid)
+
         # Ưu tiên field rời (ip/port/user/pass/path) — cập nhật từ xa chỉ cần đổi camera_ip
-        ip = mongo_db.get_setting("camera_ip", None, username=cid)
-        port = mongo_db.get_setting("camera_port", None, username=cid)
-        user = mongo_db.get_setting("camera_user", None, username=cid)
-        pwd = mongo_db.get_setting("camera_pass", None, username=cid)
-        path = mongo_db.get_setting("camera_rtsp_path", None, username=cid)
+        ip = settings.get("camera_ip", None)
+        port = settings.get("camera_port", None)
+        user = settings.get("camera_user", None)
+        pwd = settings.get("camera_pass", None)
+        path = settings.get("camera_rtsp_path", None)
 
         if ip and user and pwd:
             if not path:
@@ -137,7 +149,7 @@ class CameraConfig:
             )
             return url
 
-        full_url = (mongo_db.get_setting("camera_rtsp_url", None, username=cid) or "").strip()
+        full_url = (settings.get("camera_rtsp_url", None) or "").strip()
         if full_url.lower().startswith("rtsp://"):
             logger.info(
                 f"CameraConfig.resolve: company_id={cid} | "
@@ -163,7 +175,7 @@ class CameraConfig:
         return url
 
     @classmethod
-    def load_from_mongodb(cls, mongo_db):
+    def load_from_mongodb(cls, mongo_db, settings=None):
         """
         Fetch latest camera settings from MongoDB and update the static config.
         This allows the app and background service to be configured via the Management UI.
@@ -174,7 +186,9 @@ class CameraConfig:
             logger.info(f"CameraConfig.load_from_mongodb: COMPANY_ID từ .env = {cid}")
 
             # Sử dụng resolve_rtsp_url_for_company để lấy URL đúng theo đúng logic chính thức
-            resolved_url = cls.resolve_rtsp_url_for_company(mongo_db, cid)
+            if settings is None:
+                settings = mongo_db.get_settings(cls.WATCHED_SETTING_KEYS, cid)
+            resolved_url = cls.resolve_rtsp_url_for_company(mongo_db, cid, settings=settings)
             cls.RTSP_URL = resolved_url
             
             # Cập nhật các trường riêng lẻ từ URL đã resolve
@@ -187,21 +201,21 @@ class CameraConfig:
                 cls.RTSP_PATH = creds["path"]
             
             # 4. Update Recognition & Cooldown Settings
-            cooldown_sec = mongo_db.get_setting("detection_cooldown", str(RecognitionConfig.COOLDOWN_SECONDS), username=cid)
+            cooldown_sec = settings.get("detection_cooldown", str(RecognitionConfig.COOLDOWN_SECONDS))
             RecognitionConfig.COOLDOWN_SECONDS = int(cooldown_sec)
             
             # Anti-spoofing config
-            anti_spoofing = mongo_db.get_setting("anti_spoofing_enabled", str(RecognitionConfig.ANTI_SPOOFING_ENABLED), username=cid)
+            anti_spoofing = settings.get("anti_spoofing_enabled", str(RecognitionConfig.ANTI_SPOOFING_ENABLED))
             RecognitionConfig.ANTI_SPOOFING_ENABLED = str(anti_spoofing).lower() == "true"
 
             # Telegram config (cho phép bật tắt từ xa)
-            telegram_enabled = mongo_db.get_setting("enable_telegram_notif", str(TelegramConfig.ENABLED), username=cid)
+            telegram_enabled = settings.get("enable_telegram_notif", str(TelegramConfig.ENABLED))
             TelegramConfig.ENABLED = str(telegram_enabled).lower() == "true"
 
 
             # Recognition threshold — điều chỉnh từ xa để tăng/giảm độ chính xác
             # Key MongoDB: "recognition_threshold", VD: "0.65"
-            threshold_str = mongo_db.get_setting("recognition_threshold", str(RecognitionConfig.THRESHOLD), username=cid)
+            threshold_str = settings.get("recognition_threshold", str(RecognitionConfig.THRESHOLD))
             try:
                 RecognitionConfig.THRESHOLD = float(threshold_str)
             except (ValueError, TypeError):
@@ -209,14 +223,14 @@ class CameraConfig:
 
             # Gather frames — số frame tích lũy trước khi nhận diện
             # Key MongoDB: "gather_frames", VD: "1" (nhanh) hoặc "5" (chính xác hơn)
-            gather_str = mongo_db.get_setting("gather_frames", str(RecognitionConfig.GATHER_FRAMES), username=cid)
+            gather_str = settings.get("gather_frames", str(RecognitionConfig.GATHER_FRAMES))
             try:
                 RecognitionConfig.GATHER_FRAMES = max(1, int(gather_str))  # Tối thiểu 1
             except (ValueError, TypeError):
                 logger.warning(f"Invalid gather_frames from MongoDB: '{gather_str}', keeping current: {RecognitionConfig.GATHER_FRAMES}")
 
             # ROI Configuration
-            roi_str = mongo_db.get_setting("camera_roi", "", username=cid)
+            roi_str = settings.get("camera_roi", "")
             try:
                 if roi_str and len(roi_str.split(',')) == 4:
                     cls.ROI = tuple(map(int, roi_str.split(',')))
@@ -300,6 +314,7 @@ class AuthServiceConfig:
     SYSTEM_ID: str = os.getenv("SYSTEM_ID", "attendance_system")
     SYSTEM_NAME: str = os.getenv("SYSTEM_NAME", "FACE AI CHECKING")
     SYSTEM_REGISTER: str = os.getenv("SYSTEM_REGISTER", "")
+    LICENSE_CONFIG_PATH: str = os.getenv("LICENSE_CONFIG_PATH", str(DATA_DIR / "license_config.json"))
     CURRENT_USER_ID: int = 1  # Global session tracking for reporting
 
 
@@ -319,10 +334,17 @@ class LogConfig:
     ENABLE_CONSOLE: bool = os.getenv("ENABLE_CONSOLE_LOG", "true").lower() == "true"
 
 
+class AttendanceBackendConfig:
+    """Connection settings for the private attendance API."""
+
+    URL = os.getenv("ATTENDANCE_BACKEND_URL", "http://127.0.0.1:8001").rstrip("/")
+    INTEGRATION_TOKEN = os.getenv("ATTENDANCE_INTEGRATION_TOKEN", "").strip()
+    INTEGRATION_COMPANY = os.getenv("ATTENDANCE_INTEGRATION_COMPANY", "").strip()
+    EXTERNAL_API_TOKEN = os.getenv("ATTENDANCE_EXTERNAL_API_TOKEN", "").strip()
+
+
 class MongoDbConfig:
-    """MongoDB configuration."""
-    CONNECTION_STRING: str = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
-    DATABASE_NAME: str = os.getenv("MONGODB_DB", "attendance_system")
+    """Company scope for attendance data."""
     COMPANY_ID: str = os.getenv("COMPANY_ID", "default_company")
 
 
@@ -407,7 +429,9 @@ class ReportSystemConfig:
 
     @classmethod
     def is_enabled(cls) -> bool:
-        """Returns True if the Report System URL is configured."""
+        """Returns True if the Report System is enabled and URL is configured."""
+        if os.getenv("ENABLE_REPORT_SERVICE", "false").lower() not in ("true", "1", "yes"):
+            return False
         return bool(cls.base_url())
 
     # Backward compat: keep BASE_URL as property-like fallback
@@ -430,6 +454,7 @@ __all__ = [
     "ApiConfig",
     "LogConfig",
     "AuthServiceConfig",
+    "AttendanceBackendConfig",
     "MongoDbConfig",
     "WebhookConfig",
     "TelegramConfig",

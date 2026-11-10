@@ -36,6 +36,9 @@ _LOG_PANEL_RATIO = 0.25          # 25% chiều rộng màn hình
 
 
 def main():
+    from src.utils.single_instance import force_single_instance
+
+    force_single_instance("CameraService")
     setup_logger()
     warnings.filterwarnings("ignore", category=FutureWarning)
     logger.info("Starting Auto-Start Camera Detection...")
@@ -47,10 +50,16 @@ def main():
     start_polling()
 
     try:
+        from src.attendance.mongodb_mgr import mongo_db
+
+        mongo_db.activate_camera()
+        mongo_db.load_camera_config()
         face_rec   = FaceRecognition()
         attendance = QdrantAttendanceManager()
         camera     = RTSPCamera()
         tracker    = FaceTracker(threshold_seconds=2.0)
+        mongo_db.attendance_notification = tracker.notify_saved_attendance
+        mongo_db.outbox.start()
         daily_recorder = DailyVideoRecorder()
     except Exception as e:
         logger.critical(f"Khoi tao that bai: {e}")
@@ -78,7 +87,6 @@ def main():
 
                 frame_skip_count += 1
                 if frame_skip_count % PROCESS_EVERY_N != 0:
-                    ai_queue.task_done()
                     continue
 
                 detected = face_rec.detect_and_extract(ai_frame, max_faces=RecognitionConfig.MAX_FACES)
@@ -150,6 +158,7 @@ def main():
             if not ai_queue.empty():
                 try:
                     ai_queue.get_nowait()
+                    ai_queue.task_done()
                 except Exception:
                     pass
 
